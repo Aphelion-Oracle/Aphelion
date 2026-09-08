@@ -1,0 +1,117 @@
+# Aphelion node configuration.
+#
+# Copy to `aphelion.toml` and edit. Secrets are never stored here: the file
+# names the environment variable to read, so this file can live in a private
+# repository without becoming a credential.
+#
+# Precedence: built-in defaults < this file < environment variables.
+# Print the effective result with `aphelion-node show-config`.
+
+[node]
+# Free-form operator label, attached to logs and metrics.
+name = "aphelion-node-1"
+# Ed25519 signing key; create it with `aphelion-node keygen`.
+# This is the node's on-chain identity. Back it up before bonding stake.
+key_path = "./node-key.json"
+
+
+[network]
+rpc_url            = "https://soroban-testnet.stellar.org"
+network_passphrase = "Test SDF Network ; September 2015"
+# Network name as the `stellar` CLI knows it.
+network            = "testnet"
+
+# Deployed contract ids. Fill these in after running scripts/deploy.sh.
+registry_contract   = "C..."
+aggregator_contract = "C..."
+
+# Stellar account that pays for submission transactions. Deliberately separate
+# from the signing key above: it can be rotated or shared with a relayer
+# without ever being able to sign a price.
+submitter_account    = "G..."
+submitter_secret_env = "APHELION_STELLAR_SECRET"
+
+
+[database]
+# Name of the environment variable holding the Postgres URL.
+url_env         = "DATABASE_URL"
+max_connections = 10
+# Raw observations older than this are pruned hourly.
+retention       = "30d"
+
+
+[api]
+# Read-only. Nothing here can change what the node publishes.
+bind            = "0.0.0.0:8080"
+metrics_enabled = true
+
+
+[engine]
+# How often a round is composed. Set this at or slightly above the aggregator's
+# `min_round_interval`, or submissions are rejected as too frequent.
+round_interval = "60s"
+# How often each source is polled. Faster than the round, so a round always has
+# fresh observations to work with.
+poll_interval  = "10s"
+# Observations older than this are ignored when a round is composed.
+max_observation_age = "120s"
+
+# Below this many surviving sources, the node signs nothing. Publishing a price
+# backed by one exchange is how an oracle launders an outage into consensus.
+min_sources_per_feed = 2
+# A source further than this from the cross-source median is discarded (10%).
+max_source_deviation_bps = 1000
+
+# Publish when the price has moved more than this since the last submission...
+submit_deviation_bps = 25
+# ...or when this much time has passed, whichever comes first. Movement alone
+# would leave consumers unable to tell "unchanged" from "this node is dead".
+heartbeat = "300s"
+
+# Refuse to sign if the node's clock disagrees with ledger time by more than
+# this. A skewed clock produces submissions the contract rejects outright.
+max_clock_skew = "30s"
+
+
+[sources]
+# The three venues needing no credentials are on by default.
+binance  = true
+kraken   = true
+coinbase = true
+# CoinGecko is an aggregator, not an exchange: it partly resells venues already
+# polled above, so enabling it adds correlation as well as coverage. Useful for
+# long-tail assets the exchanges do not list.
+coingecko = false
+# coingecko_key_env = "COINGECKO_API_KEY"
+timeout = "5s"
+
+
+# ---------------------------------------------------------------------------
+# Feeds. Each maps this node's feed id to the symbol every venue uses for it.
+# A source with no entry simply does not cover that feed.
+# ---------------------------------------------------------------------------
+
+[[feeds]]
+id = "BTC_USD"
+# Confidence half-width floor, in basis points. The node publishes the wider of
+# this and what its sources' actual disagreement implies.
+confidence_bps = 50
+sources = { binance = "BTCUSDT", kraken = "XBTUSD", coinbase = "BTC-USD" }
+
+[[feeds]]
+id = "ETH_USD"
+confidence_bps = 50
+sources = { binance = "ETHUSDT", kraken = "ETHUSD", coinbase = "ETH-USD" }
+
+[[feeds]]
+id = "XLM_USD"
+# Wider floor: XLM books are thinner than BTC's, so honest disagreement between
+# venues is larger and claiming BTC-level precision would be misleading.
+confidence_bps = 200
+sources = { binance = "XLMUSDT", kraken = "XLMUSD", coinbase = "XLM-USD" }
+
+[[feeds]]
+id = "USDC_USD"
+# A stablecoin peg should be tight; a wide confidence here is itself a signal.
+confidence_bps = 10
+sources = { kraken = "USDCUSD", coinbase = "USDC-USD" }

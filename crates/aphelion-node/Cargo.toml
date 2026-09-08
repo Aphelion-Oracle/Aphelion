@@ -1,0 +1,42 @@
+[package]
+name = "aphelion-node"
+description = "Aphelion oracle node: fetches prices from exchanges, aggregates them, signs the result and submits it to the Soroban aggregator contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "aphelion-node"
+
+[[bin]]
+name = "aphelion-node"
+path = "src/main.rs"
+
+[dependencies]
+aphelion-core = { workspace = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+ed25519-dalek = { workspace = true }
+futures = { workspace = true }
+hex = { workspace = true }
+humantime-serde = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+rust_decimal = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+toml = { workspace = true }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,54 @@
+{
+  "_comment": [
+    "Canonical Aphelion price-signing payloads. Asserted from both the off-chain",
+    "implementation (crates/aphelion-core/src/message.rs) and the on-chain mirror",
+    "(contracts/aggregator/src/message.rs). If these two ever disagree, every",
+    "submission is rejected by ed25519_verify, so treat a failure here as a",
+    "consensus-breaking bug, not a flaky test.",
+    "Regenerate with: python3 scripts/gen_test_vectors.py"
+  ],
+  "domain_separator": "APHELION_PRICE_V1",
+  "message_len": 117,
+  "cases": [
+    {
+      "name": "btc_usd_typical",
+      "aggregator_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "feed": "BTC_USD",
+      "price_raw": "6423155000000",
+      "timestamp": 1735689600,
+      "confidence_bps": 25,
+      "nonce": 42,
+      "message_hex": "415048454c494f4e5f50524943455f563111111111111111111111111111111111111111111111111111111111111111114254435f555344000000000000000000000000000000000000000000000000000000000000000000000005d781df42c0000000006774858000000019000000000000002a"
+    },
+    {
+      "name": "xlm_usd_sub_dollar",
+      "aggregator_hex": "3f9a2b7c81d045e6aa1234567890abcdef0011223344556677889900aabbccdd",
+      "feed": "XLM_USD",
+      "price_raw": "12500000",
+      "timestamp": 1735689660,
+      "confidence_bps": 200,
+      "nonce": 1,
+      "message_hex": "415048454c494f4e5f50524943455f56313f9a2b7c81d045e6aa1234567890abcdef0011223344556677889900aabbccdd584c4d5f5553440000000000000000000000000000000000000000000000000000000000000000000000000000bebc2000000000677485bc000000c80000000000000001"
+    },
+    {
+      "name": "max_length_feed_id",
+      "aggregator_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "feed": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "price_raw": "100000000",
+      "timestamp": 0,
+      "confidence_bps": 0,
+      "nonce": 0,
+      "message_hex": "415048454c494f4e5f50524943455f56310000000000000000000000000000000000000000000000000000000000000000414141414141414141414141414141414141414141414141414141414141414100000000000000000000000005f5e1000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "large_price_and_nonce",
+      "aggregator_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "feed": "ETH_USD",
+      "price_raw": "999999999999999999",
+      "timestamp": 4102444800,
+      "confidence_bps": 10000,
+      "nonce": 18446744073709551615,
+      "message_hex": "415048454c494f4e5f50524943455f5631ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff4554485f5553440000000000000000000000000000000000000000000000000000000000000000000de0b6b3a763ffff00000000f486570000002710ffffffffffffffff"
+    }
+  ]
+}

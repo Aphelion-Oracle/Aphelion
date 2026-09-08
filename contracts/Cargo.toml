@@ -1,0 +1,34 @@
+# Soroban contracts.
+#
+# A separate workspace from the repository root on purpose: these crates target
+# wasm32 and pin `soroban-sdk`, while the node targets the host and pins tokio,
+# sqlx and reqwest. Keeping one lockfile for both would make a routine bump on
+# either side able to break the other.
+[workspace]
+resolver = "2"
+members = ["registry", "aggregator", "slashing", "consumer-example"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/aphelion-oracle/aphelion"
+
+[workspace.dependencies]
+soroban-sdk = "27.0.6"
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true
+
+# Tests run natively, and the release profile above is tuned for wasm size
+# rather than for a readable failure.
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

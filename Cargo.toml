@@ -1,0 +1,53 @@
+# Root workspace: off-chain services.
+# The on-chain Soroban contracts live in their own workspace at `contracts/`
+# so that the wasm-targeted dependency graph never has to resolve against the
+# host-targeted one (tokio, sqlx, reqwest, ...).
+[workspace]
+resolver = "2"
+members = ["crates/aphelion-core", "crates/aphelion-node"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+license = "Apache-2.0"
+repository = "https://github.com/aphelion-oracle/aphelion"
+authors = ["Aphelion Contributors"]
+
+[workspace.dependencies]
+aphelion-core = { path = "crates/aphelion-core" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros", "ws"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+futures = "0.3"
+hex = "0.4"
+humantime-serde = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", default-features = false }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+rust_decimal = { version = "1", features = ["serde-with-float"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls", "postgres", "macros", "chrono", "migrate", "rust_decimal", "uuid",
+] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["trace", "cors", "timeout"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

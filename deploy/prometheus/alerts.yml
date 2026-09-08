@@ -1,0 +1,65 @@
+# Alerts an Aphelion operator actually wants to be woken for.
+#
+# Each one is scoped to a condition that costs the operator money, reputation or
+# both. Deliberately absent: alerts on individual source fetch failures, which
+# happen constantly as exchanges rate-limit and would train the on-call to
+# ignore the channel.
+
+groups:
+  - name: aphelion-node
+    rules:
+      - alert: AphelionNodeNotSubmitting
+        # Two heartbeats of silence. One missed heartbeat can be a slow ledger;
+        # two is a pattern, and reputation is already eroding by then.
+        expr: aphelion_seconds_since_submission > 600
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No submission for {{ $labels.feed }} in {{ $value | humanizeDuration }}"
+          description: >-
+            The node has not landed a price for this feed. Reputation decays on
+            missed rounds. Check /health and /v1/rounds on the node.
+
+      - alert: AphelionClockSkew
+        # A skewed clock produces submissions the contract rejects outright, so
+        # the node burns a fee per round discovering that.
+        expr: abs(aphelion_clock_skew_seconds) > 20
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node clock is {{ $value }}s from ledger time"
+          description: "Check NTP. Beyond max_clock_skew the node stops signing entirely."
+
+      - alert: AphelionReputationFalling
+        expr: aphelion_reputation < 4000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Node reputation is {{ $value }}"
+          description: >-
+            Below 3000 the node is jailed and its submissions carry zero weight.
+            Investigate whether its prices are diverging from the network.
+
+      - alert: AphelionSourcesDisagreeing
+        # The single best early warning that something is wrong upstream.
+        expr: aphelion_source_spread_bps > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sources for {{ $labels.feed }} disagree by {{ $value }} bps"
+          description: >-
+            Either a venue is publishing bad data, or the market is genuinely
+            dislocated. Check /v1/prices/{{ $labels.feed }} for the breakdown.
+
+      - alert: AphelionSubmissionsFailing
+        expr: rate(aphelion_submissions_total{outcome="error"}[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Submissions failing for {{ $labels.feed }}"
+          description: "Check RPC reachability, the submitter account's balance, and node registration."

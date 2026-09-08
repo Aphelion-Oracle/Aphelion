@@ -1,0 +1,75 @@
+# Local Aphelion stack: Postgres, the node, and the monitoring it expects.
+#
+# This is a development environment. It uses default credentials, exposes the
+# node's HTTP port on the host, and runs a single node -- which cannot reach
+# quorum on its own. It is for watching a node work, not for operating one.
+
+name: aphelion
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aphelion
+      POSTGRES_PASSWORD: aphelion
+      POSTGRES_DB: aphelion
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      # The node applies its own migrations at startup, so it must not start
+      # until Postgres is genuinely accepting connections.
+      test: ["CMD-SHELL", "pg_isready -U aphelion -d aphelion"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://aphelion:aphelion@postgres:5432/aphelion
+      APHELION_LOG: info,aphelion_node=debug
+      # Secrets are read from the environment, never from the config file.
+      APHELION_STELLAR_SECRET: ${APHELION_STELLAR_SECRET:-}
+      APHELION_REGISTRY_CONTRACT: ${APHELION_REGISTRY_CONTRACT:-}
+      APHELION_AGGREGATOR_CONTRACT: ${APHELION_AGGREGATOR_CONTRACT:-}
+    volumes:
+      - ./aphelion.toml:/etc/aphelion/aphelion.toml:ro
+      - ./node-key.json:/etc/aphelion/node-key.json:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - node
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: aphelion
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
