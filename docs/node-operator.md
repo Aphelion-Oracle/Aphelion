@@ -202,12 +202,74 @@ disagree with everyone else's — check whether one venue is dominating your
 median, and whether your `max_source_deviation_bps` is loose enough to be
 letting a bad venue through.
 
+Reputation moves in three ways, and the size of the move tells you which
+happened:
+
+| Change | Cause | Stake |
+| ---: | --- | --- |
+| **+50** | A submission inside the consensus band | Reward paid, if the pool can cover it |
+| **−25** | A missed round | Untouched |
+| **−500** | A submission outside `max_deviation_bps` of the round median | `outlier_slash` seized |
+
+A run of −25s is a connectivity or scheduling problem. A single −500 is a data
+problem: one of your venues was wrong and your filtering let it through. The
+`OutlierPenalized` event carries your price, the round median and the deviation
+in basis points, so you can check the arithmetic without replaying anything.
+
 Below 3 000 reputation the node is jailed and its submissions carry zero weight.
-Adding stake does **not** clear that; only correct submissions do.
+Adding stake does **not** clear that on its own; reputation has to recover too.
+That asymmetry is deliberate — capital buys a second chance, not a clean record.
+
+### Charged a missed round while you were down
+
+`sweep_absent` is permissionless: once your node has been silent longer than the
+aggregator's `absence_threshold`, anyone may pay a fee to charge you a missed
+round. A single stretch of silence can only be charged once however many times
+it is swept, so this costs 25 reputation per absence window, not per caller.
+
+It is not a punishment for downtime as such — downtime never seizes stake — but
+it is why a node left switched off keeps losing weight rather than sitting
+frozen at its old standing.
 
 ---
 
-## 7. Exiting
+## 7. If you are disputed
+
+The aggregator penalises what it can prove arithmetically, in the round itself.
+Anything else — a claim that you colluded across rounds, or fed a manipulated
+venue on purpose — goes through the slashing contract, where people decide it on
+evidence.
+
+What happens, and what you should do:
+
+1. **A dispute is filed** against your public key for a specific `(feed, round)`,
+   with a bond the reporter forfeits to you if it is dismissed, and a link to
+   their evidence. Watch for `DisputeOpened` on the slashing contract; the topic
+   is your public key.
+2. **The committee votes** for the configured voting period. If it does not reach
+   quorum, or the vote ties, the dispute is **dismissed** — silence is not
+   evidence against you.
+3. **Answer it.** Your case is your own records: `/v1/rounds` shows what you
+   signed and when, and `raw_prices` retains every observation that produced it.
+   This is the reason observations are retained at all, and the reason to check
+   that your retention window is longer than the dispute window before you need
+   it.
+4. **Appeal, once**, within the appeal window, if the committee finds against you
+   and you believe it is wrong. The appeal bond is larger than the dispute bond
+   and is returned only if the second vote changes the outcome.
+5. **Settlement** moves stake after the appeal window closes. Nothing moves
+   before then.
+
+Your stake stays reachable through the unbonding period even if you have asked
+to exit, which is the point of the delay.
+
+If a committee member is also the operator of the node under dispute, the
+contract refuses their vote. That is checked on chain rather than left to
+etiquette.
+
+---
+
+## 8. Exiting
 
 ```bash
 stellar contract invoke --id "$APHELION_REGISTRY_CONTRACT" ... -- \
