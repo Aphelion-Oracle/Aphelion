@@ -57,6 +57,8 @@ pub struct NodeJailed {
     #[topic]
     pub pubkey: BytesN<32>,
     pub reputation: u32,
+    /// Ledger time from which `release` becomes callable.
+    pub jailed_until: u64,
 }
 
 #[contractevent]

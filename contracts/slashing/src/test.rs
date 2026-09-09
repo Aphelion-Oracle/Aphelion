@@ -7,6 +7,7 @@ use aphelion_registry::{Registry, RegistryClient};
 
 const BASE_TIME: u64 = 1_735_689_600;
 const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
+const JAIL_PERIOD: u64 = 24 * 3600;
 const UNBONDING: u64 = 7 * 24 * 3600;
 
 const DISPUTE_BOND: i128 = 1_000_000_000; // 100 XLM
@@ -50,6 +51,7 @@ fn setup() -> Harness<'static> {
         &sac.address(),
         &MIN_STAKE,
         &UNBONDING,
+        &JAIL_PERIOD,
     );
 
     let committee: std::vec::Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();

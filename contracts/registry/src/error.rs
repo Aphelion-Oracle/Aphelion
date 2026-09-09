@@ -26,4 +26,11 @@ pub enum RegistryError {
     RewardPoolExhausted = 12,
     /// The slash pool cannot cover the requested payout.
     SlashPoolExhausted = 13,
+    /// A configuration value that could never work — a zero unbonding period,
+    /// a zero jail term.
+    InvalidConfig = 14,
+    /// `release` was called on a node that is not jailed.
+    NotJailed = 15,
+    /// `release` was called before the jail term was served.
+    StillJailed = 16,
 }

@@ -33,8 +33,9 @@ pub const REPUTATION_MISS: u32 = 25;
 pub enum NodeStatus {
     /// Registered, bonded and voting.
     Active,
-    /// Reputation has fallen below the jail threshold. Still bonded, but its
-    /// submissions carry no weight until reputation recovers.
+    /// Reputation has fallen below the jail threshold. Still bonded, but the
+    /// aggregator refuses its submissions entirely, so it cannot earn its way
+    /// out. Jail is served as time, not as work: see `Registry::release`.
     Jailed,
     /// Unbonding has been requested; the node no longer votes and its stake
     /// is released once the unbonding period elapses.
@@ -61,6 +62,9 @@ pub struct Node {
     /// Ledger time after which an exiting node may withdraw. Zero when not
     /// exiting.
     pub unbonding_until: u64,
+    /// Ledger time after which a jailed node may be released. Zero when not
+    /// jailed.
+    pub jailed_until: u64,
 }
 
 /// A node plus its derived voting weight, which is what callers actually want.
@@ -78,6 +82,7 @@ pub struct NodeView {
     pub total_rewards: i128,
     pub total_slashed: i128,
     pub unbonding_until: u64,
+    pub jailed_until: u64,
 }
 
 #[contracttype]
@@ -97,6 +102,15 @@ pub struct Config {
     /// bad price and immediately unbonds must still be slashable for as long
     /// as the misbehaviour can be noticed.
     pub unbonding_period: u64,
+    /// How long a jailed node must wait before it may be released.
+    ///
+    /// Should be shorter than `unbonding_period`. A jailed operator can always
+    /// unbond, wait, withdraw and register a fresh identity at the same
+    /// starting reputation; if serving the jail term took longer than that,
+    /// nobody would ever serve it, and the network would churn identities for
+    /// no reason. Jail has to be the cheaper of the two paths to mean
+    /// anything.
+    pub jail_period: u64,
 }
 
 #[contracttype]

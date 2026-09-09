@@ -155,6 +155,9 @@ those identities have behaved correctly for long enough to matter.
 Weight is captured **at submission time**, not read again at finalisation, so a
 reputation change mid-round cannot retroactively re-weight votes already cast.
 
+Jail is a floor, not a grave: a jailed node serves a fixed term and is then
+released to a newcomer's standing. See [Jail and release](#jail-and-release).
+
 ### Why the median
 
 The median is what makes a round survive a liar. Moving it requires controlling
@@ -261,7 +264,7 @@ repository, not the target architecture.
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
 | `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 44 |
-| `aphelion-registry` contract — identity, stake, reputation, slashing accounting | ✅ Implemented | 24 |
+| `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 33 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 50 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
@@ -273,7 +276,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-208 tests in total: 80 off-chain (`cargo test --workspace`) and 128 against the
+217 tests in total: 80 off-chain (`cargo test --workspace`) and 137 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`).
 
 The Byzantine simulation runs the real registry and aggregator together across
@@ -718,6 +721,64 @@ operators for hardware failure drives away exactly the people the network needs.
 An empty reward pool skips payment but never blocks consensus: a round that
 cannot pay is still a round that produced a correct price.
 
+### Jail and release
+
+A node whose reputation falls below 3 000 is **jailed**: still bonded, still on
+the record, but carrying zero voting weight.
+
+Zero weight is absolute. The aggregator refuses a zero-weight submission
+outright, so a jailed node cannot submit, cannot be recorded as successful, and
+cannot earn reputation back. "Recover by behaving" is not a path that exists for
+it — and neither is buying its way out, because jail begins exactly when
+reputation falls below the threshold, so no amount of stake can satisfy a
+condition written on reputation.
+
+What clears jail is time:
+
+```
+  reputation < 3 000  ─▶  Jailed, weight 0, jailed_until = now + jail_period
+                                    │
+                       ( term runs; the stake stays bonded )
+                                    │
+                          release() ─▶  Active again, reputation 5 000
+```
+
+`release` is permissionless — it only checks facts on the ledger, not
+judgements — and requires three of them: the node is jailed, the term is served,
+and the bond is still at or above the minimum. A node slashed below the minimum
+must top up before it can return, because coming back under-bonded would mean
+voting with less at risk than the network requires of everyone else.
+
+Release restores **exactly a newcomer's standing**, 5 000, and no more. That
+number is forced from both sides:
+
+- Anything **lower** would be pointless. An operator can always unbond,
+  withdraw, and register a fresh key at 5 000. If release returned less than
+  that, nobody would use it, and the network would churn identities — discarding
+  the history a dispute might need — for no benefit.
+- Anything **higher** would make jail cheaper than being new, which is the wrong
+  way round.
+
+So the price of jail is the wait, plus the loss of everything earned above a
+newcomer's standing. The stake stays bonded throughout, which is the point: the
+operator remains reachable for the whole term.
+
+Two bounds make `jail_period` a real penalty rather than a formality, and a
+deployment that violates either has misconfigured itself:
+
+| Bound | Why |
+| --- | --- |
+| Longer than the climb from 3 000 back to 5 000 (40 in-band rounds) | Otherwise dipping below the line is a shortcut, not a punishment |
+| Shorter than `unbonding_period` | Otherwise unbond-and-re-register is the faster way back, and nobody ever serves the term |
+
+The defaults — a one-day term against a seven-day unbonding period — satisfy
+both comfortably. `scripts/deploy.sh` refuses to deploy a set that does not.
+
+Unlike most parameters, `unbonding_period` and `jail_period` cannot be changed
+after `initialize`. Both are promises made to operators who bonded stake under
+them, and a governance key able to extend a jail term retroactively would be a
+governance key able to expropriate.
+
 ### Exit and accountability
 
 Unbonding is not instant. A node that requests an exit stops voting immediately,
@@ -829,8 +890,9 @@ decisions rather than the plumbing:
 - `aphelion-node::engine::aggregate` — that a broken exchange is excluded with a
   recorded reason, and that too few survivors means publishing nothing
 - `aphelion-node::signer` — that a testnet signature does not verify on mainnet
-- `aphelion-registry` — that the jail threshold is exact, that capital cannot buy
-  back reputation, and that downtime never seizes stake
+- `aphelion-registry` — that the jail threshold is exact, that capital can buy
+  back a bond but never a release, that serving the term returns a node to a
+  newcomer's standing and no further, and that downtime never seizes stake
 - `aphelion-aggregator::test` — that weight is captured when a vote is cast and
   not re-read at finalisation, that an outlier votes in the median but appears
   in no published statistic, and that a round nobody agreed on publishes nothing

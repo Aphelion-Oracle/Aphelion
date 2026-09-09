@@ -14,9 +14,13 @@
 # constructor.
 #
 # Everything this script decides is printed and confirmed before anything is
-# submitted. The parameters below are governance values, not constants: they
-# can be changed later with `set_config`, and the defaults here are deliberately
-# conservative rather than ambitious.
+# submitted. The defaults below are deliberately conservative rather than
+# ambitious. Most are governance values the admin can revise later -- the
+# aggregator's and the slashing contract's whole config via `set_config`, the
+# registry's admin, aggregator, slasher and minimum stake through their own
+# setters. The registry's unbonding period and jail term are the exception:
+# nothing can change them after `initialize`, because both are promises made to
+# nodes that already bonded stake under them. Choose those two carefully here.
 
 set -euo pipefail
 
@@ -38,6 +42,15 @@ MIN_STAKE="${APHELION_MIN_STAKE:-10000000000}"
 # Seven days. The window in which a dispute over a node's past submissions can
 # still reach its stake after it asks to leave.
 UNBONDING="${APHELION_UNBONDING:-604800}"
+# One day. What a jailed node waits before `release` returns it to a newcomer's
+# standing. Two bounds make this a real penalty rather than a formality:
+# comfortably longer than the ~40 rounds it takes an active node to climb from
+# the jail threshold back to a newcomer's reputation, so falling below the line
+# is never a shortcut; and shorter than UNBONDING, because an operator can
+# always unbond, withdraw and register a fresh key instead -- if serving the
+# term cost more than that, nobody would serve it and the network would churn
+# identities for nothing.
+JAIL_PERIOD="${APHELION_JAIL_PERIOD:-86400}"
 
 # -- aggregator ------------------------------------------------------------
 QUORUM="${APHELION_QUORUM:-3}"
@@ -80,6 +93,16 @@ command -v jq >/dev/null 2>&1 || {
     echo "error: jq is required to build the configuration arguments." >&2
     exit 69
 }
+
+# Checked here rather than on-chain because the contract cannot tell a
+# deliberate choice from a mistake, and both bounds are judgements about
+# incentives rather than invariants the registry could enforce.
+if (( JAIL_PERIOD >= UNBONDING )); then
+    echo "error: jail term ($JAIL_PERIOD s) must be shorter than the unbonding" >&2
+    echo "period ($UNBONDING s), or no operator would ever serve it: unbonding," >&2
+    echo "withdrawing and registering a fresh key would be the faster way back." >&2
+    exit 64
+fi
 
 if [[ ! -f "$WASM_DIR/aphelion_registry.wasm" ]]; then
     echo "No build artefacts found; building..."
@@ -124,6 +147,7 @@ Aphelion deployment
   token              : $TOKEN
   minimum stake      : $MIN_STAKE stroops
   unbonding period   : $UNBONDING seconds
+  jail term          : $JAIL_PERIOD seconds
   quorum             : $QUORUM nodes / $MIN_WEIGHT_BPS bps
   deviation band     : $MAX_DEVIATION_BPS bps
   round interval     : $MIN_ROUND_INTERVAL seconds
@@ -157,7 +181,8 @@ invoke "$REGISTRY" initialize \
     --slasher "$SLASHING" \
     --token "$TOKEN" \
     --min_stake "$MIN_STAKE" \
-    --unbonding_period "$UNBONDING"
+    --unbonding_period "$UNBONDING" \
+    --jail_period "$JAIL_PERIOD"
 
 echo "==> Initialising aggregator"
 AGGREGATOR_CONFIG="$(jq -nc \

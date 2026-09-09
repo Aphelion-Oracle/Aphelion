@@ -58,19 +58,25 @@ transaction fee carries no authority at all.
 
 | Function | Caller | Notes |
 | --- | --- | --- |
-| `initialize(admin, aggregator, slasher, token, min_stake, unbonding_period)` | Admin, once | Traps if already initialised, or if `min_stake <= 0` |
+| `initialize(admin, aggregator, slasher, token, min_stake, unbonding_period, jail_period)` | Admin, once | Traps if already initialised, if `min_stake <= 0`, or if either period is zero |
 | `set_aggregator(aggregator)` | Admin | Repoint after deployment |
 | `set_slasher(slasher)` | Admin | Repoint after deployment |
 | `set_min_stake(min_stake)` | Admin | Does not retroactively jail nodes below the new floor |
 | `set_admin(new_admin)` | Admin | |
 | `get_config()` | Anyone | |
 
+`unbonding_period` and `jail_period` have no setters. Both are promises made to
+operators who bonded stake under them, and a key able to lengthen a jail term
+after the fact would be a key able to expropriate. They are fixed at
+`initialize` and cannot be changed.
+
 ### Stake
 
 | Function | Caller | Notes |
 | --- | --- | --- |
 | `register(owner, pubkey, stake)` | The bonding account | Transfers `stake` to the contract. Starts at 5 000 reputation — half weight |
-| `add_stake(pubkey, amount)` | The node's owner | Releases jail only if reputation has *also* recovered |
+| `add_stake(pubkey, amount)` | The node's owner | Restores the bond. Does **not** clear jail — see `release` |
+| `release(pubkey)` | Anyone | Ends a served jail term. Traps unless the node is jailed, `jailed_until` has passed, and the bond is at or above `min_stake` |
 | `request_unbond(pubkey)` | The node's owner | Voting stops immediately; stake stays locked |
 | `withdraw(pubkey)` | The node's owner | Only after `unbonding_until`; returns what is left after any slashing |
 | `fund_rewards(from, amount)` | Anyone | Tops up the pool node rewards are paid from |
@@ -79,6 +85,15 @@ transaction fee carries no authority at all.
 Stake is **transferred**, not attested. Slashing is then arithmetic on funds the
 contract already holds rather than a claim against an account that may be empty
 by the time it matters.
+
+`release` is permissionless because all three of its conditions are facts on the
+ledger rather than judgements, and it restores reputation to exactly
+`STARTING_REPUTATION` — a newcomer's standing. It cannot return less, because an
+operator can always unbond, withdraw and register a fresh key to arrive there
+anyway; it must not return more, because that would make jail cheaper than being
+new. Note that capital cannot substitute for the wait: jail begins exactly when
+reputation falls below the threshold, so no top-up can satisfy a condition
+written on reputation.
 
 ### Called by the aggregator
 
@@ -283,6 +298,9 @@ Soroban returns these as `Error(Contract, #n)`.
 | 11 | `InvalidAmount` | |
 | 12 | `RewardPoolExhausted` | |
 | 13 | `SlashPoolExhausted` | |
+| 14 | `InvalidConfig` | A zero `unbonding_period` or `jail_period` |
+| 15 | `NotJailed` | `release` on a node that is not in jail |
+| 16 | `StillJailed` | `release` before `jailed_until` |
 
 ### Aggregator
 
