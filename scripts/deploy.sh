@@ -94,9 +94,15 @@ command -v jq >/dev/null 2>&1 || {
     exit 69
 }
 
-# Checked here rather than on-chain because the contract cannot tell a
-# deliberate choice from a mistake, and both bounds are judgements about
-# incentives rather than invariants the registry could enforce.
+# `Registry::initialize` refuses this combination too, and it is the authority:
+# a deployment script is a convenience, and nothing stops an operator invoking
+# the contract directly. Checked here as well so the failure arrives as a
+# sentence about incentives rather than as contract error #14 from inside a
+# transaction the operator has already paid for.
+#
+# The other bound -- that a jail term outlast the climb from the jail threshold
+# back to a newcomer's reputation -- stays here and only here. It depends on the
+# aggregator's round cadence, which the registry has no way to read.
 if (( JAIL_PERIOD >= UNBONDING )); then
     echo "error: jail term ($JAIL_PERIOD s) must be shorter than the unbonding" >&2
     echo "period ($UNBONDING s), or no operator would ever serve it: unbonding," >&2

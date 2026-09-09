@@ -82,7 +82,17 @@ impl Registry {
         // withdraw in the same ledger, which is the one thing the delay exists
         // to prevent. Everything downstream -- disputes especially -- assumes
         // stake is still reachable for a while after an exit is requested.
-        if unbonding_period == 0 || jail_period == 0 {
+        //
+        // A jail term at or beyond the unbonding period is the same failure
+        // read the other way: serving it would never be the fast way back,
+        // because unbonding, withdrawing and registering a fresh key would
+        // finish sooner. Nobody would ever serve a term, and the network would
+        // churn identities -- discarding exactly the history a dispute needs.
+        // The bound belongs here rather than only in `scripts/deploy.sh`: a
+        // deployment script is a convenience, and the contract is the one
+        // thing an operator can check for themselves before bonding stake
+        // against it.
+        if unbonding_period == 0 || jail_period == 0 || jail_period >= unbonding_period {
             panic_with_error!(&env, RegistryError::InvalidConfig);
         }
         admin.require_auth();

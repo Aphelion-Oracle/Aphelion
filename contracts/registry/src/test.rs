@@ -644,6 +644,51 @@ fn a_zero_unbonding_period_is_refused_at_deployment() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #14)")] // InvalidConfig
+fn a_jail_term_longer_than_the_unbonding_period_is_refused_at_deployment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let registry = RegistryClient::new(&env, &env.register(Registry, ()));
+
+    // If serving the term takes longer than exiting, nobody ever serves it:
+    // unbond, withdraw, register a fresh key at a newcomer's reputation, and
+    // the jail term has cost nothing but the identity it was attached to.
+    registry.initialize(
+        &admin,
+        &admin,
+        &admin,
+        &sac.address(),
+        &MIN_STAKE,
+        &UNBONDING,
+        &(UNBONDING + 1),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidConfig
+fn a_jail_term_equal_to_the_unbonding_period_is_refused_at_deployment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let registry = RegistryClient::new(&env, &env.register(Registry, ()));
+
+    // Equal is no better than longer: it makes the two paths back the same
+    // length, and one of them also refunds the stake.
+    registry.initialize(
+        &admin,
+        &admin,
+        &admin,
+        &sac.address(),
+        &MIN_STAKE,
+        &UNBONDING,
+        &UNBONDING,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidConfig
 fn a_zero_jail_term_is_refused_at_deployment() {
     let env = Env::default();
     env.mock_all_auths();
