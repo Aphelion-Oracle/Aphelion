@@ -260,9 +260,9 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 54 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 44 |
 | `aphelion-registry` contract — identity, stake, reputation, slashing accounting | ✅ Implemented | 24 |
-| `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 56 |
+| `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 50 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
@@ -272,6 +272,9 @@ repository, not the target architecture.
 | Mainnet deployment | 📋 Planned | — |
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
+
+208 tests in total: 80 off-chain (`cargo test --workspace`) and 128 against the
+contracts (`cargo test --manifest-path contracts/Cargo.toml`).
 
 The Byzantine simulation runs the real registry and aggregator together across
 multiple rounds with a mix of honest and dishonest nodes. The multi-node
