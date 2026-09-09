@@ -231,6 +231,27 @@ binds it to one deployment; the feed id binds it to one market; the timestamp
 lets the contract reject stale data; the nonce blocks replay inside the
 staleness window.
 
+The timestamp a node signs is the age of the **data**, not of the round: the
+oldest observation that actually contributed to the price, clamped to never run
+ahead of ledger time. Oldest, because a freshness check has to be answerable by
+the weakest input — one fast venue must not make four stale ones look current.
+Clamped, because a node with a fast clock would otherwise sign a timestamp in
+the ledger's future, which the aggregator rejects as drift.
+
+*Contributed* is the load-bearing word. A source discarded as an outlier is not
+part of what was published, so it does not date it. This matters because the two
+failures arrive together: a frozen venue reports an hour-old price and gets
+discarded for being wrong, in the same round, for the same underlying reason.
+Letting the discarded observation drag the signed timestamp backwards would
+understate the freshness of a price it played no part in — and past the
+aggregator's `max_staleness` it costs the node the entire submission: a rejected
+transaction, a burned nonce and a missed round, all for the age of data the
+round never used.
+
+This is the same rule the aggregator applies one level up, where `PriceData`
+carries the oldest contributing *node*'s timestamp. Both layers date a result by
+its weakest surviving input, and neither counts anything it threw away.
+
 Because the reference implementation is off chain (`aphelion-core`) and the
 mirror is on chain (`aphelion-aggregator`), the two are pinned together by
 shared test vectors in [`tests/vectors/price_message.json`](tests/vectors/price_message.json),
@@ -263,8 +284,8 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 44 |
-| `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 33 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 55 |
+| `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
@@ -276,8 +297,10 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-219 tests in total: 80 off-chain (`cargo test --workspace`) and 139 against the
-contracts (`cargo test --manifest-path contracts/Cargo.toml`).
+232 tests in total: 91 off-chain (`cargo test --workspace`) and 141 against the
+contracts (`cargo test --manifest-path contracts/Cargo.toml`). The Byzantine
+simulation's 6 tests live inside the aggregator crate, so its 52 and their 6 are
+reported as one figure of 58 by `cargo test`.
 
 The Byzantine simulation runs the real registry and aggregator together across
 multiple rounds with a mix of honest and dishonest nodes. The multi-node
@@ -611,8 +634,17 @@ sources        = { binance = "BTCUSDT", kraken = "XBTUSD", coinbase = "BTC-USD" 
 Configuration is validated at startup, and a config that could never work is a
 startup failure rather than a silent runtime one — a feed mapping fewer sources
 than `min_sources_per_feed`, a feed pointing at a disabled source, a round
-interval shorter than the poll interval, an account address where a contract
-address belongs.
+interval shorter than the poll interval, a `max_observation_age` at or below
+`poll_interval`, an account address where a contract address belongs.
+
+That last one is the least obvious and the worst to debug in production. An age
+limit no longer than one poll discards data the collector is still working on:
+the freshest observation is already a full interval old the instant before it is
+replaced, so every source reports, every observation is stored, and every round
+finds nothing it is allowed to use. The result is a starved feed whose venues
+are all visibly healthy. The check is a floor rather than a recommendation —
+one failed poll doubles the age of the freshest observation — so a usable
+setting is several intervals above it, as the `10s` / `120s` defaults above are.
 
 ### When the node publishes, and when it does not
 
@@ -643,6 +675,31 @@ auth layer.
 but has not composed a round in ten minutes is not healthy in any sense an
 on-call engineer cares about, so it returns 503 and pages somebody.
 
+It reaches that verdict by running the real aggregation, not by counting rows.
+Enough live sources is not the same as enough *usable* ones — four venues that
+disagree past `max_source_deviation_bps` are four healthy HTTP endpoints and no
+publishable price — so each feed reports both numbers:
+
+```json
+{
+  "feed": "BTC_USD",
+  "live_sources": 3,
+  "usable_sources": 1,
+  "required_sources": 2,
+  "seconds_since_last_submission": 412,
+  "healthy": false,
+  "reason": "feed `BTC_USD` has 1 usable source(s), need at least 2"
+}
+```
+
+`live_sources` counts venues that answered inside `max_observation_age`;
+`usable_sources` counts those that then survived outlier filtering. A gap
+between them points at disagreement rather than at an outage, which is a
+different call to make at 3am. When a feed is both short of sources *and*
+overdue, the `reason` names the sources: they are the cause and the silence is
+the symptom, and reporting the symptom first sends the operator to the chain to
+debug a problem that lives at the exchanges.
+
 ### Metrics
 
 | Metric | Meaning |
@@ -652,11 +709,22 @@ on-call engineer cares about, so it returns 503 and pages somebody.
 | `aphelion_source_price{source,feed}` | Latest price seen per venue |
 | `aphelion_source_spread_bps{feed}` | Highest-to-lowest source spread — the best early warning available |
 | `aphelion_local_price{feed}` | This node's aggregated price |
-| `aphelion_rounds_total{feed,outcome}` | Rounds by outcome |
+| `aphelion_rounds_total{feed,outcome}` | Rounds by outcome — `submitted`, `skipped_unchanged`, `skipped_no_data`, `dry_run`, `failed` |
+| `aphelion_round_errors_total{kind[,feed]}` | Failed rounds by error kind — see the note below |
+| `aphelion_round_duration_seconds` | Wall time from opening a round to submitting or skipping it |
 | `aphelion_submissions_total{feed,outcome}` | On-chain submissions by outcome |
 | `aphelion_clock_skew_seconds` | Node clock minus ledger clock |
 | `aphelion_reputation`, `aphelion_stake` | On-chain standing |
 | `aphelion_seconds_since_submission{feed}` | Time since this node last landed a price |
+
+`aphelion_round_errors_total` carries a `feed` label only when a feed is to
+blame. Two failures abort the whole tick before any feed is reached — an
+unreadable ledger time, and a clock too far from it — and those are labelled by
+`kind` alone, because no feed caused them. Aggregate with `sum by (kind)`; a
+`sum by (feed)` drops them into an empty bucket. The same two paths increment no
+`aphelion_rounds_total` at all, so a node with a bad clock shows as *silence* on
+a round-outcome panel rather than as failures — which is exactly why the error
+counter and `aphelion_clock_skew_seconds` are the ones worth alerting on.
 
 Suggested alerts: `aphelion_seconds_since_submission > 2 × heartbeat`,
 `aphelion_clock_skew_seconds` outside ±30, `aphelion_reputation < 4000`,
@@ -771,13 +839,24 @@ operator remains reachable for the whole term.
 Two bounds make `jail_period` a real penalty rather than a formality, and a
 deployment that violates either has misconfigured itself:
 
-| Bound | Why |
-| --- | --- |
-| Longer than the climb from 3 000 back to 5 000 (40 in-band rounds) | Otherwise dipping below the line is a shortcut, not a punishment |
-| Shorter than `unbonding_period` | Otherwise unbond-and-re-register is the faster way back, and nobody ever serves the term |
+| Bound | Why | Enforced by |
+| --- | --- | --- |
+| Longer than the climb from 3 000 back to 5 000 (40 in-band rounds) | Otherwise dipping below the line is a shortcut, not a punishment | `scripts/deploy.sh` |
+| Shorter than `unbonding_period` | Otherwise unbond-and-re-register is the faster way back, and nobody ever serves the term | `Registry::initialize` |
 
 The defaults — a one-day term against a seven-day unbonding period — satisfy
-both comfortably. `scripts/deploy.sh` refuses to deploy a set that does not.
+both comfortably.
+
+The split is deliberate. The second bound is a fact about two numbers the
+registry already holds, so the registry checks it: `initialize` panics with
+`InvalidConfig` on a `jail_period` at or above `unbonding_period`, and an
+operator can verify that for themselves before bonding stake, without trusting
+whatever script the deployer happened to run. The first bound depends on the
+aggregator's round cadence, which the registry cannot read, so it stays in the
+deployment script. `scripts/deploy.sh` checks both — the contract is the
+authority on the second, but a refusal that arrives as a sentence about
+incentives beats contract error #14 surfacing from inside a transaction the
+operator has already paid for.
 
 Unlike most parameters, `unbonding_period` and `jail_period` cannot be changed
 after `initialize`. Both are promises made to operators who bonded stake under
