@@ -57,6 +57,7 @@ dependencies = [
 name = "aphelion-slashing"
 version = "0.1.0"
 dependencies = [
+ "aphelion-registry",
  "soroban-sdk",
 ]
 

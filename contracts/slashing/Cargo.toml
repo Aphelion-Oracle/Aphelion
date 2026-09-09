@@ -1,5 +1,6 @@
 [package]
 name = "aphelion-slashing"
+description = "Aphelion dispute resolution: committee voting, appeals and slashing."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,3 +15,6 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# The registry is registered alongside the slashing contract in the tests so
+# that seizures and slash-pool payouts are exercised against the real thing.
+aphelion-registry = { path = "../registry" }
