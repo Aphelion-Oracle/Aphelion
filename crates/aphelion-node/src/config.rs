@@ -211,6 +211,22 @@ impl Config {
                 "engine.round_interval must not be shorter than engine.poll_interval".into(),
             ));
         }
+        // A freshly polled observation is already up to `poll_interval` old by
+        // the time the next one replaces it, so an age limit at or below that
+        // discards data the collector is still working on. The node would poll
+        // normally, store normally, and compose no rounds at all -- a starved
+        // feed whose sources are all reporting, which is a miserable thing to
+        // diagnose from the outside. It is the floor, not a recommendation:
+        // one failed poll doubles the age of the freshest observation, so a
+        // usable setting is several intervals above it.
+        if self.engine.max_observation_age <= self.engine.poll_interval {
+            return Err(NodeError::Config(format!(
+                "engine.max_observation_age ({:?}) must be longer than \
+                 engine.poll_interval ({:?}), or every observation is too old \
+                 to use by the time a round reads it",
+                self.engine.max_observation_age, self.engine.poll_interval,
+            )));
+        }
         if !self.network.registry_contract.starts_with('C')
             || !self.network.aggregator_contract.starts_with('C')
         {
@@ -399,6 +415,30 @@ sources = { binance = "BTCUSDT", kraken = "XBTUSD" }
         let bad = minimal_toml().replace(
             "aggregator_contract = \"CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"",
             "aggregator_contract = \"GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"",
+        );
+        assert!(parse(&bad).is_err());
+    }
+
+    #[test]
+    fn rejects_an_observation_window_the_collector_can_never_fill() {
+        // Polling once a minute while discarding anything over 30 seconds old:
+        // every source reports, every observation is stored, and every round
+        // finds nothing to use.
+        let bad = minimal_toml().replace(
+            "[database]",
+            "[database]\n\n[engine]\npoll_interval = \"60s\"\nmax_observation_age = \"30s\"",
+        );
+        let err = parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("max_observation_age"), "{err}");
+    }
+
+    #[test]
+    fn rejects_an_observation_window_exactly_one_poll_wide() {
+        // Equal is no better: the freshest observation is already the full
+        // interval old the instant before it is replaced.
+        let bad = minimal_toml().replace(
+            "[database]",
+            "[database]\n\n[engine]\npoll_interval = \"30s\"\nmax_observation_age = \"30s\"",
         );
         assert!(parse(&bad).is_err());
     }
