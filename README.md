@@ -260,23 +260,28 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 44 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 54 |
 | `aphelion-registry` contract — identity, stake, reputation, slashing accounting | ✅ Implemented | 24 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 56 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
-| Multi-node harness — several node processes against one deployment | 📋 Planned | — |
+| Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
+| Multi-node harness — several node *processes* against one deployment | 📋 Planned | — |
 | Testnet deployment | 📋 Planned | — |
 | Mainnet deployment | 📋 Planned | — |
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
 The Byzantine simulation runs the real registry and aggregator together across
-multiple rounds with a mix of honest and dishonest nodes. What it does *not*
-cover is several node processes running against one deployment, which is what
-the multi-node harness is for: everything above the contract boundary — RPC
-failures, clock drift between machines, two nodes racing to close the same
+multiple rounds with a mix of honest and dishonest nodes. The multi-node
+simulation does the same on the off-chain side, running several independently
+keyed signers against one in-memory network whose median is computed by the
+same function the contract mirrors.
+
+What neither covers is several node *processes*, each with its own database and
+RPC connection, racing each other for real. Everything at that level — a lost
+RPC endpoint, clock drift between machines, two nodes contending for the same
 round — is still only covered by unit tests.
 
 ---
@@ -829,6 +834,9 @@ decisions rather than the plumbing:
   upheld, and that a failed appeal pays the side it dragged back
 - `aphelion-consumer-example` — that a single-round crash cannot liquidate a
   solvent borrower, and a sustained one can
+- `aphelion-node` integration `multi_node` — that the median a node predicts
+  locally is the median the network publishes, and that one node's signature
+  authorises nothing under another node's key
 
 ### Contributing
 
