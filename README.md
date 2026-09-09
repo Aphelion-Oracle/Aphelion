@@ -309,7 +309,8 @@ aphelion/
 ├── scripts/                    Deployment, registration and vector generation
 ├── deploy/                     Prometheus and Grafana provisioning
 └── docs/
-    └── node-operator.md        Setup, daily operation and troubleshooting
+    ├── node-operator.md        Setup, daily operation and troubleshooting
+    └── contracts.md            Every contract function, error code and caller
 ```
 
 The two cargo workspaces are separate on purpose: the contracts target wasm32 and
@@ -484,6 +485,9 @@ impl Lending {
 not span the whole window you asked for. That is deliberate: a TWAP computed
 over a tenth of the requested window is not a conservative answer, it is a
 wrong one, and it is indistinguishable from a real one once returned.
+
+Every function, error code and caller is listed in
+[`docs/contracts.md`](docs/contracts.md).
 
 `PriceData` carries the price, the **oldest** contributing observation's
 timestamp, the contributing node count, the confidence half-width in basis
