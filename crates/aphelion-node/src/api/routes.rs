@@ -231,8 +231,7 @@ async fn price(
     State(state): State<AppState>,
     Path(feed): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let feed = FeedId::new(feed)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    let feed = FeedId::new(feed).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
 
     if state.config.feed(&feed).is_none() {
         return Err(ApiError(
@@ -328,5 +327,7 @@ async fn rounds(
 }
 
 async fn sources(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({ "sources": state.repo.source_health().await? })))
+    Ok(Json(
+        json!({ "sources": state.repo.source_health().await? }),
+    ))
 }

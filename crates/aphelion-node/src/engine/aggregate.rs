@@ -85,11 +85,12 @@ pub fn aggregate(
         .iter()
         .map(|o| WeightedSample::new(o.price.raw(), 10_000))
         .collect();
-    let provisional = weighted_median(&mut samples).ok_or_else(|| NodeError::InsufficientSources {
-        feed: feed.clone(),
-        available: 0,
-        required: params.min_sources,
-    })?;
+    let provisional =
+        weighted_median(&mut samples).ok_or_else(|| NodeError::InsufficientSources {
+            feed: feed.clone(),
+            available: 0,
+            required: params.min_sources,
+        })?;
 
     // Pass 2: filter, then re-median.
     let mut used = Vec::new();
@@ -156,7 +157,9 @@ pub fn aggregate(
 /// understating it is the dangerous direction.
 pub fn confidence_bps(agg: &Aggregated, configured_floor: u32) -> u32 {
     let observed = agg.spread_bps / 2;
-    configured_floor.max(observed).min(aphelion_core::BPS_DENOMINATOR)
+    configured_floor
+        .max(observed)
+        .min(aphelion_core::BPS_DENOMINATOR)
 }
 
 #[cfg(test)]
@@ -218,13 +221,19 @@ mod tests {
         // 50% away, both get dropped. Signing either would be a coin flip.
         let obs = vec![obs("binance", "64000.00"), obs("kraken", "32000.00")];
         let err = aggregate(&feed(), &obs, params()).unwrap_err();
-        assert!(matches!(err, NodeError::InsufficientSources { .. }), "{err}");
+        assert!(
+            matches!(err, NodeError::InsufficientSources { .. }),
+            "{err}"
+        );
     }
 
     #[test]
     fn refuses_a_single_source_outright() {
         let err = aggregate(&feed(), &[obs("binance", "64231.50")], params()).unwrap_err();
-        assert!(matches!(err, NodeError::InsufficientSources { available: 1, .. }));
+        assert!(matches!(
+            err,
+            NodeError::InsufficientSources { available: 1, .. }
+        ));
     }
 
     #[test]
@@ -260,7 +269,11 @@ mod tests {
         let tight = aggregate(&feed(), &tight, params()).unwrap();
         let wide = aggregate(&feed(), &wide, params()).unwrap();
 
-        assert_eq!(confidence_bps(&tight, 50), 50, "floor applies when sources agree");
+        assert_eq!(
+            confidence_bps(&tight, 50),
+            50,
+            "floor applies when sources agree"
+        );
         assert!(
             confidence_bps(&wide, 50) > 50,
             "confidence must widen when sources disagree"

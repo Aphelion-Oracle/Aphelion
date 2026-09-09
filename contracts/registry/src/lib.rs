@@ -144,13 +144,17 @@ impl Registry {
         if stake < config.min_stake {
             panic_with_error!(&env, RegistryError::StakeTooLow);
         }
-        if env.storage().persistent().has(&DataKey::Node(pubkey.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::Node(pubkey.clone()))
+        {
             panic_with_error!(&env, RegistryError::NodeAlreadyRegistered);
         }
 
         token::Client::new(&env, &config.token).transfer(
             &owner,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &stake,
         );
 
@@ -198,7 +202,7 @@ impl Registry {
 
         token::Client::new(&env, &config.token).transfer(
             &node.owner,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &amount,
         );
         node.stake += amount;
@@ -274,7 +278,9 @@ impl Registry {
                 remaining.push_back(key);
             }
         }
-        env.storage().instance().set(&DataKey::NodeIndex, &remaining);
+        env.storage()
+            .instance()
+            .set(&DataKey::NodeIndex, &remaining);
 
         Withdrawn {
             pubkey,
@@ -299,7 +305,7 @@ impl Registry {
 
         token::Client::new(&env, &config.token).transfer(
             &from,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &amount,
         );
         let pool: i128 = env
@@ -408,7 +414,13 @@ impl Registry {
     pub fn penalize(env: Env, pubkey: BytesN<32>, reputation_delta: u32, slash_amount: i128) {
         let config = Self::config(&env);
         config.aggregator.require_auth();
-        Self::apply_penalty(&env, pubkey, reputation_delta, slash_amount, symbol_short!("outlier"));
+        Self::apply_penalty(
+            &env,
+            pubkey,
+            reputation_delta,
+            slash_amount,
+            symbol_short!("outlier"),
+        );
     }
 
     /// Penalise a node following a resolved dispute. Callable only by the
@@ -416,7 +428,13 @@ impl Registry {
     pub fn slash(env: Env, pubkey: BytesN<32>, reputation_delta: u32, slash_amount: i128) {
         let config = Self::config(&env);
         config.slasher.require_auth();
-        Self::apply_penalty(&env, pubkey, reputation_delta, slash_amount, symbol_short!("dispute"));
+        Self::apply_penalty(
+            &env,
+            pubkey,
+            reputation_delta,
+            slash_amount,
+            symbol_short!("dispute"),
+        );
     }
 
     /// Pay seized stake out of the slash pool. Callable only by the slashing
@@ -601,8 +619,14 @@ impl Registry {
         if seized > 0 {
             node.stake -= seized;
             node.total_slashed += seized;
-            let pool: i128 = env.storage().instance().get(&DataKey::SlashPool).unwrap_or(0);
-            env.storage().instance().set(&DataKey::SlashPool, &(pool + seized));
+            let pool: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::SlashPool)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::SlashPool, &(pool + seized));
         }
 
         Self::maybe_jail(env, &mut node);

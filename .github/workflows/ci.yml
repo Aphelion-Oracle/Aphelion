@@ -1,0 +1,128 @@
+# Continuous integration.
+#
+# The jobs are split by what a failure means rather than by what is convenient
+# to run together. `consensus-vectors` is separate from `test` because a drift
+# between the off-chain and on-chain implementations of the signing payload or
+# the aggregation maths is a consensus break, not a failing test, and it should
+# be legible as such on the pull request.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo fmt --manifest-path contracts/Cargo.toml --all --check
+
+  clippy:
+    name: Lints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path contracts/Cargo.toml --all-targets -- -D warnings
+
+  test:
+    name: Off-chain tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  contracts:
+    name: Contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - run: cargo test --manifest-path contracts/Cargo.toml
+
+  wasm:
+    name: Contract wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: contracts
+      - name: Build every contract for the ledger
+        run: |
+          cargo build --manifest-path contracts/Cargo.toml \
+            --target wasm32v1-none --release
+      - name: Report sizes
+        run: |
+          echo "### Contract wasm sizes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Contract | Bytes |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | ---: |" >> "$GITHUB_STEP_SUMMARY"
+          for f in contracts/target/wasm32v1-none/release/*.wasm; do
+            printf '| %s | %s |\n' "$(basename "$f")" "$(stat -c%s "$f")" \
+              >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contracts-wasm
+          path: contracts/target/wasm32v1-none/release/*.wasm
+          if-no-files-found: error
+
+  consensus-vectors:
+    name: Consensus vectors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regenerate from the independent implementation
+        run: python3 scripts/gen_test_vectors.py
+      - name: The committed vectors must match what the generator produces
+        run: |
+          if ! git diff --quiet -- tests/vectors; then
+            echo "::error::The committed test vectors do not match" \
+                 "scripts/gen_test_vectors.py."
+            echo "A change to the signing payload or the aggregation maths is" \
+                 "consensus-breaking: regenerate the vectors in the same commit."
+            git --no-pager diff -- tests/vectors
+            exit 1
+          fi
+
+  audit:
+    name: Advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

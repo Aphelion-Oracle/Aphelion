@@ -81,7 +81,9 @@ impl Price {
         if int_part.is_empty() && frac_part.is_empty() {
             return Err(err());
         }
-        if !int_part.chars().all(|c| c.is_ascii_digit()) || !frac_part.chars().all(|c| c.is_ascii_digit()) {
+        if !int_part.chars().all(|c| c.is_ascii_digit())
+            || !frac_part.chars().all(|c| c.is_ascii_digit())
+        {
             return Err(err());
         }
         let int_val: i128 = if int_part.is_empty() {
@@ -151,7 +153,10 @@ mod tests {
     fn parses_plain_decimals() {
         assert_eq!(Price::parse_decimal("1").unwrap().raw(), PRICE_SCALE);
         assert_eq!(Price::parse_decimal("0.5").unwrap().raw(), PRICE_SCALE / 2);
-        assert_eq!(Price::parse_decimal("64231.55").unwrap().raw(), 6_423_155_000_000);
+        assert_eq!(
+            Price::parse_decimal("64231.55").unwrap().raw(),
+            6_423_155_000_000
+        );
     }
 
     #[test]

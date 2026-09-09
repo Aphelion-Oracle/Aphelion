@@ -1,4 +1,3 @@
-#![cfg(test)]
 //! The contract side of the shared signing vectors.
 //!
 //! `crates/aphelion-core/src/message.rs` asserts the same file. The vectors
@@ -16,7 +15,10 @@ use std::string::String;
 use crate::message::{price_message, DOMAIN_SEPARATOR, MESSAGE_LEN};
 
 fn hex_decode(s: &str) -> std::vec::Vec<u8> {
-    assert!(s.len() % 2 == 0, "hex string must have an even length");
+    assert!(
+        s.len().is_multiple_of(2),
+        "hex string must have an even length"
+    );
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
@@ -129,7 +131,10 @@ mod aggregation {
     }
 
     fn i128_of(v: &serde_json::Value) -> i128 {
-        v.as_str().expect("i128 vectors are strings").parse().unwrap()
+        v.as_str()
+            .expect("i128 vectors are strings")
+            .parse()
+            .unwrap()
     }
 
     fn expected(case: &serde_json::Value) -> Option<i128> {

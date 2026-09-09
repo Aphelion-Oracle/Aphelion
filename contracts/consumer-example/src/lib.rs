@@ -121,7 +121,7 @@ impl Vault {
         let config = Self::config(&env);
         token::Client::new(&env, &config.debt_token).transfer(
             &from,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &amount,
         );
         let liquidity = Self::liquidity(env.clone());
@@ -148,7 +148,7 @@ impl Vault {
 
         token::Client::new(&env, &config.collateral_token).transfer(
             &user,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &amount,
         );
 
@@ -202,7 +202,7 @@ impl Vault {
 
         token::Client::new(&env, &config.debt_token).transfer(
             &user,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &amount,
         );
         position.debt -= amount;
@@ -272,7 +272,7 @@ impl Vault {
         }
 
         let token_client = token::Client::new(&env, &config.debt_token);
-        token_client.transfer(&liquidator, &env.current_contract_address(), &repay_amount);
+        token_client.transfer(&liquidator, env.current_contract_address(), &repay_amount);
         token::Client::new(&env, &config.collateral_token).transfer(
             &env.current_contract_address(),
             &liquidator,
@@ -372,12 +372,7 @@ impl Vault {
 
     /// Value `collateral` (collateral-token units) in debt-token units at
     /// `price` (1e8-scaled USD per whole collateral unit).
-    fn collateral_in_debt_units(
-        env: &Env,
-        config: &Config,
-        collateral: i128,
-        price: i128,
-    ) -> i128 {
+    fn collateral_in_debt_units(env: &Env, config: &Config, collateral: i128, price: i128) -> i128 {
         let col_scale = Self::pow10(env, config.collateral_decimals);
         let debt_scale = Self::pow10(env, config.debt_decimals);
         collateral

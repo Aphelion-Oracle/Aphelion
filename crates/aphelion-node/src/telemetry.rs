@@ -15,7 +15,9 @@ pub fn init_tracing() {
     let json = std::env::var("APHELION_LOG_FORMAT").as_deref() == Ok("json");
     let registry = tracing_subscriber::registry().with(filter);
     if json {
-        registry.with(fmt::layer().json().with_current_span(true)).init();
+        registry
+            .with(fmt::layer().json().with_current_span(true))
+            .init();
     } else {
         registry.with(fmt::layer().with_target(true)).init();
     }

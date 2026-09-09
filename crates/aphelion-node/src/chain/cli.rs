@@ -117,7 +117,12 @@ impl CliChain {
     }
 
     /// Read-only call: simulated, never submitted, so it costs nothing.
-    async fn view(&self, contract: &str, func: &str, args: &[(&str, String)]) -> Result<serde_json::Value> {
+    async fn view(
+        &self,
+        contract: &str,
+        func: &str,
+        args: &[(&str, String)],
+    ) -> Result<serde_json::Value> {
         let mut cmd = self.base_args(contract);
         cmd.push("--send".into());
         cmd.push("no".into());
@@ -149,7 +154,9 @@ fn parse_json(stdout: &str) -> Result<serde_json::Value> {
     }
     serde_json::from_str(stdout).map_err(|e| {
         let snippet: String = stdout.chars().take(300).collect();
-        NodeError::Chain(format!("stellar CLI returned unparseable output ({e}): {snippet}"))
+        NodeError::Chain(format!(
+            "stellar CLI returned unparseable output ({e}): {snippet}"
+        ))
     })
 }
 
@@ -179,7 +186,9 @@ impl ChainClient for CliChain {
             .view(&self.network.aggregator_contract, "ledger_time", &[])
             .await?;
         as_u64(&value).ok_or_else(|| {
-            NodeError::Chain(format!("aggregator.ledger_time returned {value}, expected a u64"))
+            NodeError::Chain(format!(
+                "aggregator.ledger_time returned {value}, expected a u64"
+            ))
         })
     }
 
@@ -261,7 +270,11 @@ impl ChainClient for CliChain {
             reputation: value.get("reputation").and_then(as_u64).unwrap_or(0) as u32,
             status: value
                 .get("status")
-                .and_then(|v| v.as_str().map(str::to_string).or_else(|| Some(v.to_string())))
+                .and_then(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .or_else(|| Some(v.to_string()))
+                })
                 .unwrap_or_else(|| "unknown".into()),
             weight_bps: value.get("weight_bps").and_then(as_u64).unwrap_or(0) as u32,
             last_submission: value.get("last_submission").and_then(as_u64).unwrap_or(0),
@@ -273,7 +286,10 @@ impl ChainClient for CliChain {
             .view(
                 &self.network.aggregator_contract,
                 "last_nonce",
-                &[("pubkey", public_key_hex.to_string()), ("feed", feed.to_string())],
+                &[
+                    ("pubkey", public_key_hex.to_string()),
+                    ("feed", feed.to_string()),
+                ],
             )
             .await?;
         Ok(as_u64(&value).unwrap_or(0))
@@ -304,7 +320,10 @@ mod tests {
 
     #[test]
     fn accepts_both_json_shapes_soroban_uses_for_integers() {
-        assert_eq!(as_i128(&serde_json::json!("170141183460469231731")), Some(170141183460469231731));
+        assert_eq!(
+            as_i128(&serde_json::json!("170141183460469231731")),
+            Some(170141183460469231731)
+        );
         assert_eq!(as_i128(&serde_json::json!(42)), Some(42));
         assert_eq!(as_u64(&serde_json::json!("1735689600")), Some(1735689600));
         assert_eq!(as_u64(&serde_json::json!(1735689600)), Some(1735689600));

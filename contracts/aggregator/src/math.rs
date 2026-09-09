@@ -64,7 +64,7 @@ pub fn weighted_median(env: &Env, pairs: &Vec<(i128, u32)>) -> Option<i128> {
         let (value, weight) = sorted.get(i).unwrap();
         cumulative += weight as u128;
 
-        if total % 2 == 0 && cumulative == half {
+        if total.is_multiple_of(2) && cumulative == half {
             let next = if i + 1 < sorted.len() {
                 sorted.get(i + 1).unwrap().0
             } else {

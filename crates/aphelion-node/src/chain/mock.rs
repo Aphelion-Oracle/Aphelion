@@ -130,7 +130,13 @@ impl ChainClient for MockChain {
     }
 
     async fn latest_price(&self, feed: &FeedId) -> Result<Option<OnChainPrice>> {
-        Ok(self.state.lock().unwrap().prices.get(feed.as_str()).cloned())
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .prices
+            .get(feed.as_str())
+            .cloned())
     }
 
     async fn node_info(&self, _public_key_hex: &str) -> Result<Option<OnChainNode>> {
@@ -188,7 +194,11 @@ mod tests {
         chain.submit_price(&pk, &first).await.unwrap();
 
         let replay = signer.sign_price(&feed, Price::parse_decimal("100").unwrap(), 1000, 50, 1);
-        let err = chain.submit_price(&pk, &replay).await.unwrap_err().to_string();
+        let err = chain
+            .submit_price(&pk, &replay)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("NonceNotIncreasing"), "{err}");
     }
 
@@ -211,8 +221,17 @@ mod tests {
         let chain = MockChain::new(1000);
         let signer = signer();
         let feed = FeedId::new("BTC_USD").unwrap();
-        let sub = signer.sign_price(&feed, Price::parse_decimal("64231.55").unwrap(), 1000, 50, 1);
-        chain.submit_price(&signer.public_key_hex(), &sub).await.unwrap();
+        let sub = signer.sign_price(
+            &feed,
+            Price::parse_decimal("64231.55").unwrap(),
+            1000,
+            50,
+            1,
+        );
+        chain
+            .submit_price(&signer.public_key_hex(), &sub)
+            .await
+            .unwrap();
 
         let on_chain = chain.latest_price(&feed).await.unwrap().unwrap();
         assert_eq!(on_chain.price.to_string(), "64231.55000000");

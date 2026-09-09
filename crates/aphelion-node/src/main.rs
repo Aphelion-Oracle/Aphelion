@@ -25,7 +25,13 @@ use clap::{Parser, Subcommand};
 )]
 struct Cli {
     /// Path to the TOML configuration file.
-    #[arg(short, long, env = "APHELION_CONFIG", default_value = "aphelion.toml", global = true)]
+    #[arg(
+        short,
+        long,
+        env = "APHELION_CONFIG",
+        default_value = "aphelion.toml",
+        global = true
+    )]
     config: PathBuf,
 
     #[command(subcommand)]
@@ -121,8 +127,7 @@ async fn run() -> Result<()> {
             let config = Config::load(&cli.config)?;
             println!(
                 "{}",
-                toml::to_string_pretty(&config)
-                    .map_err(|e| NodeError::Config(e.to_string()))?
+                toml::to_string_pretty(&config).map_err(|e| NodeError::Config(e.to_string()))?
             );
             Ok(())
         }
@@ -144,10 +149,7 @@ async fn run() -> Result<()> {
             println!("public_key : {}", signer.public_key_hex());
             println!("message    : {}", submission.message.to_hex());
             println!("signature  : {}", submission.signature_hex());
-            println!(
-                "verifies   : {}",
-                submission.verify(&signer.public_key())
-            );
+            println!("verifies   : {}", submission.verify(&signer.public_key()));
             Ok(())
         }
 
@@ -302,7 +304,7 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
             .ok()
             .map(|c| async move { c.ledger_time().await.ok() });
         let now = match live {
-            Some(fut) => fut.await.unwrap_or_else(|| now_unix()),
+            Some(fut) => fut.await.unwrap_or_else(now_unix),
             None => now_unix(),
         };
         tracing::warn!("dry run: submissions are disabled");
@@ -372,9 +374,7 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
 
     // Bounded drain: a stuck task must not hold the process open forever, but
     // an in-flight submission deserves a chance to finish and be recorded.
-    let drain = async {
-        while tasks.join_next().await.is_some() {}
-    };
+    let drain = async { while tasks.join_next().await.is_some() {} };
     if tokio::time::timeout(std::time::Duration::from_secs(30), drain)
         .await
         .is_err()

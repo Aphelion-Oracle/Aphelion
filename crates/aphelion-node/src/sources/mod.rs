@@ -99,7 +99,12 @@ fn http_client(timeout: Duration) -> Result<reqwest::Client> {
 /// two sides read at different instants during a fast move. Publishing the mid
 /// of a crossed book is publishing a number no one could trade at, so it is
 /// rejected instead.
-pub(crate) fn mid_price(source: &'static str, feed: &FeedId, bid: Price, ask: Price) -> Result<Price> {
+pub(crate) fn mid_price(
+    source: &'static str,
+    feed: &FeedId,
+    bid: Price,
+    ask: Price,
+) -> Result<Price> {
     if !bid.is_positive() || !ask.is_positive() {
         return Err(NodeError::Source {
             venue: source,
@@ -194,7 +199,9 @@ mod tests {
     fn rejects_a_crossed_book() {
         let bid = Price::parse_decimal("101").unwrap();
         let ask = Price::parse_decimal("100").unwrap();
-        let err = mid_price("test", &feed(), bid, ask).unwrap_err().to_string();
+        let err = mid_price("test", &feed(), bid, ask)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("crossed book"), "{err}");
     }
 
@@ -202,7 +209,9 @@ mod tests {
     fn rejects_an_absurd_spread() {
         let bid = Price::parse_decimal("100").unwrap();
         let ask = Price::parse_decimal("200").unwrap();
-        let err = mid_price("test", &feed(), bid, ask).unwrap_err().to_string();
+        let err = mid_price("test", &feed(), bid, ask)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("spread"), "{err}");
     }
 

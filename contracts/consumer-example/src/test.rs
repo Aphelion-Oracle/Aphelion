@@ -1,4 +1,3 @@
-#![cfg(test)]
 //! End-to-end: a real registry, a real aggregator fed by real signed
 //! submissions, and this vault reading the result.
 //!
@@ -20,7 +19,7 @@ use aphelion_aggregator::{Aggregator, AggregatorClient, Config as OracleConfig};
 use aphelion_registry::{Registry, RegistryClient};
 
 const BASE_TIME: u64 = 1_735_689_600;
-const MIN_STAKE: i128 = 1_000_0000000;
+const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
 
 /// $0.40 per XLM, 1e8-scaled.
 const START_PRICE: i128 = 40_000_000;
@@ -130,8 +129,9 @@ fn setup() -> Harness<'static> {
     let collateral_admin = StellarAssetClient::new(&env, &collateral_address);
     let debt_admin = StellarAssetClient::new(&env, &debt_address);
 
-    let keys: std::vec::Vec<SigningKey> =
-        (1u8..=4).map(|i| SigningKey::from_bytes(&[i; 32])).collect();
+    let keys: std::vec::Vec<SigningKey> = (1u8..=4)
+        .map(|i| SigningKey::from_bytes(&[i; 32]))
+        .collect();
     for key in &keys {
         let owner = Address::generate(&env);
         collateral_admin.mint(&owner, &(MIN_STAKE * 3));
@@ -171,13 +171,7 @@ impl Harness<'_> {
         self.env.ledger().set_timestamp(now + seconds);
     }
 
-    fn message(
-        &self,
-        price: i128,
-        timestamp: u64,
-        conf: u32,
-        nonce: u64,
-    ) -> std::vec::Vec<u8> {
+    fn message(&self, price: i128, timestamp: u64, conf: u32, nonce: u64) -> std::vec::Vec<u8> {
         let mut buf = std::vec::Vec::with_capacity(117);
         buf.extend_from_slice(b"APHELION_PRICE_V1");
         buf.extend_from_slice(&self.aggregator_id);
@@ -305,8 +299,7 @@ fn borrowing_past_the_collateral_ratio_is_refused() {
 fn the_vault_cannot_lend_what_it_does_not_hold() {
     let h = setup();
     h.publish_run(START_PRICE, 6, 1);
-    h.vault
-        .deposit_collateral(&h.borrower, &(COLLATERAL * 2));
+    h.vault.deposit_collateral(&h.borrower, &(COLLATERAL * 2));
     h.vault.borrow(&h.borrower, &(LIQUIDITY + 1));
 }
 
@@ -315,8 +308,7 @@ fn the_vault_cannot_lend_what_it_does_not_hold() {
 fn collateral_backing_a_debt_cannot_be_withdrawn() {
     let h = setup();
     h.open_position();
-    h.vault
-        .withdraw_collateral(&h.borrower, &(COLLATERAL / 2));
+    h.vault.withdraw_collateral(&h.borrower, &(COLLATERAL / 2));
 }
 
 #[test]
@@ -364,8 +356,7 @@ fn a_twap_window_the_feed_cannot_cover_stops_the_vault_too() {
 fn a_healthy_position_cannot_be_liquidated() {
     let h = setup();
     h.open_position();
-    h.vault
-        .liquidate(&h.liquidator, &h.borrower, &1_000_000);
+    h.vault.liquidate(&h.liquidator, &h.borrower, &1_000_000);
 }
 
 #[test]
@@ -383,8 +374,7 @@ fn a_single_round_crash_does_not_liquidate_a_solvent_borrower() {
         h.vault.favourable_unit_price() > 30_000_000,
         "the TWAP has to still be carrying the pre-crash price"
     );
-    h.vault
-        .liquidate(&h.liquidator, &h.borrower, &1_000_000);
+    h.vault.liquidate(&h.liquidator, &h.borrower, &1_000_000);
 }
 
 #[test]
@@ -442,7 +432,8 @@ fn a_partial_liquidation_leaves_a_smaller_position_behind() {
     let next = h.open_position();
     h.publish_run(START_PRICE / 2, 5, next);
 
-    h.vault.liquidate(&h.liquidator, &h.borrower, &1_500_000_000);
+    h.vault
+        .liquidate(&h.liquidator, &h.borrower, &1_500_000_000);
 
     let position = h.vault.position(&h.borrower);
     assert_eq!(position.debt, BORROWED - 1_500_000_000);

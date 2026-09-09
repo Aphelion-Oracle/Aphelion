@@ -28,7 +28,11 @@ pub struct CoinGecko {
 
 impl CoinGecko {
     pub fn new(client: reqwest::Client, api_key: Option<String>) -> Self {
-        let base_url = if api_key.is_some() { PRO_URL } else { PUBLIC_URL };
+        let base_url = if api_key.is_some() {
+            PRO_URL
+        } else {
+            PUBLIC_URL
+        };
         Self {
             client,
             base_url: base_url.to_string(),
@@ -37,9 +41,9 @@ impl CoinGecko {
     }
 
     pub(crate) fn parse(feed: &FeedId, coin_id: &str, body: &serde_json::Value) -> Result<Quote> {
-        let entry = body
-            .get(coin_id)
-            .ok_or_else(|| source_err(NAME, feed, format!("response has no entry for `{coin_id}`")))?;
+        let entry = body.get(coin_id).ok_or_else(|| {
+            source_err(NAME, feed, format!("response has no entry for `{coin_id}`"))
+        })?;
 
         let price = entry
             .get("usd")

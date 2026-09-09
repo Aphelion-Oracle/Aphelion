@@ -45,7 +45,7 @@ pub fn weighted_median(samples: &mut [WeightedSample]) -> Option<i128> {
     let mut cumulative: u128 = 0;
     for (i, s) in samples.iter().enumerate() {
         cumulative += s.weight as u128;
-        if total % 2 == 0 && cumulative == half {
+        if total.is_multiple_of(2) && cumulative == half {
             // Exact tie: average with the next distinct sample.
             let next = samples.get(i + 1).map(|n| n.value).unwrap_or(s.value);
             return Some(midpoint(s.value, next));
@@ -151,7 +151,11 @@ pub fn time_weighted_average(
     let mut total_time: i128 = 0;
 
     for (i, &(ts, price)) in observations.iter().enumerate() {
-        let segment_end = observations.get(i + 1).map(|&(t, _)| t).unwrap_or(now).min(now);
+        let segment_end = observations
+            .get(i + 1)
+            .map(|&(t, _)| t)
+            .unwrap_or(now)
+            .min(now);
         let segment_start = ts.max(window_start);
         if segment_end <= segment_start {
             continue;
@@ -174,7 +178,10 @@ mod tests {
     use super::*;
 
     fn eq_weight(values: &[i128]) -> Vec<WeightedSample> {
-        values.iter().map(|&v| WeightedSample::new(v, 10_000)).collect()
+        values
+            .iter()
+            .map(|&v| WeightedSample::new(v, 10_000))
+            .collect()
     }
 
     #[test]
@@ -198,7 +205,10 @@ mod tests {
         let attacked = weighted_median(&mut attacked).unwrap();
 
         assert_eq!(baseline, 1000);
-        assert_eq!(attacked, 1000, "one Byzantine node must not move the median");
+        assert_eq!(
+            attacked, 1000,
+            "one Byzantine node must not move the median"
+        );
     }
 
     #[test]
@@ -241,7 +251,10 @@ mod tests {
             .collect();
         let sd = stddev(&v).expect("no overflow at realistic magnitudes");
         assert!(sd > 0, "a spread of cents must not round to a zero stddev");
-        assert!(sd < 500_000_000, "stddev should be well under a dollar, got {sd}");
+        assert!(
+            sd < 500_000_000,
+            "stddev should be well under a dollar, got {sd}"
+        );
     }
 
     #[test]
@@ -265,7 +278,10 @@ mod tests {
         // Price sits at 1000 for 59s, spikes to 10_000 for the final second.
         let obs = vec![(0u64, 1000i128), (59, 10_000)];
         let twap = time_weighted_average(&obs, 0, 60).unwrap();
-        assert!(twap < 1200, "a 1s spike should barely move a 60s TWAP, got {twap}");
+        assert!(
+            twap < 1200,
+            "a 1s spike should barely move a 60s TWAP, got {twap}"
+        );
     }
 
     #[test]
@@ -287,7 +303,10 @@ mod tests {
         }
 
         fn i128_of(v: &Value) -> i128 {
-            v.as_str().expect("i128 vectors are strings").parse().unwrap()
+            v.as_str()
+                .expect("i128 vectors are strings")
+                .parse()
+                .unwrap()
         }
 
         fn expected(case: &Value) -> Option<i128> {
@@ -301,9 +320,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|s| {
-                        WeightedSample::new(i128_of(&s[0]), s[1].as_u64().unwrap() as u32)
-                    })
+                    .map(|s| WeightedSample::new(i128_of(&s[0]), s[1].as_u64().unwrap() as u32))
                     .collect();
                 assert_eq!(
                     weighted_median(&mut samples),
@@ -326,7 +343,11 @@ mod tests {
                 // An empty set has no mean to deviate from; the vectors record
                 // that as absent rather than as zero.
                 let want = expected(case).or(if values.is_empty() { None } else { Some(0) });
-                let got = if values.is_empty() { None } else { stddev(&values) };
+                let got = if values.is_empty() {
+                    None
+                } else {
+                    stddev(&values)
+                };
                 assert_eq!(got, want, "stddev vector `{}` drifted", case["name"]);
             }
         }

@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use ed25519_dalek::{Signer, SigningKey};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
@@ -9,7 +7,7 @@ use crate::{Aggregator, AggregatorClient, Config, DataKey, PriceData};
 use aphelion_registry::{Registry, RegistryClient};
 
 const BASE_TIME: u64 = 1_735_689_600;
-const MIN_STAKE: i128 = 1_000_0000000;
+const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
 const UNBONDING: u64 = 7 * 24 * 3600;
 const PRICE_SCALE: i128 = 100_000_000;
 
@@ -26,12 +24,11 @@ struct Harness<'a> {
     registry: RegistryClient<'a>,
     token: TokenClient<'a>,
     token_admin: StellarAssetClient<'a>,
-    admin: Address,
     aggregator_id: [u8; 32],
     keys: std::vec::Vec<SigningKey>,
 }
 
-fn base_config(env: &Env, admin: &Address, registry: &Address, token: &Address) -> Config {
+fn base_config(admin: &Address, registry: &Address, token: &Address) -> Config {
     Config {
         admin: admin.clone(),
         registry: registry.clone(),
@@ -46,7 +43,7 @@ fn base_config(env: &Env, admin: &Address, registry: &Address, token: &Address) 
         absence_threshold: 600,
         reward_per_submission: 10,
         outlier_rep_penalty: 500,
-        outlier_slash: 1_0000000,
+        outlier_slash: 10_000_000, // 1 XLM
         history_len: 5,
         read_fee: 5,
     }
@@ -76,7 +73,7 @@ fn setup() -> Harness<'static> {
     );
 
     let aggregator = AggregatorClient::new(&env, &aggregator_id);
-    aggregator.initialize(&base_config(&env, &admin, &registry_id, &sac.address()));
+    aggregator.initialize(&base_config(&admin, &registry_id, &sac.address()));
     aggregator.set_feed(&Symbol::new(&env, feed()), &true, &300, &0);
 
     let id_bytes = crate::message::contract_id_bytes(&env, &aggregator_id).to_array();
@@ -93,7 +90,6 @@ fn setup() -> Harness<'static> {
         registry,
         token,
         token_admin,
-        admin,
         aggregator_id: id_bytes,
         keys,
     };
@@ -156,6 +152,9 @@ impl Harness<'_> {
         buf
     }
 
+    /// The general form: what was signed and what was sent can differ, which
+    /// is the whole point of several tests below.
+    #[allow(clippy::too_many_arguments)]
     fn submit_as(
         &self,
         node: usize,
@@ -217,7 +216,10 @@ fn a_round_closes_once_it_has_both_the_headcount_and_the_weight() {
     assert!(!h.submit(1, TRUE_PRICE, 1));
     assert!(h.price().is_none(), "nothing may publish before quorum");
 
-    assert!(h.submit(2, TRUE_PRICE, 1), "the third node closes the round");
+    assert!(
+        h.submit(2, TRUE_PRICE, 1),
+        "the third node closes the round"
+    );
 
     let price = h.price().expect("published");
     assert_eq!(price.price, TRUE_PRICE);
@@ -290,7 +292,7 @@ fn an_outlier_loses_reputation_and_stake_while_the_honest_are_paid() {
     let after_honest = h.registry.get_node(&honest).unwrap();
 
     assert_eq!(after_liar.reputation, before_liar.reputation - 500);
-    assert_eq!(after_liar.stake, before_liar.stake - 1_0000000);
+    assert_eq!(after_liar.stake, before_liar.stake - 10_000_000);
     assert!(after_honest.reputation > before_honest.reputation);
     assert_eq!(after_honest.total_rewards, 10);
 }
@@ -476,26 +478,13 @@ fn a_replayed_submission_is_rejected_even_while_still_fresh() {
     let signature = BytesN::from_array(&h.env, &h.keys[0].sign(&payload).to_bytes());
     let f = Symbol::new(&h.env, feed());
 
-    h.aggregator.submit_price(
-        &f,
-        &h.pubkey(0),
-        &TRUE_PRICE,
-        &now,
-        &25,
-        &1,
-        &signature,
-    );
+    h.aggregator
+        .submit_price(&f, &h.pubkey(0), &TRUE_PRICE, &now, &25, &1, &signature);
     // Byte-identical replay, inside the staleness window: the nonce is what
     // stops it, because the signature is perfectly valid.
-    let replay = h.aggregator.try_submit_price(
-        &f,
-        &h.pubkey(0),
-        &TRUE_PRICE,
-        &now,
-        &25,
-        &1,
-        &signature,
-    );
+    let replay =
+        h.aggregator
+            .try_submit_price(&f, &h.pubkey(0), &TRUE_PRICE, &now, &25, &1, &signature);
     assert!(replay.is_err());
 }
 
@@ -533,7 +522,14 @@ fn a_slightly_fast_clock_is_tolerated() {
     let now = h.env.ledger().timestamp();
     let id = h.aggregator_id;
     h.submit_as(0, &id, feed(), feed(), TRUE_PRICE, now + 29, 25, 1);
-    assert_eq!(h.aggregator.pending_round(&Symbol::new(&h.env, feed())).unwrap().submissions.len(), 1);
+    assert_eq!(
+        h.aggregator
+            .pending_round(&Symbol::new(&h.env, feed()))
+            .unwrap()
+            .submissions
+            .len(),
+        1
+    );
 }
 
 // -- round lifecycle --------------------------------------------------------
@@ -648,8 +644,7 @@ fn twap_refuses_a_window_the_history_cannot_cover() {
     h.advance(60);
     // One minute of history, asked for a day's average. A partial answer here
     // would be indistinguishable from a real one.
-    h.aggregator
-        .get_twap(&Symbol::new(&h.env, feed()), &86_400);
+    h.aggregator.get_twap(&Symbol::new(&h.env, feed()), &86_400);
 }
 
 #[test]
@@ -849,7 +844,7 @@ fn the_feed_index_lists_what_has_been_configured() {
         .set_feed(&Symbol::new(&h.env, "ETH_USD"), &true, &300, &0);
     let feeds = h.aggregator.feeds();
     assert_eq!(feeds.len(), 2);
-    assert!(feeds.contains(&Symbol::new(&h.env, feed())));
+    assert!(feeds.contains(Symbol::new(&h.env, feed())));
 }
 
 #[test]

@@ -249,7 +249,11 @@ impl Repo {
         row.map(LocalRoundRow::decode).transpose()
     }
 
-    pub async fn recent_rounds(&self, feed: Option<&FeedId>, limit: i64) -> Result<Vec<LocalRound>> {
+    pub async fn recent_rounds(
+        &self,
+        feed: Option<&FeedId>,
+        limit: i64,
+    ) -> Result<Vec<LocalRound>> {
         let rows = sqlx::query_as::<_, LocalRoundRow>(
             "SELECT id, feed_id, nonce, price_raw::text AS price_text, confidence_bps,
                     source_count, spread_bps, observed_at, status, tx_hash, error, created_at
@@ -311,11 +315,10 @@ impl Repo {
     /// Delete observations older than `retention`. Returns the row count.
     pub async fn prune(&self, retention: std::time::Duration) -> Result<i64> {
         let interval = format!("{} seconds", retention.as_secs());
-        let (removed,): (i64,) =
-            sqlx::query_as("SELECT prune_raw_prices($1::interval)")
-                .bind(interval)
-                .fetch_one(&self.pool)
-                .await?;
+        let (removed,): (i64,) = sqlx::query_as("SELECT prune_raw_prices($1::interval)")
+            .bind(interval)
+            .fetch_one(&self.pool)
+            .await?;
         Ok(removed)
     }
 }

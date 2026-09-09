@@ -120,7 +120,10 @@ mod tests {
             i128::from_be_bytes(b[81..97].try_into().unwrap()),
             m.price.raw()
         );
-        assert_eq!(u64::from_be_bytes(b[97..105].try_into().unwrap()), m.timestamp);
+        assert_eq!(
+            u64::from_be_bytes(b[97..105].try_into().unwrap()),
+            m.timestamp
+        );
         assert_eq!(u32::from_be_bytes(b[105..109].try_into().unwrap()), 25);
         assert_eq!(u64::from_be_bytes(b[109..117].try_into().unwrap()), 42);
     }

@@ -1,5 +1,3 @@
-#![cfg(test)]
-
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol, Vec};
@@ -8,13 +6,13 @@ use crate::{Config, Dispute, DisputeStatus, Slashing, SlashingClient};
 use aphelion_registry::{Registry, RegistryClient};
 
 const BASE_TIME: u64 = 1_735_689_600;
-const MIN_STAKE: i128 = 1_000_0000000;
+const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
 const UNBONDING: u64 = 7 * 24 * 3600;
 
-const DISPUTE_BOND: i128 = 100_0000000;
-const APPEAL_BOND: i128 = 300_0000000;
-const SLASH_AMOUNT: i128 = 500_0000000;
-const REPORTER_REWARD: i128 = 50_0000000;
+const DISPUTE_BOND: i128 = 1_000_000_000; // 100 XLM
+const APPEAL_BOND: i128 = 3_000_000_000; // 300 XLM
+const SLASH_AMOUNT: i128 = 5_000_000_000; // 500 XLM
+const REPORTER_REWARD: i128 = 500_000_000; // 50 XLM
 const VOTING_PERIOD: u64 = 3 * 24 * 3600;
 const APPEAL_PERIOD: u64 = 2 * 24 * 3600;
 
@@ -339,7 +337,10 @@ fn a_dismissed_dispute_hands_the_bond_to_the_operator_who_answered_it() {
     h.slashing.settle(&id);
 
     assert_eq!(h.token.balance(&h.reporter), reporter_before - DISPUTE_BOND);
-    assert_eq!(h.token.balance(&h.accused_owner), owner_before + DISPUTE_BOND);
+    assert_eq!(
+        h.token.balance(&h.accused_owner),
+        owner_before + DISPUTE_BOND
+    );
     assert_eq!(
         h.registry.get_node(&h.accused).unwrap().stake,
         stake_before,
@@ -448,7 +449,10 @@ fn a_failed_appeal_forfeits_its_bond_to_the_other_side() {
     h.advance(APPEAL_PERIOD + 1);
     h.slashing.settle(&id);
 
-    assert_eq!(h.token.balance(&h.accused_owner), owner_before - APPEAL_BOND);
+    assert_eq!(
+        h.token.balance(&h.accused_owner),
+        owner_before - APPEAL_BOND
+    );
     assert_eq!(
         h.token.balance(&h.reporter),
         reporter_before + DISPUTE_BOND + APPEAL_BOND + REPORTER_REWARD,

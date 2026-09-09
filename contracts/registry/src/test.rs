@@ -1,12 +1,10 @@
-#![cfg(test)]
-
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{Address, BytesN, Env};
 
-use crate::{Registry, RegistryClient, NodeStatus, JAIL_THRESHOLD, STARTING_REPUTATION};
+use crate::{NodeStatus, Registry, RegistryClient, JAIL_THRESHOLD, STARTING_REPUTATION};
 
-const MIN_STAKE: i128 = 1_000_0000000; // 1000 XLM in stroops
+const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
 const UNBONDING: u64 = 7 * 24 * 3600;
 
 struct Harness<'a> {
@@ -157,7 +155,10 @@ fn an_outlier_loses_far_more_than_a_good_round_gains() {
         h.registry.record_success(&pubkey, &0);
         rounds_to_recover += 1;
     }
-    assert_eq!(rounds_to_recover, 10, "recovery must be slower than defection");
+    assert_eq!(
+        rounds_to_recover, 10,
+        "recovery must be slower than defection"
+    );
 }
 
 #[test]
@@ -243,7 +244,10 @@ fn rewards_are_paid_from_the_pool_and_skipped_when_it_is_empty() {
         balance_before,
         "an empty pool must not stall consensus, only skip payment"
     );
-    assert_eq!(h.registry.get_node(&pubkey).unwrap().reputation, STARTING_REPUTATION + 50);
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().reputation,
+        STARTING_REPUTATION + 50
+    );
 
     // Funded pool: the reward is paid.
     let funder = h.funded_owner(reward * 10);
@@ -261,7 +265,10 @@ fn an_exiting_node_stops_voting_immediately() {
 
     h.registry.request_unbond(&pubkey);
 
-    assert_eq!(h.registry.get_node(&pubkey).unwrap().status, NodeStatus::Exiting);
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().status,
+        NodeStatus::Exiting
+    );
     assert_eq!(
         h.registry.weight_of(&pubkey),
         0,
@@ -319,7 +326,10 @@ fn topping_up_stake_releases_a_node_from_jail_but_not_its_record() {
     for _ in 0..5 {
         h.registry.penalize(&pubkey, &500, &0);
     }
-    assert_eq!(h.registry.get_node(&pubkey).unwrap().status, NodeStatus::Jailed);
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().status,
+        NodeStatus::Jailed
+    );
 
     // Reputation is still below the threshold, so capital alone changes nothing.
     h.registry.add_stake(&pubkey, &MIN_STAKE);
@@ -333,7 +343,10 @@ fn topping_up_stake_releases_a_node_from_jail_but_not_its_record() {
     for _ in 0..40 {
         h.registry.record_success(&pubkey, &0);
     }
-    assert_eq!(h.registry.get_node(&pubkey).unwrap().status, NodeStatus::Active);
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().status,
+        NodeStatus::Active
+    );
 }
 
 #[test]
@@ -374,7 +387,10 @@ fn misses_erode_weight_without_slashing() {
 
     let node = h.registry.get_node(&pubkey).unwrap();
     assert_eq!(node.status, NodeStatus::Jailed);
-    assert_eq!(node.total_slashed, 0, "downtime is not theft; it must not cost stake");
+    assert_eq!(
+        node.total_slashed, 0,
+        "downtime is not theft; it must not cost stake"
+    );
     assert_eq!(node.consecutive_misses, 81);
 }
 
@@ -414,7 +430,8 @@ fn seized_stake_leaves_the_pool_only_through_the_slashing_contract() {
     h.registry.slash(&pubkey, &0, &(MIN_STAKE / 2));
     assert_eq!(h.registry.slash_pool(), MIN_STAKE / 2);
 
-    h.registry.pay_from_slash_pool(&beneficiary, &(MIN_STAKE / 4));
+    h.registry
+        .pay_from_slash_pool(&beneficiary, &(MIN_STAKE / 4));
 
     assert_eq!(h.token.balance(&beneficiary), MIN_STAKE / 4);
     assert_eq!(h.registry.slash_pool(), MIN_STAKE / 4);

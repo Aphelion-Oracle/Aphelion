@@ -84,7 +84,9 @@ impl Slashing {
         }
 
         env.storage().instance().set(&DataKey::Config, &config);
-        env.storage().instance().set(&DataKey::Committee, &committee);
+        env.storage()
+            .instance()
+            .set(&DataKey::Committee, &committee);
         env.storage()
             .instance()
             .set(&DataKey::DisputeCounter, &0u64);
@@ -120,7 +122,9 @@ impl Slashing {
             panic_with_error!(&env, SlashingError::AlreadyCommitteeMember);
         }
         committee.push_back(member.clone());
-        env.storage().instance().set(&DataKey::Committee, &committee);
+        env.storage()
+            .instance()
+            .set(&DataKey::Committee, &committee);
 
         CommitteeChanged {
             member,
@@ -197,7 +201,7 @@ impl Slashing {
 
         token::Client::new(&env, &config.token).transfer(
             &reporter,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &config.dispute_bond,
         );
 
@@ -368,7 +372,7 @@ impl Slashing {
 
         token::Client::new(&env, &config.token).transfer(
             &appellant,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &config.appeal_bond,
         );
 
@@ -486,7 +490,9 @@ impl Slashing {
     // -- reads --------------------------------------------------------------
 
     pub fn get_dispute(env: Env, dispute_id: u64) -> Option<Dispute> {
-        env.storage().persistent().get(&DataKey::Dispute(dispute_id))
+        env.storage()
+            .persistent()
+            .get(&DataKey::Dispute(dispute_id))
     }
 
     /// How a member voted in the dispute's current voting round, if they have.

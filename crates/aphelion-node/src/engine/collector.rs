@@ -104,7 +104,12 @@ impl Collector {
                             .set(quote.price.to_f64());
 
                             if let Err(e) = repo
-                                .record_observation(&feed, source.name(), quote.price, quote.observed_at)
+                                .record_observation(
+                                    &feed,
+                                    source.name(),
+                                    quote.price,
+                                    quote.observed_at,
+                                )
                                 .await
                             {
                                 tracing::error!(

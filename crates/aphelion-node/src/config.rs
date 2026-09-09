@@ -289,22 +289,54 @@ impl Default for EngineConfig {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_network_name() -> String { "testnet".into() }
-fn default_secret_env() -> String { "APHELION_STELLAR_SECRET".into() }
-fn default_database_url_env() -> String { "DATABASE_URL".into() }
-fn default_max_connections() -> u32 { 10 }
-fn default_retention() -> Duration { Duration::from_secs(60 * 60 * 24 * 30) }
-fn default_round_interval() -> Duration { Duration::from_secs(60) }
-fn default_poll_interval() -> Duration { Duration::from_secs(10) }
-fn default_max_observation_age() -> Duration { Duration::from_secs(120) }
-fn default_min_sources() -> usize { 2 }
-fn default_max_source_deviation_bps() -> u32 { 1_000 }
-fn default_submit_deviation_bps() -> u32 { 25 }
-fn default_heartbeat() -> Duration { Duration::from_secs(300) }
-fn default_max_clock_skew() -> Duration { Duration::from_secs(30) }
-fn default_source_timeout() -> Duration { Duration::from_secs(5) }
-fn default_confidence_bps() -> u32 { 50 }
+fn default_true() -> bool {
+    true
+}
+fn default_network_name() -> String {
+    "testnet".into()
+}
+fn default_secret_env() -> String {
+    "APHELION_STELLAR_SECRET".into()
+}
+fn default_database_url_env() -> String {
+    "DATABASE_URL".into()
+}
+fn default_max_connections() -> u32 {
+    10
+}
+fn default_retention() -> Duration {
+    Duration::from_secs(60 * 60 * 24 * 30)
+}
+fn default_round_interval() -> Duration {
+    Duration::from_secs(60)
+}
+fn default_poll_interval() -> Duration {
+    Duration::from_secs(10)
+}
+fn default_max_observation_age() -> Duration {
+    Duration::from_secs(120)
+}
+fn default_min_sources() -> usize {
+    2
+}
+fn default_max_source_deviation_bps() -> u32 {
+    1_000
+}
+fn default_submit_deviation_bps() -> u32 {
+    25
+}
+fn default_heartbeat() -> Duration {
+    Duration::from_secs(300)
+}
+fn default_max_clock_skew() -> Duration {
+    Duration::from_secs(30)
+}
+fn default_source_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+fn default_confidence_bps() -> u32 {
+    50
+}
 
 #[cfg(test)]
 mod tests {
@@ -332,8 +364,7 @@ sources = { binance = "BTCUSDT", kraken = "XBTUSD" }
     }
 
     fn parse(toml_str: &str) -> Result<Config> {
-        let cfg: Config = toml::from_str(toml_str)
-            .map_err(|e| NodeError::Config(e.to_string()))?;
+        let cfg: Config = toml::from_str(toml_str).map_err(|e| NodeError::Config(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -358,10 +389,7 @@ sources = { binance = "BTCUSDT", kraken = "XBTUSD" }
 
     #[test]
     fn rejects_a_feed_pointing_at_a_disabled_source() {
-        let bad = minimal_toml().replace(
-            "[database]",
-            "[database]\n\n[sources]\nbinance = false",
-        );
+        let bad = minimal_toml().replace("[database]", "[database]\n\n[sources]\nbinance = false");
         let err = parse(&bad).unwrap_err().to_string();
         assert!(err.contains("unknown or disabled"), "{err}");
     }

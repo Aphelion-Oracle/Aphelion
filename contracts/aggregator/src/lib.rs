@@ -185,6 +185,10 @@ impl Aggregator {
     ///
     /// Deliberately unauthenticated at the transaction level. See the module
     /// documentation.
+    ///
+    /// Nine arguments rather than a struct: every one of them is covered by
+    /// the signature, and a struct parameter would invite a caller to build it
+    /// from a different source than the bytes that were signed.
     #[allow(clippy::too_many_arguments)]
     pub fn submit_price(
         env: Env,
@@ -459,7 +463,7 @@ impl Aggregator {
         let config = Self::load_config(&env);
         token::Client::new(&env, &config.token).transfer(
             &from,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &amount,
         );
         let key = DataKey::Balance(from);

@@ -267,6 +267,9 @@ mod tests {
             message: mainnet.sign_price(&feed, price, 100, 10, 1).message,
             signature: on_testnet.signature,
         };
-        assert!(!replayed.verify(&public), "contract id must be bound into the signature");
+        assert!(
+            !replayed.verify(&public),
+            "contract id must be bound into the signature"
+        );
     }
 }

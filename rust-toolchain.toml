@@ -1,4 +1,8 @@
 [toolchain]
 channel = "1.91.0"
 components = ["rustfmt", "clippy"]
-targets = ["wasm32-unknown-unknown"]
+# `wasm32-unknown-unknown` is no longer usable for Soroban: since Rust 1.82 it
+# enables reference-types and multi-value, which the Soroban environment does
+# not accept, and soroban-sdk refuses to build for it. `wasm32v1-none` is the
+# supported target from Rust 1.84 onwards.
+targets = ["wasm32v1-none"]

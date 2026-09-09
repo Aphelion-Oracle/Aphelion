@@ -193,8 +193,7 @@ impl RoundRunner {
             }
         }
 
-        metrics::gauge!("aphelion_local_price", "feed" => feed.to_string())
-            .set(agg.price.to_f64());
+        metrics::gauge!("aphelion_local_price", "feed" => feed.to_string()).set(agg.price.to_f64());
         metrics::gauge!("aphelion_source_spread_bps", "feed" => feed.to_string())
             .set(agg.spread_bps as f64);
 
@@ -228,9 +227,9 @@ impl RoundRunner {
             .min(ledger_time);
 
         let nonce = self.repo.next_nonce(feed).await?;
-        let submission =
-            self.signer
-                .sign_price(feed, agg.price, observed_at, confidence, nonce);
+        let submission = self
+            .signer
+            .sign_price(feed, agg.price, observed_at, confidence, nonce);
 
         // Verify our own signature before paying to publish it. Cheap, and it
         // turns a silent on-chain rejection into a loud local error.
