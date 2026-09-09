@@ -30,6 +30,7 @@
 //! costing them the first.
 
 mod error;
+pub mod events;
 mod types;
 
 #[cfg(test)]
@@ -39,8 +40,13 @@ pub use error::RegistryError;
 pub use types::*;
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, symbol_short, token, Address, BytesN, Env,
-    Symbol, Vec,
+    contract, contractimpl, panic_with_error, symbol_short, token, Address, BytesN, Env, Symbol,
+    Vec,
+};
+
+use events::{
+    NodeJailed, NodePenalized, NodeRegistered, NodeUnjailed, RewardsFunded, SlashPoolPaid,
+    StakeAdded, UnbondingStarted, Withdrawn,
 };
 
 #[contract]
@@ -171,8 +177,13 @@ impl Registry {
         index.push_back(pubkey.clone());
         env.storage().instance().set(&DataKey::NodeIndex, &index);
 
-        env.events()
-            .publish((symbol_short!("registerd"), pubkey), (owner, stake));
+        NodeRegistered {
+            pubkey,
+            owner,
+            stake,
+            reputation: STARTING_REPUTATION,
+        }
+        .publish(&env);
     }
 
     /// Add to an existing bond. Raises the cost of misbehaving, and is the
@@ -203,8 +214,12 @@ impl Registry {
         }
         Self::save_node(&env, &node);
 
-        env.events()
-            .publish((symbol_short!("stake_add"), pubkey), amount);
+        StakeAdded {
+            pubkey,
+            amount,
+            total_stake: node.stake,
+        }
+        .publish(&env);
     }
 
     /// Begin exiting. The node stops voting immediately but its stake stays
@@ -219,8 +234,11 @@ impl Registry {
         node.unbonding_until = env.ledger().timestamp() + config.unbonding_period;
         Self::save_node(&env, &node);
 
-        env.events()
-            .publish((symbol_short!("unbonding"), pubkey), node.unbonding_until);
+        UnbondingStarted {
+            pubkey,
+            unbonding_until: node.unbonding_until,
+        }
+        .publish(&env);
     }
 
     /// Withdraw stake after the unbonding period.
@@ -258,8 +276,12 @@ impl Registry {
         }
         env.storage().instance().set(&DataKey::NodeIndex, &remaining);
 
-        env.events()
-            .publish((symbol_short!("withdrawn"), pubkey), (node.owner, amount));
+        Withdrawn {
+            pubkey,
+            owner: node.owner,
+            amount,
+        }
+        .publish(&env);
         amount
     }
 
@@ -289,7 +311,12 @@ impl Registry {
             .instance()
             .set(&DataKey::RewardPool, &(pool + amount));
 
-        env.events().publish((symbol_short!("funded"),), amount);
+        RewardsFunded {
+            from,
+            amount,
+            pool: pool + amount,
+        }
+        .publish(&env);
     }
 
     pub fn reward_pool(env: Env) -> i128 {
@@ -327,7 +354,11 @@ impl Registry {
             && node.stake >= config.min_stake
         {
             node.status = NodeStatus::Active;
-            env.events().publish((symbol_short!("unjailed"), pubkey.clone()), node.reputation);
+            NodeUnjailed {
+                pubkey: pubkey.clone(),
+                reputation: node.reputation,
+            }
+            .publish(&env);
         }
 
         let pool: i128 = env
@@ -388,6 +419,49 @@ impl Registry {
         Self::apply_penalty(&env, pubkey, reputation_delta, slash_amount, symbol_short!("dispute"));
     }
 
+    /// Pay seized stake out of the slash pool. Callable only by the slashing
+    /// contract.
+    ///
+    /// Seized stake accumulates here rather than being paid straight to
+    /// whoever reported the misbehaviour: a reporter's reward that lands in
+    /// the same transaction as the seizure gives a committee a direct
+    /// financial interest in upholding disputes. Routing it through a pool
+    /// that only a resolved dispute can draw on keeps the two decisions
+    /// separate, and leaves the remainder under governance rather than in an
+    /// individual's hands.
+    pub fn pay_from_slash_pool(env: Env, to: Address, amount: i128) {
+        if amount <= 0 {
+            panic_with_error!(&env, RegistryError::InvalidAmount);
+        }
+        let config = Self::config(&env);
+        config.slasher.require_auth();
+
+        let pool: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SlashPool)
+            .unwrap_or(0);
+        if pool < amount {
+            panic_with_error!(&env, RegistryError::SlashPoolExhausted);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::SlashPool, &(pool - amount));
+
+        token::Client::new(&env, &config.token).transfer(
+            &env.current_contract_address(),
+            &to,
+            &amount,
+        );
+
+        SlashPoolPaid {
+            to,
+            amount,
+            pool: pool - amount,
+        }
+        .publish(&env);
+    }
+
     // -- reads --------------------------------------------------------------
 
     /// The node's record, or `None` if it is not registered.
@@ -412,6 +486,18 @@ impl Registry {
                 total_slashed: node.total_slashed,
                 unbonding_until: node.unbonding_until,
             })
+    }
+
+    /// The account that bonded a node's stake, or `None` if the key is not
+    /// registered.
+    ///
+    /// The slashing contract needs this to tell whether a committee member is
+    /// voting on their own node.
+    pub fn owner_of(env: Env, pubkey: BytesN<32>) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Node>(&DataKey::Node(pubkey))
+            .map(|n| n.owner)
     }
 
     /// Voting weight in basis points; zero for an unknown or jailed node.
@@ -484,8 +570,11 @@ impl Registry {
     fn maybe_jail(env: &Env, node: &mut Node) {
         if node.status == NodeStatus::Active && node.reputation < JAIL_THRESHOLD {
             node.status = NodeStatus::Jailed;
-            env.events()
-                .publish((symbol_short!("jailed"), node.pubkey.clone()), node.reputation);
+            NodeJailed {
+                pubkey: node.pubkey.clone(),
+                reputation: node.reputation,
+            }
+            .publish(env);
         }
     }
 
@@ -519,8 +608,15 @@ impl Registry {
         Self::maybe_jail(env, &mut node);
         Self::save_node(env, &node);
 
-        env.events()
-            .publish((symbol_short!("penalized"), pubkey), (reason, reputation_delta, seized));
+        NodePenalized {
+            pubkey,
+            reason,
+            reputation_delta,
+            seized,
+            reputation: node.reputation,
+            stake: node.stake,
+        }
+        .publish(env);
     }
 }
 

@@ -391,3 +391,75 @@ fn admin_can_repoint_the_aggregator_after_deployment() {
     // The old aggregator address is no longer the configured one.
     assert_ne!(h.registry.get_config().aggregator, h.aggregator);
 }
+
+#[test]
+fn owner_of_names_the_account_that_bonded_the_stake() {
+    let h = setup();
+    let (owner, pubkey) = h.register_node(40);
+
+    assert_eq!(h.registry.owner_of(&pubkey), Some(owner));
+    assert_eq!(
+        h.registry.owner_of(&h.pubkey(41)),
+        None,
+        "an unregistered key has no owner, and asking must not trap"
+    );
+}
+
+#[test]
+fn seized_stake_leaves_the_pool_only_through_the_slashing_contract() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(42);
+    let beneficiary = Address::generate(&h.env);
+
+    h.registry.slash(&pubkey, &0, &(MIN_STAKE / 2));
+    assert_eq!(h.registry.slash_pool(), MIN_STAKE / 2);
+
+    h.registry.pay_from_slash_pool(&beneficiary, &(MIN_STAKE / 4));
+
+    assert_eq!(h.token.balance(&beneficiary), MIN_STAKE / 4);
+    assert_eq!(h.registry.slash_pool(), MIN_STAKE / 4);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")] // SlashPoolExhausted
+fn the_slash_pool_cannot_pay_out_more_than_it_holds() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(43);
+    h.registry.slash(&pubkey, &0, &1_000);
+
+    h.registry
+        .pay_from_slash_pool(&Address::generate(&h.env), &1_001);
+}
+
+#[test]
+fn a_penalty_event_carries_the_arithmetic_that_produced_it() {
+    use soroban_sdk::events::Event as _;
+    use soroban_sdk::testutils::Events as _;
+
+    let h = setup();
+    let (_, pubkey) = h.register_node(44);
+    h.registry.penalize(&pubkey, &500, &1_000);
+    // Only the most recent invocation's events are retained, so they are read
+    // before anything else is called.
+    let published = h.env.events().all().filter_by_contract(&h.registry.address);
+
+    let node = h.registry.get_node(&pubkey).unwrap();
+    assert_eq!(node.reputation, STARTING_REPUTATION - 500);
+    assert_eq!(node.stake, MIN_STAKE - 1_000);
+
+    // An operator contesting the penalty can read the resulting standing
+    // straight off the event rather than having to replay the contract.
+    let expected = crate::events::NodePenalized {
+        pubkey,
+        reason: soroban_sdk::symbol_short!("outlier"),
+        reputation_delta: 500,
+        seized: 1_000,
+        reputation: node.reputation,
+        stake: node.stake,
+    }
+    .to_xdr(&h.env, &h.registry.address);
+    assert!(
+        published.events().contains(&expected),
+        "the penalty event did not carry the standing it produced"
+    );
+}

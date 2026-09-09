@@ -24,4 +24,6 @@ pub enum RegistryError {
     InvalidAmount = 11,
     /// The reward pool cannot cover the requested payout.
     RewardPoolExhausted = 12,
+    /// The slash pool cannot cover the requested payout.
+    SlashPoolExhausted = 13,
 }
