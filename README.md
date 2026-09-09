@@ -265,7 +265,7 @@ repository, not the target architecture.
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
 | `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 44 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 33 |
-| `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 50 |
+| `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
@@ -276,7 +276,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-217 tests in total: 80 off-chain (`cargo test --workspace`) and 137 against the
+219 tests in total: 80 off-chain (`cargo test --workspace`) and 139 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`).
 
 The Byzantine simulation runs the real registry and aggregator together across
@@ -520,6 +520,11 @@ the whole node set at the end of every round would make the cost of closing a
 round grow with the size of the network, which charges the feed for the
 network's success. Here the caller pays for the keys it names, and a single
 silence is charged once however many times it is swept.
+
+A node with no weight — unknown, jailed or exiting — is skipped rather than
+charged, and a jailed one has its clock advanced as it is skipped. Its silence
+is the penalty already running, so billing it again on release would charge it
+twice for one absence, in the first moment it was allowed to speak.
 
 ### Integration guidance
 
