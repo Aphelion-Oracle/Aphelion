@@ -777,11 +777,88 @@ fn a_node_never_seen_gets_a_baseline_rather_than_a_penalty() {
 }
 
 #[test]
+fn a_released_node_is_not_charged_for_the_silence_it_served_in_jail() {
+    let h = setup();
+    let pubkey = h.pubkey(0);
+    let keys = Vec::from_array(&h.env, [pubkey.clone()]);
+
+    h.submit(0, TRUE_PRICE, 1);
+
+    // Drive it below the jail threshold. However it got there, the effect is
+    // the same: the aggregator refuses a zero-weight submission, so from here
+    // the node is silent because it is forbidden to speak, not because it
+    // chose to.
+    for _ in 0..81 {
+        h.registry.record_miss(&pubkey);
+    }
+    assert_eq!(h.registry.weight_of(&pubkey), 0, "jailed");
+
+    // Sweeps continue over the whole term and find nothing to charge.
+    for _ in 0..48 {
+        h.advance(1_800);
+        assert_eq!(
+            h.aggregator.sweep_absent(&keys),
+            0,
+            "a jailed node has already been punished for being silent"
+        );
+    }
+
+    h.registry.release(&pubkey);
+    let released = h.registry.get_node(&pubkey).unwrap().reputation;
+    assert_eq!(released, STARTING_REPUTATION);
+
+    // The term is served and the slate is clean. Billing it now for the day it
+    // spent in jail would charge it twice for one silence -- and would do it
+    // in the first moment it is allowed to submit again, before it has had any
+    // chance to be present.
+    assert_eq!(
+        h.aggregator.sweep_absent(&keys),
+        0,
+        "the jail term is not absence the node can be billed for"
+    );
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().reputation,
+        released,
+        "release put it back at a newcomer's standing; the sweep took some away"
+    );
+}
+
+#[test]
 fn sweeping_an_unknown_key_is_a_no_op_rather_than_a_trap() {
     let h = setup();
     let keys = Vec::from_array(&h.env, [h.pubkey(7)]);
     h.advance(10_000);
     assert_eq!(h.aggregator.sweep_absent(&keys), 0);
+}
+
+#[test]
+fn sweeping_a_key_that_is_not_a_node_leaves_nothing_behind() {
+    let h = setup();
+    let keys = Vec::from_array(&h.env, [h.pubkey(5)]);
+
+    // `sweep_absent` is permissionless, so a caller can name any 32 bytes it
+    // likes. Naming one repeatedly must not accumulate anything: otherwise the
+    // sweep is a way to write into the contract for the price of a fee.
+    for _ in 0..5 {
+        assert_eq!(h.aggregator.sweep_absent(&keys), 0);
+        h.advance(1_000);
+    }
+
+    // The proof that nothing was recorded: whoever registers this key next
+    // still gets a newcomer's benefit of the doubt. Had the sweeps left a
+    // clock behind, it would have been running for 5000 seconds by now and the
+    // first sweep after registration would bill for silence that predates the
+    // node.
+    h.register_node(5);
+    h.advance(700);
+    assert_eq!(
+        h.aggregator.sweep_absent(&keys),
+        0,
+        "a node cannot be absent from rounds held before it existed"
+    );
+
+    h.advance(700);
+    assert_eq!(h.aggregator.sweep_absent(&keys), 1, "but it can be now");
 }
 
 // -- configuration ----------------------------------------------------------

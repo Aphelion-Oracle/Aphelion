@@ -325,13 +325,6 @@ impl Aggregator {
         let mut charged = 0u32;
 
         for pubkey in pubkeys.iter() {
-            // A node with no weight is unknown, jailed or exiting. None of
-            // those should be ground down further, and `record_miss` would
-            // trap on a key the registry has never seen.
-            if registry.weight_of(&pubkey) == 0 {
-                continue;
-            }
-
             let last_seen: u64 = env
                 .storage()
                 .persistent()
@@ -343,6 +336,28 @@ impl Aggregator {
                 .get(&DataKey::Swept(pubkey.clone()))
                 .unwrap_or(0);
             let reference = last_seen.max(last_swept);
+
+            // A node with no weight is unknown, jailed or exiting. None of
+            // those should be ground down further, and `record_miss` would
+            // trap on a key the registry has never seen.
+            //
+            // For the ones we already hold a record of, the clock still moves
+            // on. A jailed node is silent because the aggregator refuses its
+            // submissions, not because it chose to be: that silence is the
+            // punishment already running, and leaving the clock stopped would
+            // hand the node a second bill for it in the first moment it was
+            // allowed to speak again. Recording the sweep says what actually
+            // happened -- we looked, and there was nothing to charge.
+            //
+            // Only for a key we have seen before, though. Writing one for any
+            // key at all would let a caller mint an entry per 32 bytes it can
+            // think of, and this function is permissionless.
+            if registry.weight_of(&pubkey) == 0 {
+                if reference != 0 {
+                    Self::mark_swept(&env, &pubkey, now);
+                }
+                continue;
+            }
 
             if reference == 0 {
                 // Never seen and never swept: there is no evidence of when the

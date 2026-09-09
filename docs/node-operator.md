@@ -277,6 +277,12 @@ It is not a punishment for downtime as such — downtime never seizes stake — 
 it is why a node left switched off keeps losing weight rather than sitting
 frozen at its old standing.
 
+Time spent in jail is not chargeable this way. A jailed node is silent because
+the aggregator refuses its submissions, not because it chose to be, and it is
+already serving a penalty for that; the sweep skips it and keeps its clock
+moving, so `release` does not hand you a missed round in the first moment you
+are allowed to submit again.
+
 ---
 
 ## 7. If you are disputed
