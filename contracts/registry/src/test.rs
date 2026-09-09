@@ -6,6 +6,7 @@ use crate::{NodeStatus, Registry, RegistryClient, JAIL_THRESHOLD, STARTING_REPUT
 
 const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
 const UNBONDING: u64 = 7 * 24 * 3600;
+const JAIL_PERIOD: u64 = 24 * 3600;
 
 struct Harness<'a> {
     env: Env,
@@ -38,6 +39,7 @@ fn setup() -> Harness<'static> {
         &sac.address(),
         &MIN_STAKE,
         &UNBONDING,
+        &JAIL_PERIOD,
     );
 
     Harness {
@@ -319,7 +321,7 @@ fn a_slashed_node_can_only_withdraw_what_is_left() {
 }
 
 #[test]
-fn topping_up_stake_releases_a_node_from_jail_but_not_its_record() {
+fn capital_cannot_buy_a_release_but_serving_the_term_earns_one() {
     let h = setup();
     let (_, pubkey) = h.register_node(15);
 
@@ -339,13 +341,18 @@ fn topping_up_stake_releases_a_node_from_jail_but_not_its_record() {
         "buying stake must not buy back reputation"
     );
 
-    // Earning reputation back does.
-    for _ in 0..40 {
-        h.registry.record_success(&pubkey, &0);
-    }
-    assert_eq!(
-        h.registry.get_node(&pubkey).unwrap().status,
-        NodeStatus::Active
+    // Serving the term does, and it restores a newcomer's standing rather than
+    // the one the node spent five penalties losing.
+    let until = h.registry.get_node(&pubkey).unwrap().jailed_until;
+    h.env.ledger().set_timestamp(until);
+    h.registry.release(&pubkey);
+
+    let released = h.registry.get_node(&pubkey).unwrap();
+    assert_eq!(released.status, NodeStatus::Active);
+    assert_eq!(released.reputation, STARTING_REPUTATION);
+    assert!(
+        released.stake > MIN_STAKE,
+        "the top-up stays bonded; it was never a bribe"
     );
 }
 
@@ -478,5 +485,183 @@ fn a_penalty_event_carries_the_arithmetic_that_produced_it() {
     assert!(
         published.events().contains(&expected),
         "the penalty event did not carry the standing it produced"
+    );
+}
+
+#[test]
+fn a_jailed_node_cannot_buy_or_earn_its_way_out() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(50);
+    for _ in 0..81 {
+        h.registry.record_miss(&pubkey);
+    }
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().status,
+        NodeStatus::Jailed
+    );
+
+    // Capital does not clear jail. It cannot: jail begins exactly when
+    // reputation falls below the threshold, so a condition on reputation can
+    // never be met by paying.
+    h.registry.add_stake(&pubkey, &(MIN_STAKE * 5));
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().status,
+        NodeStatus::Jailed
+    );
+    assert_eq!(h.registry.weight_of(&pubkey), 0);
+
+    // And it cannot earn its way out either, because the aggregator refuses a
+    // zero-weight submission outright -- so `record_success` is never reached
+    // for a jailed node. Serving the term is the only route, which is why
+    // `release` exists at all.
+}
+
+#[test]
+fn a_jailed_node_is_released_once_it_has_served_its_term() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(51);
+    for _ in 0..81 {
+        h.registry.record_miss(&pubkey);
+    }
+
+    let jailed = h.registry.get_node(&pubkey).unwrap();
+    assert_eq!(jailed.status, NodeStatus::Jailed);
+    assert_eq!(
+        jailed.jailed_until,
+        h.env.ledger().timestamp() + JAIL_PERIOD
+    );
+
+    h.env.ledger().set_timestamp(jailed.jailed_until);
+    h.registry.release(&pubkey);
+
+    let released = h.registry.get_node(&pubkey).unwrap();
+    assert_eq!(released.status, NodeStatus::Active);
+    assert_eq!(
+        released.reputation, STARTING_REPUTATION,
+        "released to exactly a newcomer's standing -- no better, because that \
+         would make jail cheaper than being new, and no worse, because \
+         re-registering is always available and would leave them here anyway"
+    );
+    assert_eq!(released.weight_bps, 5_000, "half weight, and earning back");
+    assert_eq!(released.consecutive_misses, 0);
+    assert_eq!(released.jailed_until, 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")] // StillJailed
+fn a_jailed_node_cannot_be_released_early() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(52);
+    for _ in 0..81 {
+        h.registry.record_miss(&pubkey);
+    }
+    let until = h.registry.get_node(&pubkey).unwrap().jailed_until;
+    h.env.ledger().set_timestamp(until - 1);
+    h.registry.release(&pubkey);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")] // NotJailed
+fn releasing_a_node_that_is_not_jailed_is_refused() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(53);
+    h.registry.release(&pubkey);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")] // StakeTooLow
+fn a_node_slashed_below_the_minimum_must_top_up_before_release() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(54);
+    // Slashed to nothing and jailed by the same penalty.
+    h.registry.slash(&pubkey, &3_000, &MIN_STAKE);
+
+    let until = h.registry.get_node(&pubkey).unwrap().jailed_until;
+    h.env.ledger().set_timestamp(until);
+    // Coming back under-bonded would mean voting with less at risk than the
+    // network requires of everyone else.
+    h.registry.release(&pubkey);
+}
+
+#[test]
+fn topping_up_lets_an_emptied_node_be_released() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(55);
+    h.registry.slash(&pubkey, &3_000, &MIN_STAKE);
+
+    h.registry.add_stake(&pubkey, &MIN_STAKE);
+    let until = h.registry.get_node(&pubkey).unwrap().jailed_until;
+    h.env.ledger().set_timestamp(until);
+    h.registry.release(&pubkey);
+
+    assert_eq!(
+        h.registry.get_node(&pubkey).unwrap().status,
+        NodeStatus::Active
+    );
+}
+
+#[test]
+fn a_released_node_that_relapses_serves_a_fresh_term() {
+    let h = setup();
+    let (_, pubkey) = h.register_node(56);
+    for _ in 0..81 {
+        h.registry.record_miss(&pubkey);
+    }
+    let first_term = h.registry.get_node(&pubkey).unwrap().jailed_until;
+    h.env.ledger().set_timestamp(first_term);
+    h.registry.release(&pubkey);
+
+    // Back at 5000, so it takes another 81 misses to fall below 3000 again.
+    for _ in 0..81 {
+        h.registry.record_miss(&pubkey);
+    }
+    let second = h.registry.get_node(&pubkey).unwrap();
+    assert_eq!(second.status, NodeStatus::Jailed);
+    assert_eq!(second.jailed_until, first_term + JAIL_PERIOD);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidConfig
+fn a_zero_unbonding_period_is_refused_at_deployment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let registry = RegistryClient::new(&env, &env.register(Registry, ()));
+
+    // Zero would let a node publish a bad price and withdraw in the same
+    // ledger, which is the one thing the delay exists to prevent.
+    registry.initialize(
+        &admin,
+        &admin,
+        &admin,
+        &sac.address(),
+        &MIN_STAKE,
+        &0,
+        &JAIL_PERIOD,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")] // InvalidConfig
+fn a_zero_jail_term_is_refused_at_deployment() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let registry = RegistryClient::new(&env, &env.register(Registry, ()));
+
+    // A zero term makes jail a formality: a node could be jailed and released
+    // inside one ledger, so falling below the threshold would cost nothing but
+    // the reputation already lost, and `release` would be a free reset back to
+    // a newcomer's standing.
+    registry.initialize(
+        &admin,
+        &admin,
+        &admin,
+        &sac.address(),
+        &MIN_STAKE,
+        &UNBONDING,
+        &0,
     );
 }

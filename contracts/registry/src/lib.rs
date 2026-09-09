@@ -34,6 +34,9 @@ pub mod events;
 mod types;
 
 #[cfg(test)]
+extern crate std;
+
+#[cfg(test)]
 mod test;
 
 pub use error::RegistryError;
@@ -58,6 +61,7 @@ impl Registry {
     /// initially and be repointed once those contracts are deployed, which is
     /// how the three-contract deployment bootstraps without a circular
     /// dependency.
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -66,12 +70,20 @@ impl Registry {
         token: Address,
         min_stake: i128,
         unbonding_period: u64,
+        jail_period: u64,
     ) {
         if env.storage().instance().has(&DataKey::Config) {
             panic_with_error!(&env, RegistryError::AlreadyInitialized);
         }
         if min_stake <= 0 {
             panic_with_error!(&env, RegistryError::InvalidAmount);
+        }
+        // An unbonding period of zero would let a node publish a bad price and
+        // withdraw in the same ledger, which is the one thing the delay exists
+        // to prevent. Everything downstream -- disputes especially -- assumes
+        // stake is still reachable for a while after an exit is requested.
+        if unbonding_period == 0 || jail_period == 0 {
+            panic_with_error!(&env, RegistryError::InvalidConfig);
         }
         admin.require_auth();
 
@@ -84,6 +96,7 @@ impl Registry {
                 token,
                 min_stake,
                 unbonding_period,
+                jail_period,
             },
         );
         env.storage()
@@ -170,6 +183,7 @@ impl Registry {
             total_rewards: 0,
             total_slashed: 0,
             unbonding_until: 0,
+            jailed_until: 0,
         };
         Self::save_node(&env, &node);
 
@@ -207,21 +221,74 @@ impl Registry {
         );
         node.stake += amount;
 
-        // Topping back up above the minimum releases a node from jail, but
-        // does not restore its reputation: capital buys a second chance, not
-        // a clean record.
-        if node.status == NodeStatus::Jailed
-            && node.stake >= config.min_stake
-            && node.reputation >= JAIL_THRESHOLD
-        {
-            node.status = NodeStatus::Active;
-        }
+        // Topping up does not clear jail. It cannot: a node is jailed exactly
+        // when its reputation is below the threshold, so a condition on
+        // reputation could never be satisfied by paying. Capital restores the
+        // bond a slash took; time and `release` restore the standing.
         Self::save_node(&env, &node);
 
         StakeAdded {
             pubkey,
             amount,
             total_stake: node.stake,
+        }
+        .publish(&env);
+    }
+
+    /// Release a jailed node once it has served its term.
+    ///
+    /// # Why jail is time and not work
+    ///
+    /// A jailed node has zero voting weight, and the aggregator refuses a
+    /// zero-weight submission outright. So a jailed node cannot submit, cannot
+    /// be recorded as successful, and cannot earn its way back — "recover by
+    /// behaving" is not a path that exists for it. Without this function, jail
+    /// is permanent, and the only remedy is to unbond, wait, withdraw and
+    /// register a new key.
+    ///
+    /// # Why it restores exactly a newcomer's standing
+    ///
+    /// Because that route is always available. An operator who cannot be
+    /// released simply re-registers, arriving at `STARTING_REPUTATION` with
+    /// the same capital. Releasing to anything *below* that would mean nobody
+    /// ever used release, and the network would churn identities — losing the
+    /// history a dispute might need — for no benefit. Releasing to anything
+    /// *above* it would make jail cheaper than being new, which is the wrong
+    /// way round.
+    ///
+    /// So the price of jail is the wait and the loss of everything earned
+    /// above a newcomer's standing. The stake stays bonded throughout, which
+    /// is the point: the operator remains reachable.
+    ///
+    /// Permissionless, because it can only be called when the term is served
+    /// and the bond is intact, and both are facts on the ledger rather than
+    /// judgements.
+    pub fn release(env: Env, pubkey: BytesN<32>) {
+        let config = Self::config(&env);
+        let mut node = Self::node(&env, &pubkey);
+
+        if node.status != NodeStatus::Jailed {
+            panic_with_error!(&env, RegistryError::NotJailed);
+        }
+        if env.ledger().timestamp() < node.jailed_until {
+            panic_with_error!(&env, RegistryError::StillJailed);
+        }
+        // A node slashed below the minimum has to top up first. Coming back
+        // under-bonded would mean voting with less at risk than the network
+        // requires of everyone else.
+        if node.stake < config.min_stake {
+            panic_with_error!(&env, RegistryError::StakeTooLow);
+        }
+
+        node.status = NodeStatus::Active;
+        node.reputation = STARTING_REPUTATION;
+        node.jailed_until = 0;
+        node.consecutive_misses = 0;
+        Self::save_node(&env, &node);
+
+        NodeUnjailed {
+            pubkey,
+            reputation: node.reputation,
         }
         .publish(&env);
     }
@@ -355,17 +422,10 @@ impl Registry {
         node.last_submission = env.ledger().timestamp();
         node.consecutive_misses = 0;
 
-        if node.status == NodeStatus::Jailed
-            && node.reputation >= JAIL_THRESHOLD
-            && node.stake >= config.min_stake
-        {
-            node.status = NodeStatus::Active;
-            NodeUnjailed {
-                pubkey: pubkey.clone(),
-                reputation: node.reputation,
-            }
-            .publish(&env);
-        }
+        // No unjail branch here on purpose. The aggregator refuses a jailed
+        // node's submissions outright, so this function is unreachable for one
+        // -- an unjail-on-success rule would read as a recovery path that
+        // cannot actually be walked. `release` is the only door out.
 
         let pool: i128 = env
             .storage()
@@ -503,6 +563,7 @@ impl Registry {
                 total_rewards: node.total_rewards,
                 total_slashed: node.total_slashed,
                 unbonding_until: node.unbonding_until,
+                jailed_until: node.jailed_until,
             })
     }
 
@@ -587,10 +648,13 @@ impl Registry {
 
     fn maybe_jail(env: &Env, node: &mut Node) {
         if node.status == NodeStatus::Active && node.reputation < JAIL_THRESHOLD {
+            let config = Self::config(env);
             node.status = NodeStatus::Jailed;
+            node.jailed_until = env.ledger().timestamp() + config.jail_period;
             NodeJailed {
                 pubkey: node.pubkey.clone(),
                 reputation: node.reputation,
+                jailed_until: node.jailed_until,
             }
             .publish(env);
         }

@@ -216,9 +216,55 @@ problem: one of your venues was wrong and your filtering let it through. The
 `OutlierPenalized` event carries your price, the round median and the deviation
 in basis points, so you can check the arithmetic without replaying anything.
 
+### If your node is jailed
+
 Below 3 000 reputation the node is jailed and its submissions carry zero weight.
-Adding stake does **not** clear that on its own; reputation has to recover too.
-That asymmetry is deliberate — capital buys a second chance, not a clean record.
+Zero weight is absolute: the aggregator refuses the submission outright, so you
+cannot work your way back up. Adding stake does not clear jail either — jail
+begins exactly when reputation crosses below the threshold, so no top-up can
+satisfy a condition written on reputation.
+
+What clears it is serving the term. Once `jailed_until` has passed, anyone may
+call:
+
+```bash
+stellar contract invoke --id "$APHELION_REGISTRY" -- release --pubkey "$PUBKEY"
+```
+
+It is permissionless because it only checks facts on the ledger. Three of them,
+and all three must hold:
+
+| Condition | If it fails |
+| --- | --- |
+| The node is jailed | `NotJailed` (15) |
+| `jailed_until` has passed | `StillJailed` (16) |
+| Bond is at or above `min_stake` | `StakeTooLow` (8) |
+
+The third is the one that catches operators out. If a slash took you below the
+minimum, `release` refuses until you `add_stake` back up to it — returning
+under-bonded would mean voting with less at risk than the network asks of
+everyone else. So the recovery for a slashed-and-jailed node is: top up, wait
+out the term, then release.
+
+Release returns you to **5 000 — a newcomer's standing**, not the reputation you
+had before. Everything earned above that is gone, and you climb back to full
+weight the same way a new node does: 40 in-band rounds. Your stake stays bonded
+the whole time, which is the point of jail rather than ejection — you remain
+reachable while the term runs.
+
+Read your term off the node record:
+
+```bash
+stellar contract invoke --id "$APHELION_REGISTRY" -- get_node --pubkey "$PUBKEY"
+```
+
+`jailed_until` is a ledger timestamp; zero means not jailed.
+
+The alternative is to `request_unbond`, wait out the unbonding period, withdraw
+and register a fresh key — which also lands you at 5 000. Any sane deployment
+sets the jail term shorter than the unbonding period, so serving it is the
+faster route, and it keeps the operating history that a future dispute might
+need to work in your favour.
 
 ### Charged a missed round while you were down
 

@@ -20,6 +20,7 @@ use aphelion_registry::{Registry, RegistryClient};
 
 const BASE_TIME: u64 = 1_735_689_600;
 const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
+const JAIL_PERIOD: u64 = 24 * 3600;
 
 /// $0.40 per XLM, 1e8-scaled.
 const START_PRICE: i128 = 40_000_000;
@@ -87,6 +88,7 @@ fn setup() -> Harness<'static> {
         &collateral_address,
         &MIN_STAKE,
         &(7 * 24 * 3600),
+        &JAIL_PERIOD,
     );
 
     let aggregator = AggregatorClient::new(&env, &aggregator_address);
