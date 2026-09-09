@@ -10,6 +10,7 @@
 //! can be replayed exactly from the observations stored in `raw_prices`.
 
 use aphelion_core::{deviation_bps, stddev, weighted_median, FeedId, Price, WeightedSample};
+use chrono::{DateTime, Utc};
 
 use crate::db::Observation;
 use crate::error::{NodeError, Result};
@@ -43,6 +44,10 @@ pub struct ContributingSource {
     pub name: String,
     pub price: Price,
     pub deviation_bps: u32,
+    /// When the venue reported this price, carried through so the round can
+    /// sign the age of the data it actually used. See
+    /// [`Aggregated::observed_at`].
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +114,7 @@ pub fn aggregate(
                 name: obs.source.clone(),
                 price: obs.price,
                 deviation_bps: dev,
+                observed_at: obs.observed_at,
             });
         }
     }
@@ -149,6 +155,34 @@ pub fn aggregate(
     })
 }
 
+impl Aggregated {
+    /// The timestamp to sign: the oldest observation that actually contributed
+    /// to the price, never later than `ledger_time`.
+    ///
+    /// The oldest rather than the newest, because a consumer's freshness check
+    /// has to be answerable by the weakest input, not the strongest — one fast
+    /// venue must not make four stale ones look current.
+    ///
+    /// *Survivors only*, though. A source discarded as an outlier is by
+    /// definition not part of what was published, and a venue that has frozen
+    /// is discarded for a wrong price and stale in the same breath. Letting it
+    /// drag the signed timestamp backwards understates the freshness of a price
+    /// it did not contribute to, and past the aggregator's `max_staleness` it
+    /// costs the node the whole submission — a rejected transaction, a burned
+    /// nonce and a missed round, for the age of data the round never used.
+    ///
+    /// With no survivors at all there is nothing to date, so the caller's
+    /// ledger time stands; `aggregate` never returns such a result.
+    pub fn observed_at(&self, ledger_time: u64) -> u64 {
+        self.used
+            .iter()
+            .map(|s| s.observed_at.timestamp().max(0) as u64)
+            .min()
+            .unwrap_or(ledger_time)
+            .min(ledger_time)
+    }
+}
+
 /// Confidence half-width to publish, in basis points.
 ///
 /// The configured value is a floor, not a constant: when the surviving sources
@@ -174,6 +208,16 @@ mod tests {
             price: Price::parse_decimal(price).unwrap(),
             observed_at: Utc::now(),
             received_at: Utc::now(),
+        }
+    }
+
+    /// As `obs`, but dated: `seen_at` is a unix timestamp.
+    fn obs_at(source: &str, price: &str, seen_at: i64) -> Observation {
+        let at = DateTime::from_timestamp(seen_at, 0).unwrap();
+        Observation {
+            observed_at: at,
+            received_at: at,
+            ..obs(source, price)
         }
     }
 
@@ -293,5 +337,53 @@ mod tests {
             aggregate(&feed(), &a, params()).unwrap().price,
             aggregate(&feed(), &b, params()).unwrap().price
         );
+    }
+
+    // The signed timestamp.
+
+    #[test]
+    fn the_signed_timestamp_is_the_oldest_contributing_source() {
+        // One fast venue must not make a round look fresher than its inputs.
+        let obs = vec![
+            obs_at("binance", "100.00", 1_000),
+            obs_at("kraken", "100.01", 940),
+            obs_at("coinbase", "100.02", 970),
+        ];
+        let agg = aggregate(&feed(), &obs, params()).unwrap();
+        assert_eq!(agg.observed_at(2_000), 940);
+    }
+
+    #[test]
+    fn a_discarded_source_does_not_age_the_signed_timestamp() {
+        // A frozen venue is wrong and stale in the same breath: it reports a
+        // price from an hour ago and gets discarded for it. Dating the round
+        // by that observation would understate the freshness of a price it did
+        // not contribute to — and past the aggregator's `max_staleness` it
+        // costs the node the whole submission.
+        let obs = vec![
+            obs_at("binance", "100.00", 1_000),
+            obs_at("kraken", "100.01", 990),
+            obs_at("coinbase", "1.00", 1_000 - 3_600),
+        ];
+        let agg = aggregate(&feed(), &obs, params()).unwrap();
+
+        assert_eq!(agg.discarded.len(), 1, "the frozen venue is discarded");
+        assert_eq!(
+            agg.observed_at(2_000),
+            990,
+            "the timestamp dates the survivors, not the venue that was dropped"
+        );
+    }
+
+    #[test]
+    fn the_signed_timestamp_never_runs_ahead_of_the_ledger() {
+        // A node whose clock is fast would otherwise sign a timestamp in the
+        // ledger's future, which the aggregator rejects as drift.
+        let obs = vec![
+            obs_at("binance", "100.00", 5_000),
+            obs_at("kraken", "100.01", 5_000),
+        ];
+        let agg = aggregate(&feed(), &obs, params()).unwrap();
+        assert_eq!(agg.observed_at(1_000), 1_000);
     }
 }

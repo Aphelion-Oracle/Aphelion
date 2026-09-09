@@ -70,7 +70,11 @@ fn describe_metrics() {
     );
     describe_counter!(
         "aphelion_round_errors_total",
-        "Aggregation rounds that failed, labelled by feed and error kind"
+        "Rounds that failed, labelled by error kind, and by feed where one is \
+         to blame. Failures that abort the whole tick before any feed is \
+         reached -- an unreadable ledger time, a clock too far from it -- carry \
+         no feed label, because no feed is at fault. Aggregate with `sum by \
+         (kind)` rather than by feed, or those land in an empty bucket"
     );
     describe_histogram!(
         "aphelion_round_duration_seconds",

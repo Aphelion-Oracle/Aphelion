@@ -45,6 +45,10 @@ pub enum RoundOutcome {
     },
     /// Not enough usable sources; nothing was signed.
     SkippedNoData(String),
+    /// `--dry-run`: signed and recorded, deliberately not submitted.
+    DryRun {
+        nonce: u64,
+    },
     Failed(String),
 }
 
@@ -135,8 +139,17 @@ impl RoundRunner {
                     tracing::warn!(feed = %feed_cfg.id, reason = %why, "skipped: no usable data");
                     "skipped_no_data"
                 }
+                Ok(RoundOutcome::DryRun { nonce }) => {
+                    tracing::info!(feed = %feed_cfg.id, nonce, "dry run: not submitting");
+                    "dry_run"
+                }
                 Ok(RoundOutcome::Failed(why)) | Err(NodeError::Chain(why)) => {
                     tracing::error!(feed = %feed_cfg.id, reason = %why, "round failed");
+                    metrics::counter!(
+                        "aphelion_round_errors_total",
+                        "feed" => feed_cfg.id.to_string(), "kind" => "chain"
+                    )
+                    .increment(1);
                     "failed"
                 }
                 Err(e) => {
@@ -218,13 +231,9 @@ impl RoundRunner {
 
         // The signed timestamp is the age of the *data*, not of the round. A
         // round assembled from observations that are all 90 seconds old must
-        // say so, or a consumer's freshness check is meaningless.
-        let observed_at = observations
-            .iter()
-            .map(|o| o.observed_at.timestamp().max(0) as u64)
-            .min()
-            .unwrap_or(ledger_time)
-            .min(ledger_time);
+        // say so, or a consumer's freshness check is meaningless. It dates the
+        // surviving sources only — see `Aggregated::observed_at`.
+        let observed_at = agg.observed_at(ledger_time);
 
         let nonce = self.repo.next_nonce(feed).await?;
         let submission = self
@@ -260,7 +269,7 @@ impl RoundRunner {
                 .settle_round(round_id, RoundStatus::Skipped, None, Some("dry run"))
                 .await?;
             tracing::info!(%feed, nonce, price = %agg.price, "dry run: not submitting");
-            return Ok(RoundOutcome::SkippedUnchanged { deviation_bps: 0 });
+            return Ok(RoundOutcome::DryRun { nonce });
         }
 
         match self
