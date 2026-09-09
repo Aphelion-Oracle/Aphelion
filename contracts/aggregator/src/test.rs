@@ -4,7 +4,7 @@ use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{symbol_short, Address, BytesN, Env, Symbol, Vec};
 
 use crate::{Aggregator, AggregatorClient, Config, DataKey, PriceData};
-use aphelion_registry::{Registry, RegistryClient};
+use aphelion_registry::{Registry, RegistryClient, STARTING_REPUTATION};
 
 const BASE_TIME: u64 = 1_735_689_600;
 const MIN_STAKE: i128 = 10_000_000_000; // 1000 XLM in stroops
@@ -883,5 +883,208 @@ impl Harness<'_> {
         let a = Address::generate(&self.env);
         self.token_admin.mint(&a, &amount);
         a
+    }
+}
+
+// -- Byzantine simulation ---------------------------------------------------
+
+/// Multi-round scenarios, run against the real contract pair.
+///
+/// The tests above check one mechanism at a time. These check the properties
+/// the mechanisms exist to produce: that a minority of liars cannot move a
+/// price, that lying costs more than it pays, that capital alone does not buy
+/// influence, and that the network sheds a bad operator and keeps working
+/// rather than stalling on their absence.
+mod byzantine {
+    use super::*;
+
+    /// A node that reports a price no market has ever quoted.
+    const LIE: i128 = 300 * PRICE_SCALE;
+
+    /// Everyone submits, so nothing closes early and every vote is counted.
+    fn quorum_of(h: &Harness, nodes: u32, weight_bps: u32) {
+        let mut config = h.aggregator.get_config();
+        config.quorum = nodes;
+        config.min_weight_bps = weight_bps;
+        h.aggregator.set_config(&config);
+    }
+
+    #[test]
+    fn a_minority_of_liars_cannot_move_the_price_and_does_not_survive_trying() {
+        let h = setup();
+        quorum_of(&h, 5, 25_000);
+
+        // Three honest nodes and two lying every round. Five rounds is how
+        // long it takes a liar to fall from 5_000 reputation to below the
+        // 3_000 jail threshold at 500 a round.
+        for round in 1..=5u64 {
+            for node in 0..3 {
+                h.submit(node, TRUE_PRICE, round);
+            }
+            for node in 3..5 {
+                h.submit(node, LIE, round);
+            }
+
+            let price = h.price().expect("the round published");
+            assert_eq!(
+                price.price, TRUE_PRICE,
+                "round {round}: two liars out of five moved the median"
+            );
+            assert_eq!(
+                price.num_nodes, 3,
+                "round {round}: the liars must not appear in the statistics"
+            );
+            h.advance(61);
+        }
+
+        for node in 3..5 {
+            assert_eq!(
+                h.registry.weight_of(&h.pubkey(node)),
+                0,
+                "a node that lied five times running is still voting"
+            );
+        }
+        for node in 0..3 {
+            assert!(h.registry.get_node(&h.pubkey(node)).unwrap().reputation > STARTING_REPUTATION);
+        }
+    }
+
+    #[test]
+    fn the_network_keeps_publishing_after_shedding_its_liars() {
+        let h = setup();
+        quorum_of(&h, 5, 25_000);
+
+        for round in 1..=5u64 {
+            for node in 0..3 {
+                h.submit(node, TRUE_PRICE, round);
+            }
+            for node in 3..5 {
+                h.submit(node, LIE, round);
+            }
+            h.advance(61);
+        }
+
+        // The two liars are jailed and can no longer submit at all. A network
+        // that needed them would now be stuck; this one is not.
+        quorum_of(&h, 3, 15_000);
+        for round in 6..=9u64 {
+            for node in 0..3 {
+                h.submit(node, TRUE_PRICE, round);
+            }
+            assert_eq!(h.price().unwrap().price, TRUE_PRICE);
+            h.advance(61);
+        }
+        assert_eq!(h.price().unwrap().round_id, 9);
+    }
+
+    #[test]
+    fn a_swarm_of_fresh_identities_cannot_outvote_proven_nodes() {
+        let h = setup();
+        for node in 5..8 {
+            h.register_node(node);
+        }
+        // Three nodes that have earned full weight, against five that bonded
+        // stake this morning. Thirty thousand basis points against
+        // twenty-five thousand: the arithmetic is the defence, not a policy.
+        for node in 0..3 {
+            h.promote(node);
+        }
+        quorum_of(&h, 8, 55_000);
+
+        for node in 0..3 {
+            h.submit(node, TRUE_PRICE, 1);
+        }
+        for node in 3..8 {
+            h.submit(node, LIE, 1);
+        }
+
+        let price = h.price().expect("published");
+        assert_eq!(
+            price.price, TRUE_PRICE,
+            "five fresh identities outvoted three proven ones"
+        );
+
+        // And the swarm paid for it: five stakes bonded, five reputations
+        // spent, nothing moved.
+        for node in 3..8 {
+            let record = h.registry.get_node(&h.pubkey(node)).unwrap();
+            assert_eq!(record.reputation, STARTING_REPUTATION - 500);
+            assert!(record.total_slashed > 0);
+        }
+    }
+
+    #[test]
+    fn recovery_is_slower_than_defection() {
+        let h = setup();
+        quorum_of(&h, 3, 15_000);
+        h.promote(0);
+
+        let before = h.registry.get_node(&h.pubkey(0)).unwrap().reputation;
+
+        // One opportunistic round after a long stretch of honest ones.
+        h.submit(0, LIE, 1);
+        h.submit(1, TRUE_PRICE, 1);
+        h.submit(2, TRUE_PRICE, 1);
+        let after = h.registry.get_node(&h.pubkey(0)).unwrap().reputation;
+        assert_eq!(after, before - 500);
+
+        // Ten honest rounds to undo one dishonest one. That ratio is what
+        // makes "behave, then defect at the profitable moment" a losing
+        // strategy rather than a clever one.
+        let mut rounds = 0;
+        let mut nonce = 1u64;
+        while h.registry.get_node(&h.pubkey(0)).unwrap().reputation < before {
+            h.advance(61);
+            nonce += 1;
+            for node in 0..3 {
+                h.submit(node, TRUE_PRICE, nonce);
+            }
+            rounds += 1;
+            assert!(
+                rounds <= 20,
+                "recovery should take ten rounds, not {rounds}"
+            );
+        }
+        assert_eq!(rounds, 10);
+    }
+
+    #[test]
+    fn a_liar_that_stays_inside_the_band_earns_nothing_by_it() {
+        let h = setup();
+        quorum_of(&h, 3, 15_000);
+
+        // A node shading the price by 4% -- inside the 5% band, so it is not
+        // penalised, and it is counted. It still does not move the median,
+        // because the median does not care how far a minority is from it.
+        h.submit(0, TRUE_PRICE, 1);
+        h.submit(1, TRUE_PRICE, 1);
+        h.submit(2, TRUE_PRICE * 104 / 100, 1);
+
+        let price = h.price().expect("published");
+        assert_eq!(price.price, TRUE_PRICE);
+        assert_eq!(price.num_nodes, 3, "it was in band, so it counted");
+        assert!(
+            price.confidence_bps >= 400,
+            "but the disagreement it introduced is published, not hidden"
+        );
+    }
+
+    #[test]
+    fn a_price_the_whole_network_reports_wrongly_is_published_wrongly() {
+        let h = setup();
+        quorum_of(&h, 3, 15_000);
+
+        // Stated rather than defended: Aphelion is Byzantine-fault-tolerant,
+        // not omniscient. If every node reads the same manipulated venue, the
+        // median of their agreement is that manipulated price. The defence
+        // against this is inside the node -- several venues, outlier filtering
+        // -- and in the number of independent operators, not on chain.
+        for node in 0..3 {
+            h.submit(node, LIE, 1);
+        }
+        assert_eq!(h.price().unwrap().price, LIE);
+        for node in 0..3 {
+            assert!(h.registry.get_node(&h.pubkey(node)).unwrap().reputation > STARTING_REPUTATION);
+        }
     }
 }
