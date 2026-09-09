@@ -1,0 +1,402 @@
+{
+  "_comment": [
+    "Canonical Aphelion consensus arithmetic. Asserted from both the off-chain",
+    "implementation (crates/aphelion-core/src/math.rs) and the on-chain mirror",
+    "(contracts/aggregator/src/math.rs). A node predicts a round with the first",
+    "and is rewarded or penalised by the second: a difference of one unit lets an",
+    "honest node be slashed for arithmetic it had no way to see.",
+    "Regenerate with: python3 scripts/gen_test_vectors.py"
+  ],
+  "weighted_median": [
+    {
+      "name": "odd count, equal weight",
+      "samples": [
+        [
+          "100",
+          10000
+        ],
+        [
+          "300",
+          10000
+        ],
+        [
+          "200",
+          10000
+        ]
+      ],
+      "expected": "200"
+    },
+    {
+      "name": "even count averages the middle pair",
+      "samples": [
+        [
+          "100",
+          10000
+        ],
+        [
+          "200",
+          10000
+        ],
+        [
+          "300",
+          10000
+        ],
+        [
+          "400",
+          10000
+        ]
+      ],
+      "expected": "250"
+    },
+    {
+      "name": "one outlier cannot move it",
+      "samples": [
+        [
+          "1000",
+          10000
+        ],
+        [
+          "1001",
+          10000
+        ],
+        [
+          "999",
+          10000
+        ],
+        [
+          "1000",
+          10000
+        ],
+        [
+          "999999",
+          10000
+        ]
+      ],
+      "expected": "1000"
+    },
+    {
+      "name": "three proven nodes outvote four fresh ones",
+      "samples": [
+        [
+          "1000",
+          10000
+        ],
+        [
+          "1000",
+          10000
+        ],
+        [
+          "1000",
+          10000
+        ],
+        [
+          "5000",
+          5000
+        ],
+        [
+          "5000",
+          5000
+        ],
+        [
+          "5000",
+          5000
+        ],
+        [
+          "5000",
+          5000
+        ]
+      ],
+      "expected": "1000"
+    },
+    {
+      "name": "a single sample is its own median",
+      "samples": [
+        [
+          "6423155000000",
+          5000
+        ]
+      ],
+      "expected": "6423155000000"
+    },
+    {
+      "name": "zero weight has no median",
+      "samples": [
+        [
+          "1000",
+          0
+        ]
+      ],
+      "expected": null
+    },
+    {
+      "name": "no samples has no median",
+      "samples": [],
+      "expected": null
+    },
+    {
+      "name": "realistic btc round",
+      "samples": [
+        [
+          "6423154999800",
+          10000
+        ],
+        [
+          "6423155000000",
+          10000
+        ],
+        [
+          "6423155000150",
+          5000
+        ],
+        [
+          "6423155000050",
+          10000
+        ],
+        [
+          "6423154999950",
+          5000
+        ]
+      ],
+      "expected": "6423155000000"
+    },
+    {
+      "name": "a full-weight vote outbids two half-weight ones",
+      "samples": [
+        [
+          "6423155000000",
+          10000
+        ],
+        [
+          "6423155000000",
+          5000
+        ],
+        [
+          "6551618100000",
+          5000
+        ],
+        [
+          "6551618100000",
+          5000
+        ]
+      ],
+      "expected": "6423155000000"
+    },
+    {
+      "name": "exact tie between two values",
+      "samples": [
+        [
+          "1000",
+          5000
+        ],
+        [
+          "2000",
+          5000
+        ]
+      ],
+      "expected": "1500"
+    }
+  ],
+  "stddev": [
+    {
+      "name": "textbook",
+      "values": [
+        "2",
+        "4",
+        "4",
+        "4",
+        "5",
+        "5",
+        "7",
+        "9"
+      ],
+      "expected": "2"
+    },
+    {
+      "name": "single value",
+      "values": [
+        "5"
+      ],
+      "expected": "0"
+    },
+    {
+      "name": "empty",
+      "values": [],
+      "expected": null
+    },
+    {
+      "name": "identical values",
+      "values": [
+        "6423155000000",
+        "6423155000000",
+        "6423155000000"
+      ],
+      "expected": "0"
+    },
+    {
+      "name": "cents apart at oracle magnitudes",
+      "values": [
+        "6423150000000",
+        "6423152000000",
+        "6423155000000",
+        "6423158000000",
+        "6423160000000"
+      ],
+      "expected": "3687817"
+    },
+    {
+      "name": "one wild outlier",
+      "values": [
+        "6423155000000",
+        "6423155000000",
+        "6423155000000",
+        "30000000000"
+      ],
+      "expected": "2768317320165"
+    }
+  ],
+  "deviation_bps": [
+    {
+      "name": "ten percent up",
+      "value": "110",
+      "reference": "100",
+      "expected": 1000
+    },
+    {
+      "name": "ten percent down",
+      "value": "90",
+      "reference": "100",
+      "expected": 1000
+    },
+    {
+      "name": "exact match",
+      "value": "100",
+      "reference": "100",
+      "expected": 0
+    },
+    {
+      "name": "zero reference saturates",
+      "value": "100",
+      "reference": "0",
+      "expected": 4294967295
+    },
+    {
+      "name": "one basis point",
+      "value": "10001",
+      "reference": "10000",
+      "expected": 1
+    },
+    {
+      "name": "rounding truncates rather than rounds",
+      "value": "100009",
+      "reference": "100000",
+      "expected": 0
+    },
+    {
+      "name": "a wild submission against a real price",
+      "value": "30000000000",
+      "reference": "6423155000000",
+      "expected": 9953
+    }
+  ],
+  "twap": [
+    {
+      "name": "a one second spike in a sixty second window",
+      "observations": [
+        [
+          0,
+          "1000"
+        ],
+        [
+          59,
+          "10000"
+        ]
+      ],
+      "window_start": 0,
+      "now": 60,
+      "expected": "1150"
+    },
+    {
+      "name": "flat",
+      "observations": [
+        [
+          0,
+          "6423155000000"
+        ],
+        [
+          30,
+          "6423155000000"
+        ],
+        [
+          60,
+          "6423155000000"
+        ]
+      ],
+      "window_start": 0,
+      "now": 90,
+      "expected": "6423155000000"
+    },
+    {
+      "name": "everything predates the window",
+      "observations": [
+        [
+          0,
+          "1000"
+        ]
+      ],
+      "window_start": 500,
+      "now": 600,
+      "expected": "1000"
+    },
+    {
+      "name": "a step half way through",
+      "observations": [
+        [
+          0,
+          "1000"
+        ],
+        [
+          50,
+          "2000"
+        ]
+      ],
+      "window_start": 0,
+      "now": 100,
+      "expected": "1500"
+    },
+    {
+      "name": "observations before the window are clipped",
+      "observations": [
+        [
+          0,
+          "1000"
+        ],
+        [
+          100,
+          "2000"
+        ]
+      ],
+      "window_start": 100,
+      "now": 200,
+      "expected": "2000"
+    },
+    {
+      "name": "an empty window has no average",
+      "observations": [
+        [
+          0,
+          "1000"
+        ]
+      ],
+      "window_start": 100,
+      "now": 100,
+      "expected": null
+    },
+    {
+      "name": "no observations",
+      "observations": [],
+      "window_start": 0,
+      "now": 100,
+      "expected": null
+    }
+  ]
+}

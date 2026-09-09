@@ -273,4 +273,96 @@ mod tests {
         let obs = vec![(0u64, 1000i128)];
         assert_eq!(time_weighted_average(&obs, 500, 600), Some(1000));
     }
+
+    /// The contract-side mirror asserts the same file. A drift here means a
+    /// node can predict one round outcome while the aggregator computes
+    /// another, and be penalised for the difference.
+    mod shared_vectors {
+        use super::*;
+        use serde_json::Value;
+
+        fn vectors() -> Value {
+            let raw = include_str!("../../../tests/vectors/aggregation.json");
+            serde_json::from_str(raw).expect("vector file is valid JSON")
+        }
+
+        fn i128_of(v: &Value) -> i128 {
+            v.as_str().expect("i128 vectors are strings").parse().unwrap()
+        }
+
+        fn expected(case: &Value) -> Option<i128> {
+            case["expected"].as_str().map(|s| s.parse().unwrap())
+        }
+
+        #[test]
+        fn weighted_median_matches() {
+            for case in vectors()["weighted_median"].as_array().unwrap() {
+                let mut samples: Vec<WeightedSample> = case["samples"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|s| {
+                        WeightedSample::new(i128_of(&s[0]), s[1].as_u64().unwrap() as u32)
+                    })
+                    .collect();
+                assert_eq!(
+                    weighted_median(&mut samples),
+                    expected(case),
+                    "weighted_median vector `{}` drifted",
+                    case["name"]
+                );
+            }
+        }
+
+        #[test]
+        fn stddev_matches() {
+            for case in vectors()["stddev"].as_array().unwrap() {
+                let values: Vec<i128> = case["values"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(i128_of)
+                    .collect();
+                // An empty set has no mean to deviate from; the vectors record
+                // that as absent rather than as zero.
+                let want = expected(case).or(if values.is_empty() { None } else { Some(0) });
+                let got = if values.is_empty() { None } else { stddev(&values) };
+                assert_eq!(got, want, "stddev vector `{}` drifted", case["name"]);
+            }
+        }
+
+        #[test]
+        fn deviation_bps_matches() {
+            for case in vectors()["deviation_bps"].as_array().unwrap() {
+                assert_eq!(
+                    deviation_bps(i128_of(&case["value"]), i128_of(&case["reference"])),
+                    case["expected"].as_u64().unwrap() as u32,
+                    "deviation_bps vector `{}` drifted",
+                    case["name"]
+                );
+            }
+        }
+
+        #[test]
+        fn time_weighted_average_matches() {
+            for case in vectors()["twap"].as_array().unwrap() {
+                let observations: Vec<(u64, i128)> = case["observations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|o| (o[0].as_u64().unwrap(), i128_of(&o[1])))
+                    .collect();
+                assert_eq!(
+                    time_weighted_average(
+                        &observations,
+                        case["window_start"].as_u64().unwrap(),
+                        case["now"].as_u64().unwrap(),
+                    ),
+                    expected(case),
+                    "twap vector `{}` drifted",
+                    case["name"]
+                );
+            }
+        }
+    }
 }

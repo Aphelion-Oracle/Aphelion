@@ -109,3 +109,100 @@ fn every_field_is_covered_by_at_least_one_vector() {
         );
     }
 }
+
+// -- aggregation ------------------------------------------------------------
+
+/// The off-chain mirror (`aphelion-core::math`) asserts the same file.
+///
+/// A node predicts a round's outcome with that implementation and is rewarded
+/// or penalised by this one. A difference of a single unit is enough to slash
+/// an honest node for arithmetic it had no way to see, so these are not
+/// cosmetic assertions about rounding.
+mod aggregation {
+    use soroban_sdk::{Env, Vec};
+
+    use crate::math::{deviation_bps, stddev, time_weighted_average, weighted_median};
+
+    fn vectors() -> serde_json::Value {
+        let raw = include_str!("../../../tests/vectors/aggregation.json");
+        serde_json::from_str(raw).expect("vector file is valid JSON")
+    }
+
+    fn i128_of(v: &serde_json::Value) -> i128 {
+        v.as_str().expect("i128 vectors are strings").parse().unwrap()
+    }
+
+    fn expected(case: &serde_json::Value) -> Option<i128> {
+        case["expected"].as_str().map(|s| s.parse().unwrap())
+    }
+
+    #[test]
+    fn weighted_median_matches() {
+        let env = Env::default();
+        for case in vectors()["weighted_median"].as_array().unwrap() {
+            let mut samples: Vec<(i128, u32)> = Vec::new(&env);
+            for s in case["samples"].as_array().unwrap() {
+                samples.push_back((i128_of(&s[0]), s[1].as_u64().unwrap() as u32));
+            }
+            assert_eq!(
+                weighted_median(&env, &samples),
+                expected(case),
+                "weighted_median vector `{}` drifted",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn stddev_matches() {
+        let env = Env::default();
+        for case in vectors()["stddev"].as_array().unwrap() {
+            let mut values: Vec<i128> = Vec::new(&env);
+            for v in case["values"].as_array().unwrap() {
+                values.push_back(i128_of(v));
+            }
+            if values.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                stddev(&values),
+                expected(case),
+                "stddev vector `{}` drifted",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn deviation_bps_matches() {
+        for case in vectors()["deviation_bps"].as_array().unwrap() {
+            assert_eq!(
+                deviation_bps(i128_of(&case["value"]), i128_of(&case["reference"])),
+                case["expected"].as_u64().unwrap() as u32,
+                "deviation_bps vector `{}` drifted",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn time_weighted_average_matches() {
+        let env = Env::default();
+        for case in vectors()["twap"].as_array().unwrap() {
+            let mut observations: Vec<(u64, i128)> = Vec::new(&env);
+            for o in case["observations"].as_array().unwrap() {
+                observations.push_back((o[0].as_u64().unwrap(), i128_of(&o[1])));
+            }
+            assert_eq!(
+                time_weighted_average(
+                    &observations,
+                    case["window_start"].as_u64().unwrap(),
+                    case["now"].as_u64().unwrap(),
+                ),
+                expected(case),
+                "twap vector `{}` drifted",
+                case["name"]
+            );
+        }
+    }
+}
