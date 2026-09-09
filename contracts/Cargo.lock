@@ -43,6 +43,9 @@ dependencies = [
 name = "aphelion-consumer-example"
 version = "0.1.0"
 dependencies = [
+ "aphelion-aggregator",
+ "aphelion-registry",
+ "ed25519-dalek",
  "soroban-sdk",
 ]
 

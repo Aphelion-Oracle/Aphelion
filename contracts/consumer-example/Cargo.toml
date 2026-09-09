@@ -1,5 +1,6 @@
 [package]
 name = "aphelion-consumer-example"
+description = "Reference integration: how a lending protocol should read Aphelion."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,3 +15,8 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# The tests run against the real registry and aggregator rather than a mock
+# oracle: a mock agrees with whatever this contract already believes.
+aphelion-aggregator = { path = "../aggregator" }
+aphelion-registry = { path = "../registry" }
+ed25519-dalek = { workspace = true }
