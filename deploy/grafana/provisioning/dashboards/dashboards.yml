@@ -1,8 +1,13 @@
 apiVersion: 1
 
+# Dashboards are provisioned read-only from the repository rather than edited in
+# the Grafana UI. A dashboard that only exists in one operator's browser is one
+# nobody else can reproduce when they are the person on call.
 providers:
   - name: Aphelion
     type: file
     folder: Aphelion
+    allowUiUpdates: false
     options:
       path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false
