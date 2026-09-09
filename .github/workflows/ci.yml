@@ -20,7 +20,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+  # Deliberately no global `RUSTFLAGS: -D warnings`: it applies to dependency
+  # compilation too, so an upstream crate emitting a warning under a new
+  # compiler would fail this repository's build for a reason nobody here can
+  # fix. Denials belong on the clippy invocation, where they apply to our code.
 
 jobs:
   fmt:
@@ -28,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
           components: rustfmt
       - run: cargo fmt --all --check

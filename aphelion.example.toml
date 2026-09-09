@@ -37,6 +37,10 @@ submitter_secret_env = "APHELION_STELLAR_SECRET"
 url_env         = "DATABASE_URL"
 max_connections = 10
 # Raw observations older than this are pruned hourly.
+#
+# These are the evidence trail: if a dispute is ever opened against this node,
+# the retained observations are what answer it. Keep this comfortably longer
+# than the slashing contract's voting and appeal periods combined.
 retention       = "30d"
 
 
