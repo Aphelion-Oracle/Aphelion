@@ -14,3 +14,8 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+# The registry is registered alongside the aggregator in the integration tests
+# so that the pair is exercised for real rather than against a stub.
+aphelion-registry = { path = "../registry" }
+ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }

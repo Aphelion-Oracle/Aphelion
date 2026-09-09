@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Symbol};
+use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone)]
@@ -27,6 +27,13 @@ pub struct Config {
     pub max_future_drift: u64,
     /// Minimum gap between two published rounds for one feed.
     pub min_round_interval: u64,
+    /// How long a round may stay open waiting for quorum before the next
+    /// submission abandons it and starts a fresh one. Without this, a round
+    /// that never reaches quorum would wedge the feed permanently.
+    pub round_timeout: u64,
+    /// How long a node may be silent before `sweep_absent` may charge it a
+    /// missed round.
+    pub absence_threshold: u64,
 
     /// Paid to each node whose submission landed inside the band.
     pub reward_per_submission: i128,
@@ -50,7 +57,7 @@ pub struct FeedConfig {
     /// they can size their own staleness checks.
     pub heartbeat: u64,
     /// Feed-specific override of the network quorum, for feeds that only a
-    /// subset of nodes can source.
+    /// subset of nodes can source. Zero means "use the network quorum".
     pub min_nodes: u32,
 }
 
@@ -73,7 +80,7 @@ pub struct Submission {
 pub struct PendingRound {
     pub round_id: u64,
     pub opened_at: u64,
-    pub submissions: soroban_sdk::Vec<Submission>,
+    pub submissions: Vec<Submission>,
 }
 
 /// The published price for a feed.
@@ -120,4 +127,18 @@ pub enum DataKey {
     Nonce(BytesN<32>, Symbol),
     /// Prepaid balance of a metered consumer.
     Balance(Address),
+    /// Monotonic round id allocator.
+    RoundCounter,
+    /// Ledger time of the last submission accepted from a node, on any feed.
+    LastSeen(BytesN<32>),
+    /// Ledger time at which a node was last charged for being absent, so one
+    /// silence cannot be billed twice.
+    Swept(BytesN<32>),
+    /// Metered read fees collected but not yet forwarded to the reward pool.
+    Fees,
 }
+
+/// Ledger units. Roughly 30 days of extension whenever a record is within 7
+/// days of expiry.
+pub const TTL_THRESHOLD: u32 = 120_960;
+pub const TTL_EXTEND: u32 = 518_400;
