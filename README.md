@@ -287,7 +287,7 @@ repository, not the target architecture.
 | `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 58 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
-| `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
+| `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
@@ -298,7 +298,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-277 tests in total: 106 off-chain (`cargo test --workspace`) and 171 against
+306 tests in total: 106 off-chain (`cargo test --workspace`) and 200 against
 the contracts (`cargo test --manifest-path contracts/Cargo.toml`). The Byzantine
 simulation's 6 tests live inside the aggregator crate, so its 52 and their 6 are
 reported as one figure of 58 by `cargo test`. The harness's 12 are 9
@@ -332,7 +332,7 @@ aphelion/
 ├── contracts/                  Soroban contracts (separate cargo workspace, wasm target)
 │   ├── registry/               Node identity, stake, reputation, slashing accounting
 │   ├── aggregator/             Submission verification, consensus, price storage, TWAP
-│   ├── slashing/               Dispute resolution and committee governance
+│   ├── slashing/               Dispute resolution, and the committee's elections
 │   ├── governance/             Timelock: every privileged call, queued and published first
 │   └── consumer-example/       Reference integration for dApp authors
 ├── crates/                     Off-chain services (root cargo workspace, host target)
@@ -945,11 +945,50 @@ cannot be shrunk below the quorum it has to reach — which would dismiss every
 dispute against anybody and switch slashing off without anyone appearing to
 decide it.
 
-The committee is appointed rather than elected. That is a governance posture,
-not an end state: it is the part of Aphelion that is least decentralised today,
-and naming it here is more useful than describing it as something it is not.
-What has changed is that appointing one is no longer instant — it runs through
-the timelock below, like every other privileged call.
+### Who is on the committee
+
+The committee is elected by the operators, weighted by the same `weight_of`
+that decides how much a node's price counts towards the median. A deployment
+appoints its first one — an election needs an electorate, and at genesis there
+are no nodes — and that committee serves a term like any other before the
+operators replace it.
+
+```
+  open_election ──▶ nominate ──▶ cast_ballot ──▶ finalize_election
+   anyone, once      an operator,   one ballot      anyone, once the
+   the term is       on a node      per node,       ballot closes;
+   served            they own       weighted        seats the top `seats`
+```
+
+Four properties again, and the same shape of reasoning behind them:
+
+- **The electorate is the node set.** The committee's power is to take an
+  operator's stake, so the choice of who holds it belongs to the people whose
+  stake is at risk. Weight is already the network's Sybil-resistant answer to
+  how much an identity should count: a fresh one starts at half weight and a
+  jailed one is worth nothing.
+- **One ballot names one candidate**, in a race with several winners. A slate
+  ballot would let a bare majority of weight take *every* seat; naming one
+  means a faction holding more than `1/(seats+1)` of the weight can seat
+  somebody no matter who else votes. The committee that judges operators
+  should not be winnable outright by whoever is largest this quarter.
+- **A failed election changes nothing.** Fewer eligible winners than the quorum
+  and the sitting committee stays. Vacating the seats would let an attacker
+  switch slashing off for everybody by suppressing turnout — the same
+  fail-open the quorum rule exists to refuse. The cost is real and worth
+  stating plainly: a committee nobody replaces holds over indefinitely.
+- **Governance can remove a member and cannot seat one.** There is no
+  `add_member`. That asymmetry is the guardian's, one level down: a power that
+  can only subtract cannot install anybody, so the worst a captured timelock
+  achieves is a smaller committee — and it cannot shrink one below its quorum
+  either.
+
+Two things this is not. The committee is drawn from operators, so it is
+operators judging operators; the conflict-of-interest rule and a reward paid to
+the reporter rather than the committee bound that, but they do not remove it.
+And every seat turns over at once, which is simple to reason about and loses
+the continuity a staggered committee would keep. Both are worth revisiting
+against a real network rather than in advance of one.
 
 ---
 
@@ -959,7 +998,7 @@ the timelock below, like every other privileged call.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
 
@@ -1011,7 +1050,11 @@ decisions rather than the plumbing:
   are shed and the network keeps working, fresh identities cannot outvote proven
   ones, and undoing one dishonest round takes ten honest ones
 - `aphelion-slashing` — that a dispute nobody voted on is dismissed rather than
-  upheld, and that a failed appeal pays the side it dragged back
+  upheld, that a failed appeal pays the side it dragged back, that a ballot is
+  worth what the node was worth when it was cast, that a candidate jailed
+  during the ballot does not take the seat they were winning, and that an
+  election too thin to fill its quorum leaves the sitting committee in place
+  rather than vacating it
 - `aphelion-governance` — that changing the delay takes the delay, that the
   window a proposal was queued under cannot be widened underneath it, that the
   guardian can stop a proposal and start nothing, and that the last proposer

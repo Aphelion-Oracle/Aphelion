@@ -2,7 +2,10 @@ use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
-use crate::{Config, Dispute, DisputeStatus, Slashing, SlashingClient};
+use crate::{
+    Candidate, Config, Dispute, DisputeStatus, ElectionPhase, ElectionStatus, Slashing,
+    SlashingClient,
+};
 use aphelion_registry::{Registry, RegistryClient};
 
 const BASE_TIME: u64 = 1_735_689_600;
@@ -16,6 +19,17 @@ const SLASH_AMOUNT: i128 = 5_000_000_000; // 500 XLM
 const REPORTER_REWARD: i128 = 500_000_000; // 50 XLM
 const VOTING_PERIOD: u64 = 3 * 24 * 3600;
 const APPEAL_PERIOD: u64 = 2 * 24 * 3600;
+
+const SEATS: u32 = 3;
+const NOMINATION_PERIOD: u64 = 2 * 24 * 3600;
+const ELECTION_PERIOD: u64 = 3 * 24 * 3600;
+const TERM_LENGTH: u64 = 90 * 24 * 3600;
+
+/// What a newly registered node is worth: half weight, per the registry's
+/// `STARTING_REPUTATION`. Every node in these tests is a newcomer, so weight
+/// asymmetry in a ballot comes from owning more nodes rather than from
+/// reputation -- which is the property being tested anyway.
+const NEWCOMER_WEIGHT: u64 = 5_000;
 
 struct Harness<'a> {
     env: Env,
@@ -54,11 +68,21 @@ fn setup() -> Harness<'static> {
         &JAIL_PERIOD,
     );
 
+    // The accused: a real registered node with real bonded stake.
+    let accused_owner = Address::generate(&env);
+    token_admin.mint(&accused_owner, &(MIN_STAKE * 4));
+    let accused = BytesN::from_array(&env, &[7u8; 32]);
+    registry.register(&accused_owner, &accused, &(MIN_STAKE * 2));
+
+    // Five neutral members, plus the accused's own operator. Seats are only
+    // filled by an election now, so a member who has to be on the committee
+    // for a test has to be there from genesis.
     let committee: std::vec::Vec<Address> = (0..5).map(|_| Address::generate(&env)).collect();
     let mut committee_vec = Vec::new(&env);
     for m in &committee {
         committee_vec.push_back(m.clone());
     }
+    committee_vec.push_back(accused_owner.clone());
 
     let slashing = SlashingClient::new(&env, &slashing_id);
     slashing.initialize(
@@ -74,15 +98,13 @@ fn setup() -> Harness<'static> {
             rep_penalty: 2_000,
             slash_amount: SLASH_AMOUNT,
             reporter_reward: REPORTER_REWARD,
+            seats: SEATS,
+            nomination_period: NOMINATION_PERIOD,
+            election_period: ELECTION_PERIOD,
+            term_length: TERM_LENGTH,
         },
         &committee_vec,
     );
-
-    // The accused: a real registered node with real bonded stake.
-    let accused_owner = Address::generate(&env);
-    token_admin.mint(&accused_owner, &(MIN_STAKE * 4));
-    let accused = BytesN::from_array(&env, &[7u8; 32]);
-    registry.register(&accused_owner, &accused, &(MIN_STAKE * 2));
 
     let reporter = Address::generate(&env);
     token_admin.mint(&reporter, &(DISPUTE_BOND * 10));
@@ -122,6 +144,71 @@ impl Harness<'_> {
     fn advance(&self, seconds: u64) {
         let now = self.env.ledger().timestamp();
         self.env.ledger().set_timestamp(now + seconds);
+    }
+
+    /// Bond another node under `owner`. Weight follows nodes, so "how much is
+    /// this participant worth in an election" is "how many of these do they
+    /// have".
+    fn node(&self, owner: &Address, seed: u8) -> BytesN<32> {
+        self.token_admin.mint(owner, &MIN_STAKE);
+        let pubkey = BytesN::from_array(&self.env, &[seed; 32]);
+        self.registry.register(owner, &pubkey, &MIN_STAKE);
+        pubkey
+    }
+
+    /// A fresh operator with one node.
+    fn operator(&self, seed: u8) -> (Address, BytesN<32>) {
+        let owner = Address::generate(&self.env);
+        let node = self.node(&owner, seed);
+        (owner, node)
+    }
+
+    /// Put a node below the jail threshold, from the aggregator's seat: what
+    /// happens to a node that submits a price outside the consensus band.
+    fn jail(&self, node: &BytesN<32>) {
+        self.registry.penalize(node, &2_500, &0);
+        assert_eq!(self.registry.weight_of(node), 0);
+    }
+
+    /// Serve the sitting committee's term and open an election.
+    fn open_election(&self) -> u64 {
+        self.advance(TERM_LENGTH);
+        self.slashing.open_election()
+    }
+
+    fn tally(&self, id: u64, candidate: &Address) -> u64 {
+        self.slashing
+            .candidates(&id)
+            .iter()
+            .find(|c: &Candidate| &c.address == candidate)
+            .map(|c| c.weight)
+            .unwrap_or(0)
+    }
+
+    fn seated(&self) -> std::vec::Vec<Address> {
+        self.slashing.committee().iter().collect()
+    }
+
+    /// Run an election that seats three fresh operators, each voting for
+    /// themselves, and return them in the order they stood.
+    fn elect_three(&self) -> (Address, Address, Address) {
+        let (alice, a) = self.operator(20);
+        let (bob, b) = self.operator(21);
+        let (carol, c) = self.operator(22);
+
+        self.open_election();
+        self.slashing.nominate(&alice, &a);
+        self.slashing.nominate(&bob, &b);
+        self.slashing.nominate(&carol, &c);
+
+        self.advance(NOMINATION_PERIOD);
+        self.slashing.cast_ballot(&alice, &a, &alice);
+        self.slashing.cast_ballot(&bob, &b, &bob);
+        self.slashing.cast_ballot(&carol, &c, &carol);
+
+        self.advance(ELECTION_PERIOD);
+        assert_eq!(self.slashing.finalize_election(), ElectionStatus::Seated);
+        (alice, bob, carol)
     }
 
     fn dispute(&self, id: u64) -> Dispute {
@@ -261,7 +348,9 @@ fn a_member_votes_once_per_round() {
 #[should_panic(expected = "Error(Contract, #27)")] // ConflictOfInterest
 fn an_operator_cannot_vote_on_a_dispute_against_their_own_node() {
     let h = setup();
-    h.slashing.add_member(&h.accused_owner);
+    // The accused's operator sits on the committee from genesis, which is the
+    // only way onto it short of an election -- and exactly the situation the
+    // rule exists for.
     let id = h.open();
     h.slashing.vote(&h.accused_owner, &id, &false);
 }
@@ -493,33 +582,66 @@ fn an_appeal_after_the_window_is_refused() {
 // -- committee --------------------------------------------------------------
 
 #[test]
-fn the_committee_can_grow_and_shrink() {
+fn admin_can_empty_a_seat_and_cannot_fill_one() {
     let h = setup();
-    let newcomer = Address::generate(&h.env);
-    h.slashing.add_member(&newcomer);
     assert_eq!(h.slashing.committee().len(), 6);
 
-    h.slashing.remove_member(&newcomer);
+    h.slashing.remove_member(&h.committee[0].clone());
     assert_eq!(h.slashing.committee().len(), 5);
+    assert!(!h.seated().contains(&h.committee[0]));
+
+    // There is no `add_member` to put them back with. The seat stays empty
+    // until an election fills it, which is the whole of the asymmetry: the
+    // timelock can subtract from the committee and can never install one.
+    h.slashing.remove_member(&h.committee[1].clone());
+    assert_eq!(h.slashing.committee().len(), 4);
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #12)")] // CommitteeTooSmall
 fn a_committee_cannot_shrink_below_the_quorum_it_must_reach() {
     let h = setup();
-    // Five members, quorum three. Removing three leaves a committee that
+    // Six members, quorum three. Removing four leaves a committee that
     // dismisses every dispute filed against anybody -- a quiet way to switch
     // slashing off entirely.
     h.slashing.remove_member(&h.committee[0].clone());
     h.slashing.remove_member(&h.committee[1].clone());
     h.slashing.remove_member(&h.committee[2].clone());
+    h.slashing.remove_member(&h.committee[3].clone());
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #11)")] // AlreadyCommitteeMember
-fn a_member_cannot_be_added_twice() {
+fn a_genesis_committee_with_the_same_member_twice_is_refused() {
     let h = setup();
-    h.slashing.add_member(&h.committee[0].clone());
+    // [A, A, B] with a quorum of three passes a length check and can never
+    // resolve anything: the duplicate counts twice towards quorum and votes
+    // once. Refused at the only point it can be, since nothing can add a
+    // member afterwards.
+    let fresh = env_with(&h);
+    let member = Address::generate(&h.env);
+    let mut committee = Vec::new(&h.env);
+    committee.push_back(member.clone());
+    committee.push_back(member);
+    committee.push_back(Address::generate(&h.env));
+    fresh.initialize(&h.slashing.get_config(), &committee);
+}
+
+/// A second, uninitialised slashing contract in the same environment, for the
+/// tests that are about `initialize` itself.
+fn env_with<'a>(h: &Harness<'a>) -> SlashingClient<'a> {
+    SlashingClient::new(&h.env, &h.env.register(Slashing, ()))
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")] // InvalidConfig
+fn a_committee_that_could_not_reach_quorum_at_full_strength_is_refused() {
+    let h = setup();
+    let mut config = h.slashing.get_config();
+    // Three seats, quorum four: every election would seat a committee that
+    // dismisses every dispute filed against anybody.
+    config.quorum = SEATS + 1;
+    h.slashing.set_config(&config);
 }
 
 #[test]
@@ -566,4 +688,469 @@ fn a_dispute_records_where_its_evidence_lives() {
         String::from_str(&h.env, "ipfs://bafyevidence")
     );
     assert_eq!(h.dispute(id).feed, symbol_short!("BTC_USD"));
+}
+
+// -- elections --------------------------------------------------------------
+
+#[test]
+fn the_appointed_committee_serves_a_term_like_any_elected_one() {
+    let h = setup();
+    // There is no way to avoid appointing the first committee -- an election
+    // needs an electorate, and at genesis there are no nodes. What it does not
+    // get is a longer tenure than one it won.
+    assert_eq!(h.slashing.next_election(), BASE_TIME + TERM_LENGTH);
+    assert!(h.slashing.current_election().is_none());
+    assert_eq!(h.slashing.election_count(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #42)")] // TermNotServed
+fn an_election_cannot_be_opened_before_the_term_is_served() {
+    let h = setup();
+    h.advance(TERM_LENGTH - 1);
+    h.slashing.open_election();
+}
+
+#[test]
+fn an_election_walks_from_nominating_through_balloting_to_a_count() {
+    let h = setup();
+    let id = h.open_election();
+    assert_eq!(h.slashing.current_election(), Some(id));
+
+    assert_eq!(h.slashing.election_phase(&id), ElectionPhase::Nominating);
+    h.advance(NOMINATION_PERIOD);
+    assert_eq!(h.slashing.election_phase(&id), ElectionPhase::Balloting);
+    h.advance(ELECTION_PERIOD);
+    assert_eq!(h.slashing.election_phase(&id), ElectionPhase::Counting);
+
+    // Nobody stood, so nobody is seated -- but the phase still walks to a
+    // recorded end rather than leaving an election open forever.
+    assert_eq!(h.slashing.finalize_election(), ElectionStatus::Failed);
+    assert_eq!(h.slashing.election_phase(&id), ElectionPhase::Failed);
+    assert!(h.slashing.current_election().is_none());
+}
+
+#[test]
+fn an_election_seats_the_candidates_with_the_most_weight_behind_them() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    let (carol, c) = h.operator(12);
+    let (dave, d) = h.operator(13);
+    // Two operators who vote without standing.
+    let (erin, e) = h.operator(14);
+    let (frank, f) = h.operator(15);
+
+    let id = h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.slashing.nominate(&bob, &b);
+    h.slashing.nominate(&carol, &c);
+    h.slashing.nominate(&dave, &d);
+
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+    h.slashing.cast_ballot(&erin, &e, &alice);
+    h.slashing.cast_ballot(&frank, &f, &alice);
+    h.slashing.cast_ballot(&bob, &b, &bob);
+    h.slashing.cast_ballot(&h.accused_owner, &h.accused, &bob);
+    h.slashing.cast_ballot(&carol, &c, &carol);
+    h.slashing.cast_ballot(&dave, &d, &dave);
+
+    assert_eq!(h.tally(id, &alice), NEWCOMER_WEIGHT * 3);
+    assert_eq!(h.tally(id, &bob), NEWCOMER_WEIGHT * 2);
+    assert_eq!(h.tally(id, &carol), NEWCOMER_WEIGHT);
+    assert_eq!(h.tally(id, &dave), NEWCOMER_WEIGHT);
+
+    h.advance(ELECTION_PERIOD);
+    assert_eq!(h.slashing.finalize_election(), ElectionStatus::Seated);
+
+    let seated = h.seated();
+    assert_eq!(seated.len(), SEATS as usize);
+    assert!(seated.contains(&alice));
+    assert!(seated.contains(&bob));
+    // Carol and Dave drew the same weight and there was one seat left. It goes
+    // to whoever stood first, which is a rule nobody can compute their way
+    // around after the ballot has closed.
+    assert!(seated.contains(&carol));
+    assert!(!seated.contains(&dave));
+
+    let election = h.slashing.get_election(&id).unwrap();
+    assert_eq!(election.seated, SEATS);
+    assert_eq!(election.ballots, 7);
+    assert_eq!(election.turnout, NEWCOMER_WEIGHT * 7);
+}
+
+#[test]
+fn the_committee_that_votes_on_disputes_is_the_one_the_election_seated() {
+    let h = setup();
+    let displaced = h.committee[0].clone();
+    let (alice, _, _) = h.elect_three();
+
+    assert_eq!(h.seated().len(), SEATS as usize);
+    assert!(!h.seated().contains(&displaced));
+
+    let id = h.open();
+    h.slashing.vote(&alice, &id, &true);
+    assert_eq!(h.slashing.vote_of(&id, &alice), Some(true));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")] // NotCommitteeMember
+fn a_member_who_lost_their_seat_stops_voting() {
+    let h = setup();
+    let displaced = h.committee[0].clone();
+    h.elect_three();
+    let id = h.open();
+    h.slashing.vote(&displaced, &id, &true);
+}
+
+#[test]
+fn a_seated_committee_starts_a_fresh_term() {
+    let h = setup();
+    h.elect_three();
+    let now = h.env.ledger().timestamp();
+    assert_eq!(h.slashing.next_election(), now + TERM_LENGTH);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #40)")] // ElectionRunning
+fn only_one_election_runs_at_a_time() {
+    let h = setup();
+    h.open_election();
+    // Even once another term's worth of time has passed: the running one has
+    // to be counted before the next is opened, or a ballot could be cast into
+    // whichever of two open elections suited the voter.
+    h.advance(TERM_LENGTH);
+    h.slashing.open_election();
+}
+
+// -- who may stand, and on what --------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #47)")] // NotEligible
+fn a_candidate_must_stand_on_a_node_they_own() {
+    let h = setup();
+    let (_, node) = h.operator(10);
+    let outsider = Address::generate(&h.env);
+    h.open_election();
+    // Anyone can make an address. A node carrying weight costs a bond under a
+    // key with a history, and that is the whole of the entry price.
+    h.slashing.nominate(&outsider, &node);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #47)")] // NotEligible
+fn a_jailed_operator_cannot_stand() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    h.jail(&a);
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #44)")] // AlreadyNominated
+fn standing_twice_in_one_election_is_refused() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let second = h.node(&alice, 11);
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    // A second node buys a second *ballot*, never a second candidacy: seats
+    // are held by people.
+    h.slashing.nominate(&alice, &second);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #43)")] // WrongElectionPhase
+fn nominations_close_when_the_ballot_opens() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    h.open_election();
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.nominate(&alice, &a);
+}
+
+// -- ballots ----------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #43)")] // WrongElectionPhase
+fn a_ballot_cannot_be_cast_while_nominations_are_still_open() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+}
+
+#[test]
+fn an_operator_votes_once_for_every_node_they_own() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    let b2 = h.node(&bob, 12);
+    let b3 = h.node(&bob, 13);
+
+    let id = h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.slashing.nominate(&bob, &b);
+
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&bob, &b, &bob);
+    h.slashing.cast_ballot(&bob, &b2, &bob);
+    h.slashing.cast_ballot(&bob, &b3, &bob);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+
+    // Weight follows nodes, not people. Three bonds is three votes -- and
+    // three times the stake at risk if any of them misbehaves.
+    assert_eq!(h.tally(id, &bob), NEWCOMER_WEIGHT * 3);
+    assert_eq!(h.tally(id, &alice), NEWCOMER_WEIGHT);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #46)")] // AlreadyBalloted
+fn a_node_casts_one_ballot() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.slashing.nominate(&bob, &b);
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+    h.slashing.cast_ballot(&alice, &a, &bob);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #47)")] // NotEligible
+fn a_node_that_is_not_yours_does_not_vote_for_you() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (_, b) = h.operator(11);
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &b, &alice);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #47)")] // NotEligible
+fn a_jailed_node_carries_no_vote() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.advance(NOMINATION_PERIOD);
+    h.jail(&b);
+    h.slashing.cast_ballot(&bob, &b, &alice);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #45)")] // NotCandidate
+fn a_ballot_for_somebody_who_did_not_stand_is_refused() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let bystander = Address::generate(&h.env);
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &a, &bystander);
+}
+
+#[test]
+fn how_each_node_voted_is_on_the_record() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    let id = h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&bob, &b, &alice);
+
+    assert_eq!(h.slashing.ballot_of(&id, &b), Some(alice));
+    assert_eq!(h.slashing.ballot_of(&id, &a), None);
+}
+
+#[test]
+fn a_ballot_is_worth_what_the_node_was_worth_when_it_was_cast() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    let id = h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&bob, &b, &alice);
+    assert_eq!(h.tally(id, &alice), NEWCOMER_WEIGHT);
+
+    // Bob's node is jailed after his ballot is in the box. Re-reading weight
+    // at the count would let reputation moving between the two silently
+    // re-weight a vote already cast -- the same capture the aggregator makes
+    // when a price submission arrives.
+    h.jail(&b);
+    assert_eq!(h.tally(id, &alice), NEWCOMER_WEIGHT);
+
+    h.advance(ELECTION_PERIOD);
+    assert_eq!(
+        h.slashing.get_election(&id).unwrap().turnout,
+        NEWCOMER_WEIGHT
+    );
+}
+
+// -- counting ---------------------------------------------------------------
+
+#[test]
+#[should_panic(expected = "Error(Contract, #43)")] // WrongElectionPhase
+fn an_election_cannot_be_counted_before_its_ballot_closes() {
+    let h = setup();
+    h.open_election();
+    h.advance(NOMINATION_PERIOD + ELECTION_PERIOD - 1);
+    h.slashing.finalize_election();
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #41)")] // UnknownElection
+fn an_election_is_counted_once() {
+    let h = setup();
+    h.open_election();
+    h.advance(NOMINATION_PERIOD + ELECTION_PERIOD);
+    h.slashing.finalize_election();
+    // Counting stops being possible because nothing is running any more, not
+    // because a flag says so.
+    h.slashing.finalize_election();
+}
+
+#[test]
+fn an_election_that_cannot_fill_its_quorum_leaves_the_incumbents_in_place() {
+    let h = setup();
+    let incumbents = h.seated();
+    let (alice, a) = h.operator(10);
+
+    let id = h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+    h.advance(ELECTION_PERIOD);
+
+    // One winner against a quorum of three. Seating them would leave a
+    // committee that dismisses every dispute filed against anybody, so an
+    // attacker who can suppress turnout must not thereby switch slashing off.
+    assert_eq!(h.slashing.finalize_election(), ElectionStatus::Failed);
+    assert_eq!(h.seated(), incumbents);
+    assert_eq!(h.slashing.get_election(&id).unwrap().seated, 0);
+}
+
+#[test]
+fn a_failed_election_can_be_retried_at_once() {
+    let h = setup();
+    h.open_election();
+    h.advance(NOMINATION_PERIOD + ELECTION_PERIOD);
+    assert_eq!(h.slashing.finalize_election(), ElectionStatus::Failed);
+
+    // It cost a nomination period and a ballot to fail, so there is nothing to
+    // spam with -- and making the network wait out a full term for a committee
+    // it never managed to elect would penalise the wrong party.
+    assert_eq!(h.slashing.next_election(), h.env.ledger().timestamp());
+    assert_eq!(h.slashing.open_election(), 2);
+}
+
+#[test]
+fn a_candidacy_nobody_voted_for_is_not_a_mandate() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    let (carol, c) = h.operator(12);
+
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.slashing.nominate(&bob, &b);
+    h.slashing.nominate(&carol, &c);
+
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+    h.slashing.cast_ballot(&bob, &b, &bob);
+    h.advance(ELECTION_PERIOD);
+
+    // Three seats and exactly three candidates, but Carol drew nothing. An
+    // unopposed slate does not take the committee on zero turnout, so the
+    // election falls one short of its quorum and seats nobody.
+    assert_eq!(h.slashing.finalize_election(), ElectionStatus::Failed);
+}
+
+#[test]
+fn a_candidate_jailed_during_the_ballot_does_not_take_a_seat() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    let (carol, c) = h.operator(12);
+    let (dave, d) = h.operator(13);
+
+    h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.slashing.nominate(&bob, &b);
+    h.slashing.nominate(&carol, &c);
+    h.slashing.nominate(&dave, &d);
+
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+    h.slashing.cast_ballot(&h.accused_owner, &h.accused, &alice);
+    h.slashing.cast_ballot(&bob, &b, &bob);
+    h.slashing.cast_ballot(&carol, &c, &carol);
+    h.slashing.cast_ballot(&dave, &d, &dave);
+    h.advance(ELECTION_PERIOD);
+
+    // Alice led the ballot and was jailed before it was counted. Eligibility
+    // is rechecked at the count rather than trusted from the nomination: the
+    // seat goes to Dave, who would otherwise have missed out on the tie-break.
+    h.jail(&a);
+    assert_eq!(h.slashing.finalize_election(), ElectionStatus::Seated);
+
+    let seated = h.seated();
+    assert_eq!(seated.len(), SEATS as usize);
+    assert!(!seated.contains(&alice));
+    assert!(seated.contains(&bob));
+    assert!(seated.contains(&carol));
+    assert!(seated.contains(&dave));
+}
+
+#[test]
+fn a_config_change_does_not_move_the_bar_under_a_running_election() {
+    let h = setup();
+    let (alice, a) = h.operator(10);
+    let (bob, b) = h.operator(11);
+    let (carol, c) = h.operator(12);
+
+    let id = h.open_election();
+    h.slashing.nominate(&alice, &a);
+    h.slashing.nominate(&bob, &b);
+    h.slashing.nominate(&carol, &c);
+
+    // Governance widens the committee mid-ballot. The election was opened
+    // against three seats and a quorum of three, and that is what it counts
+    // against -- the same capture a governance proposal makes of its own eta.
+    let mut config = h.slashing.get_config();
+    config.seats = 5;
+    config.quorum = 5;
+    h.slashing.set_config(&config);
+
+    let election = h.slashing.get_election(&id).unwrap();
+    assert_eq!(election.seats, SEATS);
+    assert_eq!(election.quorum, 3);
+
+    h.advance(NOMINATION_PERIOD);
+    h.slashing.cast_ballot(&alice, &a, &alice);
+    h.slashing.cast_ballot(&bob, &b, &bob);
+    h.slashing.cast_ballot(&carol, &c, &carol);
+    h.advance(ELECTION_PERIOD);
+
+    assert_eq!(h.slashing.finalize_election(), ElectionStatus::Seated);
+    assert_eq!(h.seated().len(), 3);
+}
+
+#[test]
+fn an_unknown_election_reads_as_absent() {
+    let h = setup();
+    assert!(h.slashing.get_election(&99).is_none());
+    assert!(h.slashing.candidates(&99).is_empty());
+    assert!(h.slashing.current_election().is_none());
 }
