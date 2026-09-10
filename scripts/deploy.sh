@@ -137,9 +137,12 @@ deploy() {
 TOKEN="${APHELION_TOKEN:-}"
 if [[ -z "$TOKEN" ]]; then
     echo "Resolving the native asset contract..."
+    # No --source-account here, unlike every other call: deriving a builtin
+    # asset's contract id is pure arithmetic over the asset and the network
+    # passphrase, so the CLI stopped accepting an account for it. Passing one
+    # is an "unexpected argument" error, not a warning.
     TOKEN="$(stellar contract id asset \
         --asset native \
-        --source-account "$APHELION_STELLAR_SECRET" \
         --rpc-url "$RPC_URL" \
         --network-passphrase "$PASSPHRASE" 2>/dev/null)"
 fi
