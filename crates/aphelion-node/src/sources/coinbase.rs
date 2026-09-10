@@ -24,7 +24,7 @@ impl Coinbase {
     pub fn new(client: reqwest::Client) -> Self {
         Self {
             client,
-            base_url: BASE_URL.to_string(),
+            base_url: super::base_url(NAME, BASE_URL),
         }
     }
 

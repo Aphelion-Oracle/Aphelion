@@ -81,6 +81,29 @@ pub fn build(cfg: &SourcesConfig) -> Result<Vec<Arc<dyn PriceSource>>> {
     Ok(sources)
 }
 
+/// The endpoint to poll for a venue, overridable by environment.
+///
+/// `APHELION_SOURCE_URL_<VENUE>` — `APHELION_SOURCE_URL_BINANCE`, and so on —
+/// replaces the built-in address. It exists for two reasons. An operator may
+/// front an exchange with their own cache or regional proxy, and pointing the
+/// node at it should not require a fork. And the multi-process harness points
+/// every node at one fake exchange, so that a test of what several nodes do to
+/// each other never depends on a real venue being reachable.
+///
+/// Following `APHELION_STELLAR_BIN`, this is an environment variable rather
+/// than a config field: it describes where this particular process happens to
+/// run, not what the deployment is, and a config file that is copied between
+/// machines should not carry it.
+///
+/// An empty or whitespace-only value is treated as unset, so `VAR=` in a shell
+/// or a compose file means "use the default" rather than "poll the empty URL".
+pub(crate) fn base_url(venue: &str, default: &str) -> String {
+    std::env::var(format!("APHELION_SOURCE_URL_{}", venue.to_uppercase()))
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
 fn http_client(timeout: Duration) -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(timeout)
