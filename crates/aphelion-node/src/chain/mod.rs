@@ -12,6 +12,7 @@
 
 pub mod cli;
 pub mod mock;
+pub mod readonly;
 pub mod rpc;
 
 use aphelion_core::{FeedId, Price};
@@ -23,6 +24,7 @@ use crate::signer::SignedSubmission;
 
 pub use cli::CliChain;
 pub use mock::MockChain;
+pub use readonly::ReadOnlyChain;
 pub use rpc::RpcClient;
 
 /// A price as the aggregator currently holds it.

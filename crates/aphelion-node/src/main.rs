@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use aphelion_core::{FeedId, Price};
 use aphelion_node::api::AppState;
-use aphelion_node::chain::{ChainClient, CliChain, MockChain, RpcClient};
+use aphelion_node::chain::{ChainClient, CliChain, ReadOnlyChain, RpcClient};
 use aphelion_node::config::Config;
 use aphelion_node::db::Repo;
 use aphelion_node::engine::{run_retention, Collector, RoundRunner};
@@ -224,18 +224,19 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
     let rpc = Arc::new(RpcClient::new(&config.network.rpc_url)?);
 
     // In dry-run mode the node still needs a chain client for ledger time and
-    // for reads, but must not be able to submit — so it gets the mock, seeded
-    // from real ledger time, rather than a live client it is trusted not to use.
+    // for reads, but must not be able to submit — so the live client is
+    // wrapped in one that refuses writes, rather than replaced by a mock.
+    // A mock satisfies the second requirement by breaking the first: its
+    // ledger clock stands still while the node's advances, so every dry run
+    // eventually reports a clock skew that is not real, and its empty registry
+    // reports a registered node as unregistered. Dry run exists to show an
+    // operator what their node would do against the deployment they are
+    // pointed at, which means the reads have to be that deployment's.
     let chain: Arc<dyn ChainClient> = if dry_run {
-        let live = CliChain::new(config.network.clone())
-            .ok()
-            .map(|c| async move { c.ledger_time().await.ok() });
-        let now = match live {
-            Some(fut) => fut.await.unwrap_or_else(now_unix),
-            None => now_unix(),
-        };
         tracing::warn!("dry run: submissions are disabled");
-        Arc::new(MockChain::new(now))
+        Arc::new(ReadOnlyChain::new(Arc::new(CliChain::new(
+            config.network.clone(),
+        )?)))
     } else {
         Arc::new(CliChain::new(config.network.clone())?)
     };
@@ -310,10 +311,6 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
     }
     tracing::info!("stopped");
     Ok(())
-}
-
-fn now_unix() -> u64 {
-    chrono::Utc::now().timestamp().max(0) as u64
 }
 
 #[cfg(unix)]

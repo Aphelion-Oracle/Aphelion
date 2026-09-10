@@ -284,7 +284,7 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 55 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 58 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
@@ -297,7 +297,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-244 tests in total: 103 off-chain (`cargo test --workspace`) and 141 against
+247 tests in total: 106 off-chain (`cargo test --workspace`) and 141 against
 the contracts (`cargo test --manifest-path contracts/Cargo.toml`). The Byzantine
 simulation's 6 tests live inside the aggregator crate, so its 52 and their 6 are
 reported as one figure of 58 by `cargo test`. The harness's 12 are 9
@@ -305,7 +305,7 @@ process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 9 do without a database: they skip, and a skipped Rust test
 still reports as **passed**. A green `cargo test --workspace` on a machine with
-no Postgres has run 94 tests and reported 103. The skip prints a `SKIP` line, but
+no Postgres has run 97 tests and reported 106. The skip prints a `SKIP` line, but
 `cargo test` swallows it unless you pass `--nocapture`, so treat the harness as
 covered only where it is actually given a database — which is what the `harness`
 job in CI is for.
@@ -422,6 +422,9 @@ export APHELION_STELLAR_SECRET="S..."      # funds submission transactions
 cargo run -p aphelion-node -- check-sources
 
 # 4. Watch what the node *would* publish, without submitting anything.
+#    Reads are live -- real ledger time, your real registry record -- so what
+#    it reports is the deployment you are pointed at; only submission is
+#    refused, one layer below the code that decides whether to submit.
 cargo run -p aphelion-node -- run --dry-run
 
 # 5. Register on chain, then run for real.
