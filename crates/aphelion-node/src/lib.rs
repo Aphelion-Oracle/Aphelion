@@ -27,6 +27,7 @@ pub mod engine;
 pub mod error;
 pub mod signer;
 pub mod sources;
+pub mod strkey;
 pub mod telemetry;
 
 pub use config::Config;
