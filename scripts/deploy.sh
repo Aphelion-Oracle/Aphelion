@@ -21,6 +21,15 @@
 # setters. The registry's unbonding period and jail term are the exception:
 # nothing can change them after `initialize`, because both are promises made to
 # nodes that already bonded stake under them. Choose those two carefully here.
+#
+# The last thing this script does is hand all three contracts to the governance
+# timelock, so "the admin can revise later" means a proposal published in
+# advance and executed after a delay, not a key acting in one transaction.
+# Everything above is set by the admin account first and handed over
+# afterwards, because a deployment that had to serve a day's delay to add its
+# first feed would never finish. Set APHELION_SKIP_HANDOVER=1 to keep the admin
+# key: reasonable while iterating on a throwaway deployment, wrong for one
+# anybody relies on.
 
 set -euo pipefail
 
@@ -84,6 +93,35 @@ DISPUTE_REP_PENALTY="${APHELION_DISPUTE_REP_PENALTY:-2000}"
 DISPUTE_SLASH="${APHELION_DISPUTE_SLASH:-5000000000}" # 500 XLM
 REPORTER_REWARD="${APHELION_REPORTER_REWARD:-500000000}"
 
+# -- governance ------------------------------------------------------------
+# The timelock that administers the other three once this script is done.
+#
+# One day. The window between a parameter change being published and becoming
+# executable, which is the window an operator who dislikes it has to unbond.
+# The contract's own floor, and the shortest delay that is still a delay: an
+# emergency that cannot survive a day is not answered by governance anyway.
+TIMELOCK_DELAY="${APHELION_TIMELOCK_DELAY:-86400}"
+# Seven days to execute a proposal once its delay is served. Past that it is
+# dead and has to be queued again -- delay included -- which is what stops a
+# proposal from last spring being fired at a network it no longer suits.
+TIMELOCK_GRACE="${APHELION_TIMELOCK_GRACE:-604800}"
+# May cancel a queued proposal, and may do nothing else: it cannot queue one,
+# cannot execute one, and cannot touch the timelock's own configuration. That
+# is what makes it a key worth holding somewhere other than the proposer --
+# which the default below is not. See the note this script prints at the end.
+GUARDIAN="${APHELION_GUARDIAN:-$APHELION_ADMIN_ACCOUNT}"
+# `Governance::initialize` is authorised by the guardian, so the guardian's key
+# is the one that has to sign it -- not the account paying for the deployment.
+GUARDIAN_SECRET="${APHELION_GUARDIAN_SECRET:-}"
+# Who may queue proposals. Space-separated, like FEEDS.
+PROPOSERS="${APHELION_PROPOSERS:-$APHELION_ADMIN_ACCOUNT}"
+
+if [[ -n "${APHELION_SKIP_HANDOVER:-}" ]]; then
+    HANDOVER=0
+else
+    HANDOVER=1
+fi
+
 command -v stellar >/dev/null 2>&1 || {
     echo "error: the stellar CLI is not installed." >&2
     echo "see https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli" >&2
@@ -110,20 +148,56 @@ if (( JAIL_PERIOD >= UNBONDING )); then
     exit 64
 fi
 
+# Both bounds are the governance contract's own, checked here for the same
+# reason as the jail term above: a sentence beats contract error #4 arriving
+# from inside a transaction that has already been paid for.
+if (( TIMELOCK_DELAY < 86400 || TIMELOCK_DELAY > 2592000 )); then
+    echo "error: timelock delay ($TIMELOCK_DELAY s) must be between one day" >&2
+    echo "(86400) and thirty (2592000). Below the floor the delay stops being" >&2
+    echo "one; above the ceiling it stops being governance." >&2
+    exit 64
+fi
+
+if (( TIMELOCK_GRACE < 86400 || TIMELOCK_GRACE > 2592000 )); then
+    echo "error: timelock grace period ($TIMELOCK_GRACE s) must be between one" >&2
+    echo "day (86400) and thirty (2592000). A window shorter than a day can be" >&2
+    echo "missed by an operator who was simply asleep." >&2
+    exit 64
+fi
+
+# The guardian authorises `initialize`, and the stellar CLI signs with exactly
+# one account. If the guardian is somebody else -- which is the arrangement
+# worth having -- their secret has to be here too.
+if [[ "$GUARDIAN" != "$APHELION_ADMIN_ACCOUNT" && -z "$GUARDIAN_SECRET" ]]; then
+    echo "error: APHELION_GUARDIAN is $GUARDIAN, which is not the admin" >&2
+    echo "account, so the deploying key cannot authorise the timelock's" >&2
+    echo "initialize on its behalf. Either set APHELION_GUARDIAN_SECRET to" >&2
+    echo "that account's seed, or deploy with the guardian left at the admin" >&2
+    echo "account and move it afterwards with a proposal." >&2
+    exit 64
+fi
+: "${GUARDIAN_SECRET:=$APHELION_STELLAR_SECRET}"
+
 if [[ ! -f "$WASM_DIR/aphelion_registry.wasm" ]]; then
     echo "No build artefacts found; building..."
     "$ROOT/scripts/build-contracts.sh"
 fi
 
-invoke() {
-    local contract="$1"
-    shift
+invoke_as() {
+    local secret="$1" contract="$2"
+    shift 2
     stellar contract invoke \
         --id "$contract" \
-        --source-account "$APHELION_STELLAR_SECRET" \
+        --source-account "$secret" \
         --rpc-url "$RPC_URL" \
         --network-passphrase "$PASSPHRASE" \
         -- "$@"
+}
+
+invoke() {
+    local contract="$1"
+    shift
+    invoke_as "$APHELION_STELLAR_SECRET" "$contract" "$@"
 }
 
 deploy() {

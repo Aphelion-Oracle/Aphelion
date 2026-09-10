@@ -1,0 +1,21 @@
+[package]
+name = "aphelion-governance"
+description = "Aphelion governance: a timelock through which every privileged call is queued, published and delayed."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+# The registry is registered alongside the timelock in the tests so that
+# proposals are executed against a real administered contract rather than a
+# stub written to agree with them.
+aphelion-registry = { path = "../registry" }

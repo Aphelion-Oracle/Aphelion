@@ -288,6 +288,7 @@ repository, not the target architecture.
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals | ✅ Implemented | 31 |
+| `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
@@ -297,7 +298,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-247 tests in total: 106 off-chain (`cargo test --workspace`) and 141 against
+277 tests in total: 106 off-chain (`cargo test --workspace`) and 171 against
 the contracts (`cargo test --manifest-path contracts/Cargo.toml`). The Byzantine
 simulation's 6 tests live inside the aggregator crate, so its 52 and their 6 are
 reported as one figure of 58 by `cargo test`. The harness's 12 are 9
@@ -332,6 +333,7 @@ aphelion/
 │   ├── registry/               Node identity, stake, reputation, slashing accounting
 │   ├── aggregator/             Submission verification, consensus, price storage, TWAP
 │   ├── slashing/               Dispute resolution and committee governance
+│   ├── governance/             Timelock: every privileged call, queued and published first
 │   └── consumer-example/       Reference integration for dApp authors
 ├── crates/                     Off-chain services (root cargo workspace, host target)
 │   ├── aphelion-core/          Shared price math and the canonical signing payload
@@ -943,9 +945,11 @@ cannot be shrunk below the quorum it has to reach — which would dismiss every
 dispute against anybody and switch slashing off without anyone appearing to
 decide it.
 
-The committee is admin-managed at launch. That is a governance posture, not an
-end state: it is the part of Aphelion that is least decentralised today, and
-naming it here is more useful than describing it as something it is not.
+The committee is appointed rather than elected. That is a governance posture,
+not an end state: it is the part of Aphelion that is least decentralised today,
+and naming it here is more useful than describing it as something it is not.
+What has changed is that appointing one is no longer instant — it runs through
+the timelock below, like every other privileged call.
 
 ---
 
@@ -955,7 +959,7 @@ naming it here is more useful than describing it as something it is not.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · testnet deployment |
-| **3 — Hardening** | Dispute governance beyond an admin-managed committee · Grafana dashboards ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
 
@@ -1008,6 +1012,10 @@ decisions rather than the plumbing:
   ones, and undoing one dishonest round takes ten honest ones
 - `aphelion-slashing` — that a dispute nobody voted on is dismissed rather than
   upheld, and that a failed appeal pays the side it dragged back
+- `aphelion-governance` — that changing the delay takes the delay, that the
+  window a proposal was queued under cannot be widened underneath it, that the
+  guardian can stop a proposal and start nothing, and that the last proposer
+  cannot be removed
 - `aphelion-consumer-example` — that a single-round crash cannot liquidate a
   solvent borrower, and a sustained one can
 - `aphelion-node` integration `multi_node` — that the median a node predicts

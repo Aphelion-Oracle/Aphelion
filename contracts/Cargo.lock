@@ -50,6 +50,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aphelion-governance"
+version = "0.1.0"
+dependencies = [
+ "aphelion-registry",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "aphelion-registry"
 version = "0.1.0"
 dependencies = [

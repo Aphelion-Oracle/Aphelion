@@ -6,7 +6,7 @@
 # either side able to break the other.
 [workspace]
 resolver = "2"
-members = ["registry", "aggregator", "slashing", "consumer-example"]
+members = ["registry", "aggregator", "slashing", "governance", "consumer-example"]
 
 [workspace.package]
 version = "0.1.0"
