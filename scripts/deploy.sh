@@ -93,6 +93,27 @@ DISPUTE_REP_PENALTY="${APHELION_DISPUTE_REP_PENALTY:-2000}"
 DISPUTE_SLASH="${APHELION_DISPUTE_SLASH:-5000000000}" # 500 XLM
 REPORTER_REWARD="${APHELION_REPORTER_REWARD:-500000000}"
 
+# -- the committee's elections ---------------------------------------------
+# $COMMITTEE above is only the committee this deployment *starts* with. There
+# is no way around appointing that one -- an election needs an electorate, and
+# at genesis there are no nodes -- but it serves a term like any other and is
+# replaced by a vote of the operators, not by the admin key. Nothing can add a
+# member to a committee; the admin can only remove one.
+#
+# Five seats. Odd, so a committee at full strength cannot deadlock, and small
+# enough that every member is a person somebody can name.
+SEATS="${APHELION_SEATS:-5}"
+# Three days to stand. Long enough that an operator who reads the ledger
+# weekly can still enter a race they did not know was running.
+NOMINATION_PERIOD="${APHELION_NOMINATION_PERIOD:-259200}"
+# Seven days to vote. Voting costs a transaction per node and the electorate
+# is spread across every timezone that runs one.
+ELECTION_PERIOD="${APHELION_ELECTION_PERIOD:-604800}"
+# Ninety days a seat. Elections are permissionless, so this is the only thing
+# stopping anyone from running one continuously; against that, a term nobody
+# can shorten is a committee nobody can replace for that long.
+TERM_LENGTH="${APHELION_TERM_LENGTH:-7776000}"
+
 # -- governance ------------------------------------------------------------
 # The timelock that administers the other three once this script is done.
 #
@@ -155,6 +176,33 @@ if (( TIMELOCK_DELAY < 86400 || TIMELOCK_DELAY > 2592000 )); then
     echo "error: timelock delay ($TIMELOCK_DELAY s) must be between one day" >&2
     echo "(86400) and thirty (2592000). Below the floor the delay stops being" >&2
     echo "one; above the ceiling it stops being governance." >&2
+    exit 64
+fi
+
+# Checked here rather than left to contract error #4, for the same reason as
+# the jail term and the timelock delay: a sentence beats an error code
+# arriving from inside a transaction that has already been paid for.
+if (( SEATS < DISPUTE_QUORUM )); then
+    echo "error: APHELION_SEATS ($SEATS) is below APHELION_DISPUTE_QUORUM" >&2
+    echo "($DISPUTE_QUORUM). Every election would then seat a committee that" >&2
+    echo "could not reach quorum at full strength, which dismisses every" >&2
+    echo "dispute filed against anybody." >&2
+    exit 64
+fi
+
+if (( NOMINATION_PERIOD < 86400 || ELECTION_PERIOD < 86400 )); then
+    echo "error: the nomination period ($NOMINATION_PERIOD s) and the ballot" >&2
+    echo "($ELECTION_PERIOD s) must each be at least a day. A window shorter" >&2
+    echo "than that is one an operator can miss by being asleep, and an" >&2
+    echo "election only the attentive can enter is not much of an election." >&2
+    exit 64
+fi
+
+if (( TERM_LENGTH < 2592000 || TERM_LENGTH > 31536000 )); then
+    echo "error: the term ($TERM_LENGTH s) must be between thirty days" >&2
+    echo "(2592000) and a year (31536000). Below the floor the network spends" >&2
+    echo "its time electing rather than operating; above the ceiling a" >&2
+    echo "committee nobody can replace sits for longer than anyone agreed to." >&2
     exit 64
 fi
 
@@ -237,6 +285,8 @@ Aphelion deployment
   feeds              : $FEEDS
   dispute committee  : $COMMITTEE
   dispute quorum     : $DISPUTE_QUORUM
+  committee seats    : $SEATS, elected every $TERM_LENGTH seconds
+  election windows   : $NOMINATION_PERIOD s to stand, $ELECTION_PERIOD s to vote
 
 SUMMARY
 
@@ -317,11 +367,17 @@ SLASHING_CONFIG="$(jq -nc \
     --argjson rep_penalty "$DISPUTE_REP_PENALTY" \
     --arg slash_amount "$DISPUTE_SLASH" \
     --arg reporter_reward "$REPORTER_REWARD" \
+    --argjson seats "$SEATS" \
+    --argjson nomination_period "$NOMINATION_PERIOD" \
+    --argjson election_period "$ELECTION_PERIOD" \
+    --argjson term_length "$TERM_LENGTH" \
     '{admin: $admin, registry: $registry, token: $token, quorum: $quorum,
       voting_period: $voting_period, appeal_period: $appeal_period,
       dispute_bond: $dispute_bond, appeal_bond: $appeal_bond,
       rep_penalty: $rep_penalty, slash_amount: $slash_amount,
-      reporter_reward: $reporter_reward}')"
+      reporter_reward: $reporter_reward, seats: $seats,
+      nomination_period: $nomination_period, election_period: $election_period,
+      term_length: $term_length}')"
 COMMITTEE_JSON="$(printf '%s\n' $COMMITTEE | jq -Rc '[.]' | jq -sc 'add')"
 invoke "$SLASHING" initialize \
     --config "$SLASHING_CONFIG" \
@@ -370,4 +426,11 @@ Next:
 The aggregator will not publish until $QUORUM nodes carrying
 $MIN_WEIGHT_BPS bps between them are submitting. A registered node starts at
 half weight, so the first rounds need more nodes than the steady state does.
+
+The dispute committee above is appointed, and only until the term ends. From
+$(date -u -d "@$(( $(date -u +%s) + TERM_LENGTH ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "+$TERM_LENGTH seconds") anyone may call
+open_election on the slashing contract, and operators elect its replacement
+with the nodes they run. Recruit at least $DISPUTE_QUORUM operators willing to
+stand before then: an election that draws fewer eligible candidates than the
+quorum seats nobody and leaves this committee sitting.
 DONE

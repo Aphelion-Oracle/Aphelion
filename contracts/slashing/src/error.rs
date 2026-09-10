@@ -14,6 +14,9 @@ pub enum SlashingError {
 
     /// The address is not on the committee.
     NotCommitteeMember = 10,
+    /// The same address appears twice in a committee. A duplicate would count
+    /// twice towards quorum and vote once, which is a committee that can never
+    /// resolve anything.
     AlreadyCommitteeMember = 11,
     /// Removing this member would leave the committee unable to reach quorum.
     CommitteeTooSmall = 12,
@@ -42,4 +45,24 @@ pub enum SlashingError {
     AlreadyAppealed = 30,
     /// The dispute has already been settled.
     AlreadySettled = 31,
+
+    /// An election is already running. There is only ever one.
+    ElectionRunning = 40,
+    /// No election is running, or no election has that id.
+    UnknownElection = 41,
+    /// The seated committee has not served its term yet.
+    TermNotServed = 42,
+    /// The election is not in a phase where this action makes sense:
+    /// nominating after nominations closed, balloting before they did,
+    /// finalising twice.
+    WrongElectionPhase = 43,
+    /// Standing twice in one election.
+    AlreadyNominated = 44,
+    /// A ballot for somebody who did not stand.
+    NotCandidate = 45,
+    /// This node has already cast its ballot in this election.
+    AlreadyBalloted = 46,
+    /// The node is not registered, is not owned by this caller, or carries no
+    /// voting weight -- jailed, exiting, or never active.
+    NotEligible = 47,
 }

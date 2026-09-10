@@ -137,6 +137,11 @@ where a mistake in one role test silently grants one the other's power.
 A step function rather than a curve: trivial to reason about, cheap to compute,
 and it gives an operator a target ("get above 7 000") instead of a model.
 
+This number decides two things, not one. It is how much a node's price counts
+towards the median, and it is how much its owner's ballot counts when the
+[dispute committee is elected](#electing-the-committee). Nothing about who is
+entitled to a say is maintained twice.
+
 ---
 
 ## Aggregator
@@ -230,7 +235,7 @@ venue manipulated on purpose.
 | `resolve(dispute_id) -> DisputeStatus` | Anyone, after the voting period | Upheld only on quorum *and* a majority. A tie favours the accused |
 | `appeal(appellant, dispute_id)` | Either side, once, in the appeal window | Posts `appeal_bond`, clears the votes, reopens voting |
 | `settle(dispute_id)` | Anyone, after the appeal window | Moves stake and bonds |
-| `add_member` / `remove_member` | Admin | Cannot shrink the committee below its own quorum |
+| `remove_member(member)` | Admin | Cannot shrink the committee below its own quorum. There is no `add_member` — see [Electing the committee](#electing-the-committee) |
 | `initialize` / `set_config` / `get_config` / `committee` | Admin / anyone | |
 | `get_dispute(id)` / `vote_of(id, member)` / `dispute_for(accused, feed, round)` / `dispute_count()` | Anyone | |
 
@@ -245,6 +250,51 @@ The reporter's reward is paid **from the pool**, in a separate step, never
 carved out of the seizure. A reward that came out of the penalty would give the
 committee a standing financial interest in finding against nodes, scaling with
 the size of the penalty.
+
+### Electing the committee
+
+Seats are won in a ballot of the node operators, weighted by the same
+`weight_of` the aggregator uses to weigh a price. A deployment appoints its
+first committee — an election needs an electorate, and at genesis there are no
+nodes — and that committee serves `term_length` like any other.
+
+```
+  open_election ──▶ nominate ──▶ cast_ballot ──▶ finalize_election
+   (anyone, once     (an operator,   (one ballot      (anyone, once the
+    the term is       on a node       per node,        ballot closes)
+    served)           they own)       weighted)
+```
+
+| Function | Caller | Notes |
+| --- | --- | --- |
+| `open_election() -> u64` | Anyone, once the term is served | One election at a time |
+| `nominate(candidate, node)` | An operator, during the nomination period | `node` must be theirs and carry weight. Once per election per person, however many nodes they run |
+| `cast_ballot(voter, node, candidate)` | A node's owner, during the ballot | One ballot per **node**; its weight is read now, not at the count |
+| `finalize_election() -> ElectionStatus` | Anyone, once the ballot closes | Seats the top `seats` candidates, replacing every seat |
+| `get_election(id)` / `election_phase(id)` / `candidates(id)` / `ballot_of(id, node)` | Anyone | `candidates` is the running tally, readable mid-ballot |
+| `current_election()` / `next_election()` / `election_count()` | Anyone | |
+
+What the rules are, and why:
+
+| Rule | Reason |
+| --- | --- |
+| The electorate is the node set, weighted by `weight_of` | The committee's power is to take an operator's stake. Weight is already the network's Sybil-resistant answer to "how much should this identity count" |
+| One ballot names **one** candidate, for a race with `seats` winners | A slate ballot would let a bare majority of weight take *every* seat. Naming one means a faction holding more than `1/(seats+1)` of the weight can seat somebody regardless |
+| A candidate must stand on a node they own | Anyone can make an address; a node carrying weight costs a bond. It also makes the committee operators judging operators — a real cost, bounded by the per-dispute conflict-of-interest rule |
+| A candidate with no votes takes no seat | An unopposed slate must not take the committee on zero turnout |
+| Eligibility is rechecked at the count | An operator jailed during the ballot does not take a seat on votes cast before anyone knew |
+| Ties go to whoever stood first | Deterministic, and not computable your way around after the ballot closes |
+| Fewer eligible winners than `quorum` → nobody is seated, incumbents stay | Vacating the seats would let an attacker switch slashing off for everybody by suppressing turnout. The cost is that a committee nobody replaces holds over indefinitely |
+| A failed election may be retried at once; a successful one starts a fresh term | Failing already cost a nomination period and a ballot, so there is nothing to spam with |
+| `seats` and `quorum` are captured when the election opens | A `set_config` landing mid-ballot must not move the bar under votes already cast |
+| A reseating binds votes cast after it, and does not disturb an open dispute's existing votes | Voiding them would let an election timed against a dispute erase evidence. Quorum counts votes cast, so a reseating can never make a dispute *easier* to resolve |
+
+Admin — the governance timelock — keeps `remove_member` and has no
+`add_member`. A power that can only subtract cannot install anybody, so the
+worst a captured admin key achieves is a smaller committee, and it cannot
+shrink one below its quorum either. A removed seat stays empty until an
+election fills it: promoting a runner-up would be an appointment wearing an
+election's clothes.
 
 ---
 
@@ -331,7 +381,8 @@ Soroban returns these as `Error(Contract, #n)`.
 | # | Name | |
 | ---: | --- | --- |
 | 1–5 | `AlreadyInitialized`, `NotInitialized`, `NotAdmin`, `InvalidConfig`, `InvalidAmount` | |
-| 10–12 | `NotCommitteeMember`, `AlreadyCommitteeMember`, `CommitteeTooSmall` | |
+| 10, 12 | `NotCommitteeMember`, `CommitteeTooSmall` | |
+| 11 | `AlreadyCommitteeMember` | The same address twice in a genesis committee: it would count twice towards quorum and vote once |
 | 20 | `UnknownDispute` | |
 | 21 | `UnknownNode` | The accused key is not registered |
 | 22 | `DuplicateDispute` | This allegation has been filed |
@@ -344,6 +395,14 @@ Soroban returns these as `Error(Contract, #n)`.
 | 29 | `AppealWindowClosed` | Appealing too late |
 | 30 | `AlreadyAppealed` | |
 | 31 | `AlreadySettled` | |
+| 40 | `ElectionRunning` | One at a time |
+| 41 | `UnknownElection` | No election running, or no election with that id |
+| 42 | `TermNotServed` | Opening one before the sitting committee's term ends |
+| 43 | `WrongElectionPhase` | Nominating after nominations closed, voting before they did, counting early or twice |
+| 44 | `AlreadyNominated` | |
+| 45 | `NotCandidate` | A ballot for somebody who did not stand |
+| 46 | `AlreadyBalloted` | This node has voted in this election |
+| 47 | `NotEligible` | The node is unregistered, not yours, or carries no weight |
 
 ### Consumer example
 
