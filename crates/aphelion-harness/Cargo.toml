@@ -1,0 +1,32 @@
+# Test support for the multi-process harness.
+#
+# Not published and not a dependency of the node: everything here exists to
+# run several real `aphelion-node` processes against one deployment and watch
+# what they do to each other. Keeping it in its own crate is what stops any of
+# it -- the fake exchange, the fake `stellar` CLI -- from being reachable from
+# a shipped binary.
+[package]
+name = "aphelion-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aphelion-core.workspace = true
+aphelion-node = { path = "../aphelion-node" }
+axum.workspace = true
+chrono.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+
+[[bin]]
+name = "fake-stellar"
+path = "src/bin/fake_stellar.rs"

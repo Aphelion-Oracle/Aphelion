@@ -4,7 +4,7 @@
 # host-targeted one (tokio, sqlx, reqwest, ...).
 [workspace]
 resolver = "2"
-members = ["crates/aphelion-core", "crates/aphelion-node"]
+members = ["crates/aphelion-core", "crates/aphelion-node", "crates/aphelion-harness"]
 
 [workspace.package]
 version = "0.1.0"

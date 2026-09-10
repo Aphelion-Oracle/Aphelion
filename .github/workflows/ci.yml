@@ -58,6 +58,44 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  harness:
+    name: Multi-process harness
+    runs-on: ubuntu-latest
+    # Its own job because a failure here means something different from a unit
+    # test failing: the node's logic is fine and the way several of them behave
+    # together is not. It is also the only job that needs a database, and
+    # attaching one to the fast suite would slow down the check people wait on.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aphelion
+          POSTGRES_PASSWORD: aphelion
+          POSTGRES_DB: aphelion
+        ports:
+          - 5432:5432
+        # Without this the harness races the container and reports "cannot
+        # reach Postgres", which reads as a broken test rather than a slow start.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.0
+      - uses: Swatinem/rust-cache@v2
+      # Built explicitly so a compile failure is reported as one, rather than
+      # as the harness timing out waiting for a node that was never going to
+      # start. The harness would build it on demand otherwise.
+      - run: cargo build -p aphelion-node --bin aphelion-node
+      - name: Several node processes against one deployment
+        env:
+          APHELION_TEST_DATABASE_URL: postgres://aphelion:aphelion@localhost:5432/aphelion
+        # Serialised inside the harness regardless; saying so here keeps the
+        # runner from starting six of them before the lock is taken.
+        run: cargo test -p aphelion-harness -- --test-threads=1
+
   contracts:
     name: Contract tests
     runs-on: ubuntu-latest

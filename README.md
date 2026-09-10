@@ -291,16 +291,24 @@ repository, not the target architecture.
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
-| Multi-node harness — several node *processes* against one deployment | 📋 Planned | — |
+| Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 12 |
 | Testnet deployment | 📋 Planned | — |
 | Mainnet deployment | 📋 Planned | — |
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-232 tests in total: 91 off-chain (`cargo test --workspace`) and 141 against the
-contracts (`cargo test --manifest-path contracts/Cargo.toml`). The Byzantine
+244 tests in total: 103 off-chain (`cargo test --workspace`) and 141 against
+the contracts (`cargo test --manifest-path contracts/Cargo.toml`). The Byzantine
 simulation's 6 tests live inside the aggregator crate, so its 52 and their 6 are
-reported as one figure of 58 by `cargo test`.
+reported as one figure of 58 by `cargo test`. The harness's 12 are 9
+process-level tests plus 3 covering the fake CLI's argument parsing.
+
+Be aware of what the 9 do without a database: they skip, and a skipped Rust test
+still reports as **passed**. A green `cargo test --workspace` on a machine with
+no Postgres has run 94 tests and reported 103. The skip prints a `SKIP` line, but
+`cargo test` swallows it unless you pass `--nocapture`, so treat the harness as
+covered only where it is actually given a database — which is what the `harness`
+job in CI is for.
 
 The Byzantine simulation runs the real registry and aggregator together across
 multiple rounds with a mix of honest and dishonest nodes. The multi-node
@@ -308,10 +316,11 @@ simulation does the same on the off-chain side, running several independently
 keyed signers against one in-memory network whose median is computed by the
 same function the contract mirrors.
 
-What neither covers is several node *processes*, each with its own database and
-RPC connection, racing each other for real. Everything at that level — a lost
-RPC endpoint, clock drift between machines, two nodes contending for the same
-round — is still only covered by unit tests.
+Neither covers several node *processes*, and that is what the multi-process
+harness adds: it runs the shipped `aphelion-node` binary several times over, each
+copy with its own Postgres database, its own key, its own HTTP port and its own
+subprocess calls to the chain, all pointed at one deployment. See
+[Multi-process harness](#multi-process-harness).
 
 ---
 
@@ -326,6 +335,7 @@ aphelion/
 │   └── consumer-example/       Reference integration for dApp authors
 ├── crates/                     Off-chain services (root cargo workspace, host target)
 │   ├── aphelion-core/          Shared price math and the canonical signing payload
+│   ├── aphelion-harness/       Multi-process test harness (not shipped)
 │   └── aphelion-node/          The node binary
 │       └── src/
 │           ├── sources/        Binance, Kraken, Coinbase, CoinGecko
@@ -631,6 +641,16 @@ confidence_bps = 50
 sources        = { binance = "BTCUSDT", kraken = "XBTUSD", coinbase = "BTC-USD" }
 ```
 
+Two settings are environment-only, because they describe where a particular
+process happens to run rather than what the deployment is, and a config file
+copied between machines should not carry them: `APHELION_STELLAR_BIN` names the
+Stellar CLI to shell out to when it is not `stellar` on `PATH`, and
+`APHELION_SOURCE_URL_<VENUE>` — `APHELION_SOURCE_URL_BINANCE`, and so on —
+points a venue at a cache or regional proxy you run yourself instead of its
+public endpoint. Both are also the seams the
+[multi-process harness](#multi-process-harness) uses to replace the outside
+world without modifying the binary.
+
 Configuration is validated at startup, and a config that could never work is a
 startup failure rather than a silent runtime one — a feed mapping fewer sources
 than `min_sources_per_feed`, a feed pointing at a disabled source, a round
@@ -931,7 +951,7 @@ naming it here is more useful than describing it as something it is not.
 | Phase | Scope |
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
-| **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-node harness · testnet deployment |
+| **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · testnet deployment |
 | **3 — Hardening** | Dispute governance beyond an admin-managed committee · Grafana dashboards ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
@@ -990,6 +1010,56 @@ decisions rather than the plumbing:
 - `aphelion-node` integration `multi_node` — that the median a node predicts
   locally is the median the network publishes, and that one node's signature
   authorises nothing under another node's key
+- `aphelion-harness` integration `multi_process` — the failures that only exist
+  between processes: a node dying without taking the network with it, an
+  endpoint disappearing under a node that is otherwise healthy, and a clock
+  drifting far enough from the ledger's that the node stops signing. Also that
+  the price the chain carries actually tracks the venues, that one exchange
+  printing a bad tick is absorbed rather than published, and that a node left
+  below `min_sources_per_feed` signs nothing until its venues return
+
+### Multi-process harness
+
+Everything above runs the node's code in-process. The harness runs the shipped
+`aphelion-node` **binary**, several copies of it, each with its own Postgres
+database, its own signing key, its own HTTP port and its own subprocess calls to
+the chain — all pointed at one deployment.
+
+```bash
+# Any Postgres will do; the harness creates and drops a database per node.
+docker run -d --name aphelion-pg -p 5432:5432 \
+  -e POSTGRES_USER=aphelion -e POSTGRES_PASSWORD=aphelion \
+  -e POSTGRES_DB=aphelion postgres:16-alpine
+
+APHELION_TEST_DATABASE_URL=postgres://aphelion:aphelion@localhost:5432/aphelion \
+  cargo test -p aphelion-harness
+```
+
+Without that variable the suite **skips** rather than failing: someone who has
+just cloned the repository should still get a green `cargo test`. Note what that
+costs — a skipped Rust test reports as passed, and the `SKIP` line it prints is
+swallowed unless you pass `--nocapture` — so these count as covered only where a
+database is actually provided, which is why CI runs them in a job of their own
+with a Postgres service attached.
+
+What is real: the node binary, the collector, Postgres and the migrations, the
+round loop, the signing, the process boundary, the `stellar` subprocess spawn,
+and the rules that decide whether a submission is accepted — those are
+`chain::mock::MockChain`, the same in-memory aggregator the single-process
+simulation runs against, put behind an HTTP socket so several processes can
+reach one instance of it. Reimplementing the acceptance rules for the harness
+would only have tested the harness.
+
+What is a fixture: the exchanges and the transport to the chain. Both are
+swapped at seams an operator can already use — `APHELION_SOURCE_URL_<VENUE>`
+and `APHELION_STELLAR_BIN` — so the binary under test is unmodified and has no
+idea it is in a test. Nothing in `crates/aphelion-harness` is reachable from a
+shipped node; that is why it is a separate crate.
+
+Rounds are compressed to two seconds so the whole suite finishes in a minute or
+two rather than an hour, and harnesses run one at a time: each is several processes and several
+databases, and running six concurrently turns every timing assumption into a
+fight for CPU that reads as a flaky node rather than an overloaded runner.
 
 ### Contributing
 

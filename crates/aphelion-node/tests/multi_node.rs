@@ -12,9 +12,11 @@
 //! whose consensus rule differed from the real one would tell an operator
 //! nothing about what happens on chain.
 //!
-//! What this deliberately does not cover, and the multi-node harness on the
-//! roadmap will: several node *processes*, each with its own database and RPC
-//! connection, racing each other for real.
+//! What this deliberately does not cover: several node *processes*, each with
+//! its own database and RPC connection, racing each other for real. That is
+//! `aphelion-harness`, which runs the shipped binary several times over against
+//! one deployment. It is much slower and needs a Postgres, so the properties
+//! that do not need a process boundary belong here instead.
 
 use std::sync::Arc;
 
