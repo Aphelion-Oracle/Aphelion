@@ -138,6 +138,18 @@ jobs:
           path: contracts/target/wasm32v1-none/release/*.wasm
           if-no-files-found: error
 
+  deployment-checks:
+    name: Deployment checks
+    runs-on: ubuntu-latest
+    # No cargo, no toolchain and no network: the chain is a stub answering
+    # from a fixture. This is the only job that tests a shell script, and the
+    # script it tests is the one standing between "deploy.sh printed no error"
+    # and "this deployment is what it was meant to be".
+    steps:
+      - uses: actions/checkout@v4
+      - name: scripts/verify-deployment.sh against a fixture deployment
+        run: tests/deployment/run.sh
+
   consensus-vectors:
     name: Consensus vectors
     runs-on: ubuntu-latest

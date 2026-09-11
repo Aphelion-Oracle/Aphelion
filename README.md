@@ -293,15 +293,17 @@ repository, not the target architecture.
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 12 |
+| `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 30 |
 | Testnet deployment | 📋 Planned | — |
 | Mainnet deployment | 📋 Planned | — |
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-306 tests in total: 106 off-chain (`cargo test --workspace`) and 200 against
-the contracts (`cargo test --manifest-path contracts/Cargo.toml`). The Byzantine
-simulation's 6 tests live inside the aggregator crate, so its 52 and their 6 are
-reported as one figure of 58 by `cargo test`. The harness's 12 are 9
+336 tests in total: 106 off-chain (`cargo test --workspace`), 200 against the
+contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 30 against the
+deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
+Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
+their 6 are reported as one figure of 58 by `cargo test`. The harness's 12 are 9
 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 9 do without a database: they skip, and a skipped Rust test
@@ -346,8 +348,10 @@ aphelion/
 │           ├── db/             Postgres schema access
 │           └── api/            Read-only HTTP surface
 ├── migrations/                 SQL migrations, applied automatically at startup
-├── tests/vectors/              Cross-implementation signing and aggregation vectors
-├── scripts/                    Deployment, governance, registration, vectors
+├── tests/
+│   ├── vectors/                Cross-implementation signing and aggregation vectors
+│   └── deployment/             A fixture deployment, for the verification script
+├── scripts/                    Deployment, verification, governance, registration, vectors
 ├── deploy/                     Prometheus and Grafana provisioning
 └── docs/
     ├── node-operator.md        Setup, daily operation and troubleshooting
@@ -420,6 +424,38 @@ Leave `APHELION_GUARDIAN` unset and it defaults to the admin account, which
 gets you none of the separation the guardian is for — a key whose only power is
 to say no is worth nothing held in the same hands as the key that says go. The
 script says so at the end if that is how it was run.
+
+### Checking what was actually deployed
+
+`deploy.sh` writes a record of what it believes it did. Nothing in that record
+is read back from the chain, and the gap matters most where the script itself
+says so: the handover at the end is three independent one-way calls, so a
+failure part-way through leaves the admin key holding whichever contracts it
+did not reach — a deployment that looks finished, prints no error, and is still
+governed by one key.
+
+[`scripts/verify-deployment.sh`](scripts/verify-deployment.sh) reads the
+deployment back and checks it against what it was meant to be:
+
+```bash
+export APHELION_STELLAR_SECRET="S..."   # any funded account; it signs nothing
+scripts/verify-deployment.sh            # 0 if nothing failed, 1 otherwise
+scripts/verify-deployment.sh --strict   # warnings are failures too
+```
+
+It reports on four things: that every contract answers and points at the
+others, that admin is the timelock rather than a key, that the parameters
+which constrain each other are jointly sensible, and whether the network can
+currently produce a price at all. That last one is not correctness — a correct
+deployment with no operators publishes nothing, and from a consumer's side the
+two look identical.
+
+Every call it makes is simulated: it submits nothing, signs nothing and costs
+nothing, so it is as safe to point at somebody else's deployment as at your
+own. `--strict` is the mainnet gate; plain is right for a fresh testnet
+deployment, which legitimately warns that it has no nodes yet. Run it after
+deploying, before announcing a deployment to operators, and after any proposal
+that changes a parameter.
 
 ### Changing a parameter afterwards
 
@@ -1041,7 +1077,7 @@ against a real network rather than in advance of one.
 | Phase | Scope |
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
-| **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · testnet deployment |
+| **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
 | **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
@@ -1061,6 +1097,9 @@ cargo fmt --all && cargo fmt --manifest-path contracts/Cargo.toml --all
 
 # Build every contract for the ledger
 scripts/build-contracts.sh
+
+# The deployment verifier, against a fixture chain: no cargo, no network
+tests/deployment/run.sh
 
 # Regenerate the shared vectors (must be committed with any change to the
 # signing layout or the aggregation maths)

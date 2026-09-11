@@ -543,15 +543,23 @@ deployment, and a committed one is a contract id somebody will paste into the
 wrong network).
 
 Next:
-  1. Point a node at it:
+  1. Read the deployment back off the chain, and check it is what the
+     summary above said it would be. Everything it does is simulated, so
+     it submits nothing and costs nothing:
+       scripts/verify-deployment.sh
+  2. Point a node at it:
        registry_contract   = "$REGISTRY"
        aggregator_contract = "$AGGREGATOR"
-  2. Register the node:
+  3. Register the node:
        APHELION_REGISTRY_CONTRACT=$REGISTRY \\
          scripts/register-node.sh "\$(aphelion-node pubkey)"
-  3. Fund the reward pool, if you are paying operators:
+  4. Fund the reward pool, if you are paying operators:
        stellar contract invoke --id $REGISTRY ... -- fund_rewards \\
          --from $APHELION_ADMIN_ACCOUNT --amount <stroops>
+
+Step 1 first, and especially if anything above printed an error: the
+handover is three independent one-way calls, so a failure part-way through
+leaves this key holding whichever contracts it did not reach.
 
 The aggregator will not publish until $QUORUM nodes carrying
 $MIN_WEIGHT_BPS bps between them are submitting. A registered node starts at

@@ -82,7 +82,42 @@ where a contract address belongs are all startup failures.
 
 ## 4. Verify before you bond
 
-Three checks, in order. Each needs strictly less trust than the next.
+Four checks, in order. The first is about the network you are joining; the
+rest are about your node.
+
+```bash
+# 0. Is this deployment what its operators say it is?
+#    Needs nothing installed but the stellar CLI and jq, and no relationship
+#    to the deployment: every call it makes is simulated.
+export APHELION_STELLAR_SECRET="S..."   # any funded account; it signs nothing
+
+# If you were handed the deployment record, it names every contract:
+APHELION_DEPLOYMENT_RECORD=./testnet.json scripts/verify-deployment.sh
+
+# If you were handed contract ids instead, which is the usual case:
+APHELION_REGISTRY_CONTRACT="C..." \
+APHELION_AGGREGATOR_CONTRACT="C..." \
+APHELION_SLASHING_CONTRACT="C..." \
+APHELION_GOVERNANCE_CONTRACT="C..." \
+  scripts/verify-deployment.sh
+```
+
+Give it the governance id even if nobody offered you one. Without it the script
+cannot tell a network governed by a timelock from one governed by a key, and it
+says so rather than passing quietly — but a deployment whose operators cannot
+produce that id has answered the question anyway.
+
+Read the **Authority** section of the output before anything else. Admin on all
+three contracts should be the governance timelock, which means a parameter
+change is published a day or more before it binds you — long enough to unbond
+if you dislike it. If it is still a plain account, one key can change your
+minimum stake, your reputation penalties and the dispute rules in a single
+transaction with no warning. That is a fact about the deal you are being
+offered, and it is worth knowing before your stake is in rather than after.
+
+The **Readiness** section says whether the network can currently produce a
+price at all. A fresh deployment legitimately warns that it has too few nodes;
+that is what you are being recruited to fix.
 
 ```bash
 # 1. Can this host reach the exchanges at all?
