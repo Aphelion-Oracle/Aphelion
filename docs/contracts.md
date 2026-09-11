@@ -1,6 +1,6 @@
 # Contract reference
 
-Every function on the four Aphelion contracts, what it costs to call, and who
+Every function on the five Aphelion contracts, what it costs to call, and who
 may call it. The README explains *why* the system is shaped this way; this is
 the surface it presents.
 
@@ -15,6 +15,7 @@ the surface it presents.
 - [Registry](#registry)
 - [Aggregator](#aggregator)
 - [Slashing](#slashing)
+- [Governance](#governance)
 - [Consumer example](#consumer-example)
 - [Error codes](#error-codes)
 - [The interface the node depends on](#the-interface-the-node-depends-on)
@@ -32,16 +33,25 @@ initialising is what teaches each contract the others'. That is the reason
 [`scripts/deploy.sh`](../scripts/deploy.sh) does it in that order.
 
 ```
-  deploy registry ─┐
-  deploy aggregator ├─▶ initialize registry(admin, aggregator, slasher, token, …)
-  deploy slashing  ─┘   initialize aggregator(Config{registry, …})
-                        initialize slashing(Config{registry, …}, committee)
-                        set_feed(...) per feed
+  deploy registry   ─┐
+  deploy aggregator  ├─▶ initialize registry(admin, aggregator, slasher, token, …)
+  deploy slashing    │   initialize aggregator(Config{registry, …})
+  deploy governance ─┘   initialize slashing(Config{registry, …}, committee)
+                         initialize governance(Config{guardian, …}, proposers)
+                         set_feed(…) per feed
+                              │
+                              ▼
+                         admin on the first three ──▶ the governance timelock
 ```
 
 `set_aggregator` and `set_slasher` exist so a deployment can be repointed
 afterwards — for instance to bootstrap with the admin in both roles and hand
 over once the other contracts are live.
+
+The handover is last on purpose: every call above is made by one key in one
+transaction, because a deployment that had to serve the timelock's delay to add
+its first feed would never finish. From that point the same changes are
+proposals. See [What it governs](#what-it-governs).
 
 ---
 
@@ -298,6 +308,113 @@ election's clothes.
 
 ---
 
+## Governance
+
+The timelock that holds `admin` on the other three. It can do nothing the key
+before it could not; what it removes is *instantly* and *invisibly*.
+
+```
+  propose ──▶ waiting ──▶ ready ──▶ execute (anyone)
+                 │           │
+                 │           └──▶ expired, once the grace period runs out
+                 └── cancel, by the guardian or the proposer
+```
+
+| Function | Caller | Notes |
+| --- | --- | --- |
+| `initialize(config, proposers)` | The **guardian**, once | Authorised by the guardian rather than by the deployer: it is the one role this contract cannot appoint for itself afterwards. At least one proposer, and no address twice |
+| `propose(proposer, target, function, args, description) -> u64` | A proposer | Stores the call exactly as it will be made. `eta` and `expires_at` are fixed here |
+| `execute(id)` | **Anyone**, between `eta` and `expires_at` | Dispatches internally when `target` is the timelock itself, and invokes the target contract otherwise |
+| `cancel(canceller, id)` | The guardian, or the proposal's own proposer | Permanent; there is no un-cancel |
+| `state(id)` | Anyone | `Waiting` · `Ready` · `Expired` · `Executed` · `Cancelled` — the stored status combined with the clock, which is what a watcher actually wants |
+| `get_proposal(id)` / `proposal_count()` | Anyone | `get_proposal` returns `None` for an unknown id; every other function traps on one |
+| `get_config()` / `proposers()` | Anyone | |
+
+`description` is a URL or content hash, not the rationale itself — as with
+dispute evidence, ledger space is the wrong place for prose, and a hash is
+enough to prove nobody rewrote it afterwards.
+
+[`scripts/govern.sh`](../scripts/govern.sh) wraps these — `propose`, `list`,
+`show`, `execute`, `cancel` — reading the contract ids from the deployment
+record, so a proposal does not have to be reassembled by hand across the days
+that separate queueing it from executing it. It holds no privilege of its own:
+whoever runs it signs with their own key, and the contract decides whether that
+key may do what is being asked.
+
+| `Config` | Bounds | |
+| --- | --- | --- |
+| `guardian` | — | May cancel a queued proposal, and may do nothing else |
+| `delay` | 1–30 days | Between publication and executability. This is the whole feature: the window in which an operator who dislikes a change can unbond before it binds them |
+| `grace_period` | 1–30 days | How long it stays executable afterwards. Past it the proposal is dead and has to be queued again — delay included |
+
+What the rules are, and why:
+
+| Rule | Reason |
+| --- | --- |
+| The call is stored as `(target, function, args)` | What the delay publishes is then the change itself, not a description of it that could turn out to differ |
+| `eta` and `expires_at` are captured when the proposal is queued, not recomputed at execution | A proposal that shortens the delay must not shorten the wait of the proposals queued beside it, or a proposer queueing two together would escape the delay in one step |
+| Execution is permissionless | The call was fixed when it was queued and the delay is a fact about the clock, so nothing is left for the caller to decide. Restricting it to the proposer would add no safety and would let one strand a change everybody had agreed to by going quiet |
+| A proposal is marked executed *before* its target is called | Soroban refuses re-entry today, but a proposal that could re-enter `execute` during its own call would otherwise run twice off one delay |
+| The guardian can only say no | A stolen guardian key stalls governance until a proposal moves the guardian; it cannot move stake, prices or admin rights anywhere. That is what makes it a key worth handing to somebody other than the proposer |
+| There is no un-cancel, and an expired proposal cannot be cancelled | Reviving one would return a call to the executable state without a fresh delay. Cancelling a dead one would write a decision into the record that the clock had already made |
+| A proposal against the timelock is decoded when it is queued, and again when it runs | Publishing a governance change, waiting out the delay and only then discovering it names a function that does not exist would spend the delay on nothing |
+| The last proposer cannot be removed | Every route into this contract's own configuration is a proposal, so a proposer set emptied by accident could not be refilled: every parameter of the network would freeze where it stood, permanently |
+
+### Governing itself
+
+Its own guardian, delay and proposer set change the same way as anything else:
+a proposal naming this contract as its `target`, which serves the delay first.
+Changing the delay therefore takes the delay — a timelock whose delay could be
+set to zero in one transaction is a timelock for exactly as long as nobody
+attacks it.
+
+| `function` | `args` | Effect |
+| --- | --- | --- |
+| `set_config` | `[Config]` | Replaces guardian, delay and grace period together, re-validated against the same bounds as `initialize` |
+| `add_proposer` | `[Address]` | |
+| `remove_proposer` | `[Address]` | Refused on the last one |
+
+These three are **not** entry points. Soroban refuses contract re-entry, so
+`execute` cannot reach them by invoking this contract and dispatches them
+internally instead. The consequence is worth more than the mechanism: there is
+no public `set_config` here to protect, and an entry point that does not exist
+cannot be left unguarded by a later edit.
+
+`MIN_DELAY` and `MAX_DELAY` bound the delay even so. A proposal cannot collapse
+it to nothing, and cannot set it so long that governance is dead.
+
+### What it governs
+
+Nothing here is restricted to Aphelion's own contracts: what makes a target
+governable is that it named this contract as its `admin`.
+
+| Contract | Handed over with |
+| --- | --- |
+| Registry | `set_admin(governance)` |
+| Aggregator | `set_config(...)` with `admin` replaced |
+| Slashing | `set_config(...)` with `admin` replaced |
+
+[`scripts/deploy.sh`](../scripts/deploy.sh) does this **last**, after the feeds
+are configured and the first committee seated, because a deployment that had to
+serve a day's delay to add its first feed would never finish. The three calls
+are independent and one-way, so a failure part-way leaves the deploying key
+holding whichever contracts it has not reached yet — finish those by hand
+rather than rerunning the script, which would deploy a second set of contracts
+instead of resuming this one. `APHELION_SKIP_HANDOVER=1` skips it entirely and
+leaves the admin key in place: reasonable while iterating on a throwaway
+deployment, wrong for one anybody relies on.
+
+### What this costs
+
+An urgent parameter change now takes a day, and that is a real loss rather than
+a detail. If a feed has to stop being trusted *now*, this contract is not the
+instrument — a consumer's own `max_age` argument, the aggregator's out-of-band
+rejection and an operator's freedom to stop signing all act in seconds, need
+nobody's permission, and unlike an emergency admin power none of them can be
+aimed at anything else.
+
+---
+
 ## Consumer example
 
 A collateralised vault. Not a lending protocol — no interest, no per-asset risk
@@ -403,6 +520,23 @@ Soroban returns these as `Error(Contract, #n)`.
 | 45 | `NotCandidate` | A ballot for somebody who did not stand |
 | 46 | `AlreadyBalloted` | This node has voted in this election |
 | 47 | `NotEligible` | The node is unregistered, not yours, or carries no weight |
+
+### Governance
+
+| # | Name | |
+| ---: | --- | --- |
+| 1–2 | `AlreadyInitialized`, `NotInitialized` | |
+| 4 | `InvalidConfig` | A delay or grace period outside one to thirty days |
+| 10 | `NotProposer` | The address may not queue proposals |
+| 11 | `AlreadyProposer` | Including the same address twice in a genesis proposer set |
+| 12 | `NoProposersLeft` | An empty genesis set, or removing the last proposer |
+| 13 | `NotCancellable` | Neither the guardian nor the proposal's own proposer |
+| 20 | `UnknownProposal` | |
+| 21 | `WrongPhase` | Already executed or cancelled |
+| 22 | `StillWaiting` | The delay has not been served |
+| 23 | `Expired` | The grace period ran out. Queue it again, and serve the delay again |
+| 24 | `UnknownAction` | A proposal against the timelock naming something it cannot do to itself |
+| 25 | `InvalidArguments` | The arguments do not fit the action they were queued for |
 
 ### Consumer example
 

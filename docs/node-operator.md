@@ -137,6 +137,33 @@ are the ones worth being woken for. Note what is deliberately *not* alerted:
 individual source fetch failures, which happen constantly as exchanges
 rate-limit, and which would train you to ignore the channel.
 
+### What governance is about to change
+
+The parameters you bonded under — the minimum stake, the dispute bonds, the
+slash amount, which contract is the aggregator — are held by a timelock rather
+than by a key, so a change to any of them is published before it takes effect.
+That delay is yours: it is the window in which you can unbond if you do not
+want to operate under the new numbers.
+
+```bash
+export APHELION_STELLAR_SECRET="S..."     # any account; reads are simulated
+export APHELION_GOVERNANCE_CONTRACT="C.." # unless you have the deployment record
+
+scripts/govern.sh list                    # what is queued, and its state
+scripts/govern.sh show 7                  # the exact call, and when it lands
+```
+
+`Waiting` means the delay is still running. `Ready` means anybody can execute
+it now — including you, if it is a change you want and the proposer has gone
+quiet. Nothing about executing is privileged: the call was fixed when it was
+queued.
+
+Worth checking weekly rather than daily — but do check. The delay cannot be
+shorter than a day and a day is the default, while unbonding takes
+`unbonding_period` on top of it, a week by default. So a change first noticed
+on the day it becomes executable is one you will be operating under whether or
+not you want to: the two windows do not overlap in your favour.
+
 ### Reading a quiet node
 
 A node that is not submitting is not necessarily broken. Check `/v1/rounds`:

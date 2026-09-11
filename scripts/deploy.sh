@@ -215,21 +215,42 @@ fi
 
 # The guardian authorises `initialize`, and the stellar CLI signs with exactly
 # one account. If the guardian is somebody else -- which is the arrangement
-# worth having -- their secret has to be here too.
+# worth having -- their secret has to be here too, and the account has to be
+# funded: it signs that transaction, so it also pays for it.
 if [[ "$GUARDIAN" != "$APHELION_ADMIN_ACCOUNT" && -z "$GUARDIAN_SECRET" ]]; then
     echo "error: APHELION_GUARDIAN is $GUARDIAN, which is not the admin" >&2
     echo "account, so the deploying key cannot authorise the timelock's" >&2
     echo "initialize on its behalf. Either set APHELION_GUARDIAN_SECRET to" >&2
-    echo "that account's seed, or deploy with the guardian left at the admin" >&2
-    echo "account and move it afterwards with a proposal." >&2
+    echo "that account's seed -- it must be funded, since it pays for that one" >&2
+    echo "transaction -- or deploy with the guardian left at the admin account" >&2
+    echo "and move it afterwards with a proposal." >&2
     exit 64
 fi
 : "${GUARDIAN_SECRET:=$APHELION_STELLAR_SECRET}"
 
-if [[ ! -f "$WASM_DIR/aphelion_registry.wasm" ]]; then
-    echo "No build artefacts found; building..."
-    "$ROOT/scripts/build-contracts.sh"
+# Both refusals are the contract's own. Catching them here costs a sentence;
+# catching them there costs a deployment that is half-finished.
+if [[ -z "${PROPOSERS// /}" ]]; then
+    echo "error: APHELION_PROPOSERS is empty. A timelock nobody can queue a" >&2
+    echo "proposal against freezes every parameter of the network permanently," >&2
+    echo "its own configuration included -- there is no other route in." >&2
+    exit 64
 fi
+if [[ -n "$(printf '%s\n' $PROPOSERS | sort | uniq -d)" ]]; then
+    echo "error: APHELION_PROPOSERS lists the same account twice." >&2
+    exit 64
+fi
+
+for wasm in registry aggregator slashing governance; do
+    if [[ ! -f "$WASM_DIR/aphelion_$wasm.wasm" ]]; then
+        # Checked one by one rather than on the registry alone: a tree built
+        # before the timelock existed has three of the four, and would
+        # otherwise fail three contracts into a deployment.
+        echo "No build artefacts for aphelion_$wasm; building..."
+        "$ROOT/scripts/build-contracts.sh"
+        break
+    fi
+done
 
 invoke_as() {
     local secret="$1" contract="$2"
@@ -287,6 +308,11 @@ Aphelion deployment
   dispute quorum     : $DISPUTE_QUORUM
   committee seats    : $SEATS, elected every $TERM_LENGTH seconds
   election windows   : $NOMINATION_PERIOD s to stand, $ELECTION_PERIOD s to vote
+  timelock delay     : $TIMELOCK_DELAY seconds
+  timelock grace     : $TIMELOCK_GRACE seconds
+  guardian           : $GUARDIAN
+  proposers          : $PROPOSERS
+  handover           : $(if (( HANDOVER )); then echo "yes -- admin becomes the timelock"; else echo "NO -- $APHELION_ADMIN_ACCOUNT keeps admin"; fi)
 
 SUMMARY
 
@@ -305,6 +331,10 @@ echo "    $AGGREGATOR"
 echo "==> Deploying slashing"
 SLASHING="$(deploy aphelion_slashing.wasm)"
 echo "    $SLASHING"
+
+echo "==> Deploying governance"
+GOVERNANCE="$(deploy aphelion_governance.wasm)"
+echo "    $GOVERNANCE"
 
 echo
 echo "==> Initialising registry"
@@ -383,22 +413,121 @@ invoke "$SLASHING" initialize \
     --config "$SLASHING_CONFIG" \
     --committee "$COMMITTEE_JSON"
 
+echo "==> Initialising governance"
+GOVERNANCE_CONFIG="$(jq -nc \
+    --arg guardian "$GUARDIAN" \
+    --argjson delay "$TIMELOCK_DELAY" \
+    --argjson grace_period "$TIMELOCK_GRACE" \
+    '{guardian: $guardian, delay: $delay, grace_period: $grace_period}')"
+PROPOSERS_JSON="$(printf '%s\n' $PROPOSERS | jq -Rc '[.]' | jq -sc 'add')"
+# Signed by the guardian rather than by the deploying account. The guardian is
+# the one role this contract can never appoint for itself afterwards without
+# already having a working proposer, so it is the role that has to consent to
+# holding it.
+invoke_as "$GUARDIAN_SECRET" "$GOVERNANCE" initialize \
+    --config "$GOVERNANCE_CONFIG" \
+    --proposers "$PROPOSERS_JSON"
+
+if (( HANDOVER )); then
+    echo
+    echo "==> Handing the contracts to the timelock"
+    # Last, and deliberately so. Everything above was set by a key acting in
+    # one transaction because a deployment that had to serve a day's delay to
+    # add its first feed would never finish; from here on the same changes are
+    # proposals.
+    #
+    # Each call is one-way and they are independent, so a failure part-way
+    # leaves the admin key holding whichever contracts it has not reached yet.
+    # Finish those by hand -- rerunning this script would deploy a second set
+    # of contracts rather than resume this one.
+    invoke "$REGISTRY" set_admin --new_admin "$GOVERNANCE"
+    echo "    registry   -> the timelock"
+
+    # `set_config` replaces every field at once, so the config handed over is
+    # the one this script just built with a single field changed. Rebuilding it
+    # from the environment would let a variable that moved underneath the
+    # script ride along with the handover unnoticed.
+    invoke "$AGGREGATOR" set_config \
+        --config "$(jq -c --arg gov "$GOVERNANCE" '.admin = $gov' <<<"$AGGREGATOR_CONFIG")"
+    echo "    aggregator -> the timelock"
+
+    invoke "$SLASHING" set_config \
+        --config "$(jq -c --arg gov "$GOVERNANCE" '.admin = $gov' <<<"$SLASHING_CONFIG")"
+    echo "    slashing   -> the timelock"
+
+    ADMIN_NOW="$GOVERNANCE"
+else
+    echo
+    echo "==> Skipping the handover: APHELION_SKIP_HANDOVER is set"
+    echo "    $APHELION_ADMIN_ACCOUNT keeps admin on all three contracts, and"
+    echo "    can change any parameter in one transaction. Reasonable while"
+    echo "    iterating on a throwaway deployment, wrong for one anybody"
+    echo "    relies on."
+    ADMIN_NOW="$APHELION_ADMIN_ACCOUNT"
+fi
+
 mkdir -p "$ROOT/deployments"
 RECORD="$ROOT/deployments/$NETWORK.json"
 jq -nc \
     --arg network "$NETWORK" \
     --arg passphrase "$PASSPHRASE" \
     --arg rpc "$RPC_URL" \
-    --arg admin "$APHELION_ADMIN_ACCOUNT" \
+    --arg deployer "$APHELION_ADMIN_ACCOUNT" \
+    --arg admin "$ADMIN_NOW" \
+    --arg guardian "$GUARDIAN" \
     --arg token "$TOKEN" \
     --arg registry "$REGISTRY" \
     --arg aggregator "$AGGREGATOR" \
     --arg slashing "$SLASHING" \
+    --arg governance "$GOVERNANCE" \
     --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{network: $network, network_passphrase: $passphrase, rpc_url: $rpc,
-      admin: $admin, token: $token,
-      contracts: {registry: $registry, aggregator: $aggregator, slashing: $slashing},
+      deployer: $deployer, admin: $admin, guardian: $guardian, token: $token,
+      contracts: {registry: $registry, aggregator: $aggregator,
+                  slashing: $slashing, governance: $governance},
       deployed_at: $deployed_at}' | jq . > "$RECORD"
+
+# Whether the separation the guardian exists for is actually present. It is a
+# key whose only power is to say no, which is worth nothing if it is held by the
+# same hands as the key that says go.
+GUARDIAN_NOTE=""
+for p in $PROPOSERS; do
+    if [[ "$p" == "$GUARDIAN" ]]; then
+        GUARDIAN_NOTE="
+  The guardian is also a proposer in this deployment, which gets you none of
+  the separation it is for. Move it to a key held somewhere else -- a proposal
+  against $GOVERNANCE naming set_config, like any other change."
+        break
+    fi
+done
+
+if (( HANDOVER )); then
+    ADMIN_NOTE="Admin on the registry, the aggregator and the slashing contract is now the
+timelock at $GOVERNANCE. A parameter change is a proposal, a wait of
+$TIMELOCK_DELAY seconds, and an execution anyone can make:
+
+  stellar contract invoke --id $GOVERNANCE \\
+    --source-account \$APHELION_STELLAR_SECRET --rpc-url $RPC_URL \\
+    --network-passphrase '$PASSPHRASE' \\
+    -- propose --proposer $APHELION_ADMIN_ACCOUNT --target $REGISTRY \\
+       --function set_min_stake --args '[\"20000000000\"]' \\
+       --description 'ipfs://bafy...'
+
+  # ...wait out the delay, then, from any account at all:
+  stellar contract invoke --id $GOVERNANCE ... -- execute --id <proposal id>
+
+The guardian ($GUARDIAN) may cancel a queued proposal and may do nothing
+else -- it cannot queue one, execute one, or touch the timelock's own
+configuration.$GUARDIAN_NOTE"
+else
+    ADMIN_NOTE="Admin is still $APHELION_ADMIN_ACCOUNT, because APHELION_SKIP_HANDOVER was
+set. The timelock at $GOVERNANCE is deployed and initialised but
+governs nothing. Hand the three contracts over when you are done iterating:
+
+  invoke registry   set_admin  --new_admin $GOVERNANCE
+  invoke aggregator set_config --config '<the config, with admin replaced>'
+  invoke slashing   set_config --config '<the config, with admin replaced>'"
+fi
 
 cat <<DONE
 
@@ -407,6 +536,7 @@ Deployed.
   registry   : $REGISTRY
   aggregator : $AGGREGATOR
   slashing   : $SLASHING
+  governance : $GOVERNANCE
 
 Written to deployments/$NETWORK.json (gitignored: contract ids are per
 deployment, and a committed one is a contract id somebody will paste into the
@@ -426,6 +556,8 @@ Next:
 The aggregator will not publish until $QUORUM nodes carrying
 $MIN_WEIGHT_BPS bps between them are submitting. A registered node starts at
 half weight, so the first rounds need more nodes than the steady state does.
+
+$ADMIN_NOTE
 
 The dispute committee above is appointed, and only until the term ends. From
 $(date -u -d "@$(( $(date -u +%s) + TERM_LENGTH ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "+$TERM_LENGTH seconds") anyone may call

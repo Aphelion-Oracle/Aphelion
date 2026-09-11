@@ -347,7 +347,7 @@ aphelion/
 │           └── api/            Read-only HTTP surface
 ├── migrations/                 SQL migrations, applied automatically at startup
 ├── tests/vectors/              Cross-implementation signing and aggregation vectors
-├── scripts/                    Deployment, registration and vector generation
+├── scripts/                    Deployment, governance, registration, vectors
 ├── deploy/                     Prometheus and Grafana provisioning
 └── docs/
     ├── node-operator.md        Setup, daily operation and troubleshooting
@@ -370,7 +370,7 @@ other.
 - PostgreSQL 14+
 - [Stellar CLI](https://developers.stellar.org/docs/tools/developer-tools/cli/stellar-cli) —
   used by the node to build, sign and submit transactions
-- `jq`, for `scripts/deploy.sh`
+- `jq`, for `scripts/deploy.sh` and `scripts/govern.sh`
 
 ### Build and test
 
@@ -393,16 +393,60 @@ scripts/build-contracts.sh
 
 ```bash
 export APHELION_STELLAR_SECRET="S..."   # pays for the deployment
-export APHELION_ADMIN_ACCOUNT="G..."    # administers the contracts afterwards
+export APHELION_ADMIN_ACCOUNT="G..."    # configures the contracts, then hands them over
+export APHELION_PROPOSERS="G... G..."   # may queue proposals afterwards
+export APHELION_GUARDIAN="G..."         # may veto one, and may do nothing else
+export APHELION_GUARDIAN_SECRET="S..."  # the guardian signs its own initialize
 scripts/deploy.sh
 ```
 
-The three contracts refer to each other, so all of them are deployed before any
+The core contracts refer to each other, so all of them are deployed before any
 of them is initialised — deploying is what fixes an address, initialising is
 what teaches each contract the others'. That is why `initialize` is a separate
 call rather than a constructor. Every parameter is an environment variable with
 a conservative default, the whole plan is printed and confirmed before anything
 is submitted, and the result is written to `deployments/<network>.json`.
+
+The **last** thing the script does is hand the registry, the aggregator and the
+slashing contract to the governance timelock it just deployed. Everything above
+is configured by the admin key acting in single transactions, because a
+deployment that had to serve a day's delay to add its first feed would never
+finish; from that point on the same changes are proposals — published, delayed,
+and executable by anyone. Set `APHELION_SKIP_HANDOVER=1` to keep the admin key
+instead: reasonable while iterating on a throwaway deployment, wrong for one
+anybody relies on.
+
+Leave `APHELION_GUARDIAN` unset and it defaults to the admin account, which
+gets you none of the separation the guardian is for — a key whose only power is
+to say no is worth nothing held in the same hands as the key that says go. The
+script says so at the end if that is how it was run.
+
+### Changing a parameter afterwards
+
+Once the handover is done, every admin call is a proposal.
+[`scripts/govern.sh`](scripts/govern.sh) reads `deployments/<network>.json`, so
+no contract id has to be retyped between queueing one and executing it a day or
+more later:
+
+```bash
+export APHELION_STELLAR_SECRET="S..."      # signs; also simulates the reads
+export APHELION_PROPOSER_ACCOUNT="G..."    # must be a proposer, and own that seed
+
+# Queue it. The arguments are a JSON array, in the order the function takes them.
+scripts/govern.sh propose registry set_min_stake '["20000000000"]' ipfs://bafy...
+
+scripts/govern.sh list                     # what is queued, and its state
+scripts/govern.sh show 7                   # the exact call, and when it lands
+
+# ...once the delay is served, from any account at all:
+scripts/govern.sh execute 7
+```
+
+`propose` prints the call, the target it resolves to and the dates it will
+become executable and expire, then asks before submitting. `execute` is
+permissionless — the call was fixed when it was queued and the delay is a fact
+about the clock, so there is nothing left for the sender to decide. The
+guardian, and only the guardian, can `cancel` somebody else's.
 
 ### Running a node
 
