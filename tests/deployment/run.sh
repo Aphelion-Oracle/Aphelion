@@ -83,6 +83,7 @@ GOV=CDGOVXX4TT3B6U4HGTKY3PTDRCNWIH7P6GA2NDXPPQ7LS3BASS43QQQQ
 DEPLOYER=GCNS2KFQDCMRG4EWA2DQY5XZDPIAFUWNSA7236OCEMDCU7PY7G3ZHF2V
 GUARDIAN=GDGUARDIANQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 STRANGER=GDSTRANGERQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
+NODE1=1111111111111111111111111111111111111111111111111111111111111111
 
 # -- the fixture itself -----------------------------------------------------
 #
@@ -146,6 +147,24 @@ case_is "a round interval past the staleness window" 1 "at or beyond the stalene
 
 run ".\"$AGG.get_config\".absence_threshold = 60" .
 case_is "an absence threshold inside one round" 1 "does not outlast a round interval"
+
+# -- unearned weight --------------------------------------------------------
+#
+# Not a fault in the contracts: sweep_absent removes this and anybody may call
+# it. What the script is measuring is whether anybody does, which is the one
+# thing about a live network that a correctness check cannot tell you.
+
+run ".\"$REG.get_node.$NODE1\".last_submission = 1757500000" .
+case_is "weight held by a node that stopped publishing" 0 "1 node(s) carry 10000 bps"
+
+run ".\"$REG.get_node.$NODE1\".last_submission = 1757500000" . --strict
+case_is "and unearned weight is a failure under --strict" 1 "1 node(s) carry 10000 bps"
+
+run ".\"$REG.get_node.$NODE1\".status = \"Jailed\" | .\"$REG.get_node.$NODE1\".weight_bps = 0 | .\"$REG.get_node.$NODE1\".last_submission = 1757500000" .
+case_is "a jailed node's silence is not unearned weight" 0 "no node is carrying weight"
+
+run "del(.\"$AGG.ledger_time\")" .
+case_is "no ledger time: unmeasured, not passed" 0 "did not answer ledger_time"
 
 run ".\"$SLA.get_config\".seats = 2" .
 case_is "seats below the dispute quorum" 1 "are below the dispute quorum"

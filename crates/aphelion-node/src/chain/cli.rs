@@ -21,7 +21,7 @@ use aphelion_core::{FeedId, Price};
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use super::{ChainClient, OnChainNode, OnChainPrice, SubmitReceipt};
+use super::{ChainClient, OnChainNode, OnChainPrice, SubmitReceipt, SweepReceipt};
 use crate::config::NetworkConfig;
 use crate::error::{NodeError, Result};
 use crate::signer::SignedSubmission;
@@ -171,6 +171,30 @@ fn as_i128(v: &serde_json::Value) -> Option<i128> {
     }
 }
 
+/// Decode `registry.list_nodes` into hex public keys.
+///
+/// A malformed entry is dropped rather than failing the whole read: the caller
+/// is doing upkeep on the keys it can identify, and one unreadable entry should
+/// not stop it from reaching the rest. Anything that is not 32 bytes of hex is
+/// not a key this node could sweep anyway — it would be rejected by the
+/// contract, at the caller's expense.
+fn decode_pubkeys(value: &serde_json::Value) -> Result<Vec<String>> {
+    if value.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = value.as_array().ok_or_else(|| {
+        NodeError::Chain(format!(
+            "registry.list_nodes returned {value}, expected an array of public keys"
+        ))
+    })?;
+    Ok(items
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.trim_start_matches("0x").to_ascii_lowercase())
+        .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()))
+        .collect())
+}
+
 fn as_u64(v: &serde_json::Value) -> Option<u64> {
     match v {
         serde_json::Value::String(s) => s.parse().ok(),
@@ -294,6 +318,57 @@ impl ChainClient for CliChain {
             .await?;
         Ok(as_u64(&value).unwrap_or(0))
     }
+
+    async fn list_nodes(&self) -> Result<Vec<String>> {
+        let value = self
+            .view(&self.network.registry_contract, "list_nodes", &[])
+            .await?;
+        decode_pubkeys(&value)
+    }
+
+    async fn absence_threshold(&self) -> Result<u64> {
+        let value = self
+            .view(&self.network.aggregator_contract, "get_config", &[])
+            .await?;
+        value
+            .get("absence_threshold")
+            .and_then(as_u64)
+            .ok_or_else(|| {
+                NodeError::Chain(format!(
+                    "aggregator.get_config has no absence_threshold: {value}"
+                ))
+            })
+    }
+
+    async fn sweep_absent(&self, pubkeys: &[String]) -> Result<SweepReceipt> {
+        if pubkeys.is_empty() {
+            // Nothing to charge is not a transaction. Submitting an empty
+            // vector would pay a fee to learn what the caller already knows.
+            return Ok(SweepReceipt {
+                tx_hash: None,
+                charged: 0,
+            });
+        }
+
+        let mut cmd = self.base_args(&self.network.aggregator_contract);
+        cmd.push("--".into());
+        cmd.push("sweep_absent".into());
+        cmd.push("--pubkeys".into());
+        cmd.push(
+            serde_json::to_string(pubkeys)
+                .map_err(|e| NodeError::Chain(format!("cannot encode --pubkeys: {e}")))?,
+        );
+
+        let (stdout, stderr) = self.run(cmd).await?;
+        Ok(SweepReceipt {
+            tx_hash: Self::extract_tx_hash(&stderr),
+            charged: parse_json(&stdout)
+                .ok()
+                .as_ref()
+                .and_then(as_u64)
+                .unwrap_or(0) as u32,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -328,6 +403,31 @@ mod tests {
         assert_eq!(as_u64(&serde_json::json!("1735689600")), Some(1735689600));
         assert_eq!(as_u64(&serde_json::json!(1735689600)), Some(1735689600));
         assert_eq!(as_i128(&serde_json::json!(null)), None);
+    }
+
+    #[test]
+    fn decodes_a_node_index_and_drops_what_is_not_a_key() {
+        let key = "a".repeat(64);
+        let other = "B".repeat(64);
+        let decoded = decode_pubkeys(&serde_json::json!([
+            key.clone(),
+            format!("0x{other}"),
+            "deadbeef", // too short to be a 32-byte key
+            42,         // not a string at all
+        ]))
+        .unwrap();
+        // The long ones survive, normalised to lower case and unprefixed; the
+        // rest are dropped rather than failing the whole read.
+        assert_eq!(decoded, vec![key, other.to_ascii_lowercase()]);
+    }
+
+    #[test]
+    fn an_empty_registry_is_an_empty_list_not_an_error() {
+        // A deployment with no operators yet. Sweeping it is a no-op, not a
+        // fault, and the first thing a fresh testnet deployment looks like.
+        assert!(decode_pubkeys(&serde_json::json!(null)).unwrap().is_empty());
+        assert!(decode_pubkeys(&serde_json::json!([])).unwrap().is_empty());
+        assert!(decode_pubkeys(&serde_json::json!({"nodes": []})).is_err());
     }
 
     #[test]

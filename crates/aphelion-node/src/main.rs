@@ -9,7 +9,7 @@ use aphelion_node::api::AppState;
 use aphelion_node::chain::{ChainClient, CliChain, ReadOnlyChain, RpcClient};
 use aphelion_node::config::Config;
 use aphelion_node::db::Repo;
-use aphelion_node::engine::{run_retention, Collector, RoundRunner};
+use aphelion_node::engine::{run_retention, Collector, RoundRunner, Sweeper};
 use aphelion_node::error::{NodeError, Result};
 use aphelion_node::signer::NodeSigner;
 use aphelion_node::strkey::contract_id_bytes;
@@ -76,6 +76,18 @@ enum Command {
         confidence_bps: u32,
         #[arg(default_value_t = 1)]
         nonce: u64,
+    },
+
+    /// Show which registered nodes have gone silent, and optionally charge
+    /// them the missed round the aggregator allows anyone to charge.
+    ///
+    /// Reads only, until `--commit`. Needs no database.
+    Sweep {
+        /// Submit the sweep instead of only printing it. Costs a transaction
+        /// fee, and takes reputation off every node the aggregator agrees is
+        /// absent.
+        #[arg(long)]
+        commit: bool,
     },
 
     /// Apply database migrations and exit.
@@ -192,7 +204,91 @@ async fn run() -> Result<()> {
             Ok(())
         }
 
+        Command::Sweep { commit } => {
+            let config = Config::load(&cli.config)?;
+            let signer = load_signer(&config)?;
+            let chain: Arc<dyn ChainClient> = Arc::new(CliChain::new(config.network.clone())?);
+
+            // The configured interval and batch are respected, but not the
+            // on/off switch: running this command *is* the opt-in, and an
+            // operator asking to see the plan should not have to enable the
+            // loop to be shown it.
+            let mut upkeep = config.upkeep.clone();
+            upkeep.sweep_absent = true;
+            let sweeper = Sweeper::new(chain, signer.public_key_hex(), upkeep);
+
+            let plan = sweeper.plan().await?;
+            println!(
+                "{} registered node(s); absence threshold {}s",
+                plan.examined, plan.absence_threshold
+            );
+            for (excuse, count) in plan.excuse_counts() {
+                println!("  {count:>3} {}", describe_excuse(excuse));
+            }
+
+            if plan.is_empty() {
+                println!("\nNothing to sweep.");
+                return Ok(());
+            }
+
+            println!("\n{:<66} {:>10}  {:>6}", "public key", "silent", "weight");
+            for c in &plan.candidates {
+                println!(
+                    "{:<66} {:>9}s  {:>5}bp",
+                    c.public_key_hex, c.silent_for, c.weight_bps
+                );
+            }
+            if plan.deferred > 0 {
+                println!(
+                    "\n{} more beyond the batch limit of {}; run again to reach them.",
+                    plan.deferred, config.upkeep.max_batch
+                );
+            }
+
+            if !commit {
+                println!(
+                    "\nNothing submitted. Re-run with --commit to charge these \
+                     nodes a missed round."
+                );
+                return Ok(());
+            }
+
+            match sweeper.sweep_once().await? {
+                Some(report) => {
+                    println!(
+                        "\noffered {}, charged {}{}",
+                        report.plan.candidates.len(),
+                        report.charged,
+                        report
+                            .tx_hash
+                            .map(|h| format!(", tx {h}"))
+                            .unwrap_or_default()
+                    );
+                    if report.charged < report.plan.candidates.len() as u32 {
+                        println!(
+                            "The aggregator declined the rest: it had seen them more recently\n\
+                             than the registry showed, or somebody else swept first."
+                        );
+                    }
+                }
+                // Between the plan above and the call, somebody else swept.
+                None => println!("\nNothing left to sweep."),
+            }
+            Ok(())
+        }
+
         Command::Run { dry_run } => serve(cli.config, dry_run).await,
+    }
+}
+
+fn describe_excuse(excuse: aphelion_node::engine::Excuse) -> &'static str {
+    use aphelion_node::engine::Excuse;
+    match excuse {
+        Excuse::Own => "this node (never its own business)",
+        Excuse::NoWeight => "carry no weight (unknown, jailed or exiting)",
+        Excuse::NeverSeen => "have never taken part in a closed round",
+        Excuse::Recent => "seen recently enough",
+        Excuse::AlreadyOffered => "already offered inside this absence window",
     }
 }
 
@@ -263,12 +359,28 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
 
     let collector = Collector::new(Arc::clone(&config), price_sources, repo.clone());
 
+    // Network upkeep. Off unless the operator asked for it, and inert in a dry
+    // run — the read-only client refuses the write, so an enabled sweep would
+    // log a refusal every interval rather than quietly costing anything.
+    //
+    // One instance, shared with the API: `/v1/upkeep` has to report the plan
+    // this loop would submit, which means it has to be the same loop.
+    let sweeper = Arc::new(Sweeper::new(
+        Arc::clone(&chain),
+        signer.public_key_hex(),
+        config.upkeep.clone(),
+    ));
+    if dry_run && sweeper.enabled() {
+        tracing::warn!("dry run: absence sweeps are configured but will not be submitted");
+    }
+
     let state = AppState {
         config: Arc::clone(&config),
         repo: repo.clone(),
         chain: Arc::clone(&chain),
         rpc,
         signer: Arc::clone(&signer),
+        sweeper: Arc::clone(&sweeper),
         metrics,
         started_at: Instant::now(),
     };
@@ -276,6 +388,7 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
     let mut tasks = tokio::task::JoinSet::new();
     tasks.spawn(collector.run(shutdown_rx.clone()));
     tasks.spawn(runner.run(shutdown_rx.clone()));
+    tasks.spawn(sweeper.run(shutdown_rx.clone()));
     {
         let repo = repo.clone();
         let retention = config.database.retention;

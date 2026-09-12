@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/feeds", get(feeds))
         .route("/v1/prices/{feed}", get(price))
         .route("/v1/rounds", get(rounds))
+        .route("/v1/upkeep", get(upkeep))
         .route("/v1/sources", get(sources))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -244,6 +245,32 @@ async fn node(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value
         },
         "registered": on_chain.is_some(),
         "on_chain": on_chain,
+    })))
+}
+
+/// Which registered nodes this node currently sees as absent.
+///
+/// Reads only, like everything else here: it builds the same plan the upkeep
+/// loop would and returns it without submitting. Useful in both directions —
+/// an operator can see what their node is about to charge others for, and an
+/// operator being charged can see why from any node that is doing it.
+async fn upkeep(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let plan = state.sweeper.plan().await?;
+
+    Ok(Json(json!({
+        "enabled": state.config.upkeep.sweep_absent,
+        "interval_seconds": state.config.upkeep.interval.as_secs(),
+        "max_batch": state.config.upkeep.max_batch,
+        "absence_threshold": plan.absence_threshold,
+        "ledger_time": plan.ledger_time,
+        "registered_nodes": plan.examined,
+        "candidates": plan.candidates,
+        "deferred": plan.deferred,
+        "excused": plan
+            .excuse_counts()
+            .into_iter()
+            .map(|(excuse, count)| json!({ "reason": excuse, "nodes": count }))
+            .collect::<Vec<_>>(),
     })))
 }
 

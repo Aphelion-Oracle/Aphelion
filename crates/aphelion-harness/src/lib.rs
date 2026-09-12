@@ -90,6 +90,8 @@ pub struct Node {
     database: String,
     child: Option<tokio::process::Child>,
     log: PathBuf,
+    config: PathBuf,
+    database_url: String,
 }
 
 impl Node {
@@ -134,6 +136,8 @@ pub struct Harness {
     pub nodes: Vec<Node>,
     dir: PathBuf,
     admin_url: String,
+    node_bin: PathBuf,
+    fake_stellar: PathBuf,
     _guard: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -150,6 +154,11 @@ pub struct Options {
     pub price: String,
     /// Sources that must agree before a node signs anything.
     pub min_sources: usize,
+    /// Have every node run the absence-sweep upkeep loop.
+    ///
+    /// Off by default, matching the node's own default: a test about rounds
+    /// should not have nodes quietly charging each other in the background.
+    pub sweep_absent: bool,
     /// How long a round will keep using a source's last observation.
     ///
     /// Adjustable because it decides how quickly a venue going quiet stops
@@ -166,6 +175,7 @@ impl Default for Options {
             quorum: 3,
             unregistered: Vec::new(),
             price: "64231.55".into(),
+            sweep_absent: false,
             min_sources: 2,
             max_observation_age: Duration::from_secs(60),
         }
@@ -270,9 +280,11 @@ impl Harness {
                 name,
                 public_key_hex,
                 api_port,
-                database,
+                database: database.clone(),
                 child: Some(child),
                 log,
+                config,
+                database_url: url_for(&admin_url, &database),
             });
         }
 
@@ -282,6 +294,8 @@ impl Harness {
             nodes,
             dir,
             admin_url,
+            node_bin,
+            fake_stellar,
             _guard,
         };
         harness.await_ready().await?;
@@ -344,6 +358,36 @@ impl Harness {
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    }
+
+    /// Run a one-shot `aphelion-node` subcommand against node `i`'s config, as
+    /// an operator on that box would.
+    ///
+    /// The same binary, the same configuration file and the same fake `stellar`
+    /// the running process uses, so a subcommand tested here is reaching the
+    /// deployment through the argument shapes `chain::cli` really builds. The
+    /// long-running `run` command is not what this is for — that one is already
+    /// a process the harness manages.
+    pub async fn node_command(&self, i: usize, args: &[&str]) -> std::process::Output {
+        let node = &self.nodes[i];
+        let mut cmd = tokio::process::Command::new(&self.node_bin);
+        cmd.arg("--config")
+            .arg(&node.config)
+            .args(args)
+            .env("DATABASE_URL", &node.database_url)
+            .env(
+                "APHELION_STELLAR_SECRET",
+                "SBUW3DVYLKLY5ZUJD5PL2ZHOFWJSVWGJA5DVLPVDNGTOFUEBEIRJXNQO",
+            )
+            .env("APHELION_STELLAR_BIN", &self.fake_stellar)
+            .env("APHELION_FAKE_LEDGER_URL", self.deployment.url())
+            .stdin(Stdio::null());
+        for (k, v) in self.exchange.env() {
+            cmd.env(k, v);
+        }
+        cmd.output()
+            .await
+            .unwrap_or_else(|e| panic!("cannot run {:?} {args:?}: {e}", self.node_bin))
     }
 
     /// Every node's log, labelled. For explaining a failed assertion.
@@ -578,6 +622,11 @@ submit_deviation_bps = 1
 heartbeat = "4s"
 max_clock_skew = "30s"
 
+[upkeep]
+sweep_absent = {sweep_absent}
+interval = "3s"
+max_batch = 25
+
 [sources]
 binance = true
 kraken = true
@@ -593,6 +642,7 @@ sources = {{ binance = "BTCUSDT", kraken = "XBTUSD", coinbase = "BTC-USD" }}
         registry = deployment::REGISTRY,
         aggregator = deployment::AGGREGATOR,
         min_sources = opts.min_sources,
+        sweep_absent = opts.sweep_absent,
         observation_age = opts.max_observation_age.as_secs(),
     )
 }

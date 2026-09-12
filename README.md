@@ -284,7 +284,7 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 58 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 79 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
@@ -292,26 +292,29 @@ repository, not the target architecture.
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
-| Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 12 |
-| `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 30 |
+| Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
+| Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
+| `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 34 |
 | Testnet deployment | 📋 Planned | — |
 | Mainnet deployment | 📋 Planned | — |
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-336 tests in total: 106 off-chain (`cargo test --workspace`), 200 against the
-contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 30 against the
+375 tests in total: 141 off-chain (`cargo test --workspace`), 200 against the
+contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
 Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
-their 6 are reported as one figure of 58 by `cargo test`. The harness's 12 are 9
-process-level tests plus 3 covering the fake CLI's argument parsing.
+their 6 are reported as one figure of 58 by `cargo test`. The absence sweep's 11
+are its own integration suite; the decision it makes has a further 13 unit tests
+counted inside the node's 79. The harness's 15 are 12 process-level tests plus 3
+covering the fake CLI's argument parsing.
 
-Be aware of what the 9 do without a database: they skip, and a skipped Rust test
-still reports as **passed**. A green `cargo test --workspace` on a machine with
-no Postgres has run 97 tests and reported 106. The skip prints a `SKIP` line, but
-`cargo test` swallows it unless you pass `--nocapture`, so treat the harness as
-covered only where it is actually given a database — which is what the `harness`
-job in CI is for.
+Be aware of what the 12 do without a database: they skip, and a skipped Rust
+test still reports as **passed**. A green `cargo test --workspace` on a machine
+with no Postgres has run 129 tests and reported 141. The skip prints a `SKIP`
+line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
+harness as covered only where it is actually given a database — which is what
+the `harness` job in CI is for.
 
 The Byzantine simulation runs the real registry and aggregator together across
 multiple rounds with a mix of honest and dishonest nodes. The multi-node
@@ -343,7 +346,7 @@ aphelion/
 │   └── aphelion-node/          The node binary
 │       └── src/
 │           ├── sources/        Binance, Kraken, Coinbase, CoinGecko
-│           ├── engine/         Collector, aggregation, round loop
+│           ├── engine/         Collector, aggregation, round loop, absence sweeps
 │           ├── chain/          ChainClient trait: CLI-backed, RPC reads, in-memory mock
 │           ├── db/             Postgres schema access
 │           └── api/            Read-only HTTP surface
@@ -536,6 +539,7 @@ docker compose logs -f node
 | `keygen --out <path>` | Generate an Ed25519 node key (refuses to overwrite) |
 | `pubkey` | Print the configured node's public key |
 | `check-sources` | Fetch every configured source once and print the result |
+| `sweep [--commit]` | Show which registered nodes have gone silent; charge them with `--commit` |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
 | `migrate` | Apply database migrations and exit |
 | `show-config` | Print the effective configuration after environment overrides |
@@ -644,6 +648,9 @@ charged, and a jailed one has its clock advanced as it is skipped. Its silence
 is the penalty already running, so billing it again on release would charge it
 twice for one absence, in the first moment it was allowed to speak.
 
+Who actually calls it is [a separate question](#who-charges-an-absence), and for
+a while the answer here was nobody.
+
 ### Integration guidance
 
 - **Always bound staleness.** `get_price_checked` makes it hard to forget.
@@ -720,6 +727,11 @@ submit_deviation_bps     = 25      # publish on a 0.25% move...
 heartbeat                = "300s"  # ...or every 5 minutes regardless
 max_clock_skew           = "30s"   # refuse to sign beyond this drift from ledger time
 
+[upkeep]
+sweep_absent = false   # charge silent nodes the missed round anyone may charge
+interval     = "30m"
+max_batch    = 25
+
 [[feeds]]
 id             = "BTC_USD"
 confidence_bps = 50
@@ -740,7 +752,8 @@ Configuration is validated at startup, and a config that could never work is a
 startup failure rather than a silent runtime one — a feed mapping fewer sources
 than `min_sources_per_feed`, a feed pointing at a disabled source, a round
 interval shorter than the poll interval, a `max_observation_age` at or below
-`poll_interval`, an account address where a contract address belongs.
+`poll_interval`, an account address where a contract address belongs, an upkeep
+interval faster than the round loop.
 
 That last one is the least obvious and the worst to debug in production. An age
 limit no longer than one poll discards data the collector is still working on:
@@ -775,6 +788,7 @@ auth layer.
 | `GET /v1/prices/{feed}` | Local price, on-chain price, divergence, per-source breakdown |
 | `GET /v1/rounds?feed=&limit=` | Recent rounds and their outcomes |
 | `GET /v1/sources` | Per-source health |
+| `GET /v1/upkeep` | Which registered nodes read as absent, and what a sweep would charge |
 
 `/health` reports **usefulness**, not just liveness: a process that is running
 but has not composed a round in ten minutes is not healthy in any sense an
@@ -821,6 +835,10 @@ debug a problem that lives at the exchanges.
 | `aphelion_clock_skew_seconds` | Node clock minus ledger clock |
 | `aphelion_reputation`, `aphelion_stake` | On-chain standing |
 | `aphelion_seconds_since_submission{feed}` | Time since this node last landed a price |
+| `aphelion_registry_nodes` | Nodes in the registry, as this node last read it |
+| `aphelion_sweep_candidates` | Registered nodes this node currently reads as absent |
+| `aphelion_sweeps_total{outcome}` | Sweep passes by outcome — `submitted`, `nothing_to_do`, `error` |
+| `aphelion_nodes_charged_total` | Missed rounds this node has actually charged |
 
 `aphelion_round_errors_total` carries a `feed` label only when a feed is to
 blame. Two failures abort the whole tick before any feed is reached — an
@@ -831,16 +849,26 @@ unreadable ledger time, and a clock too far from it — and those are labelled b
 a round-outcome panel rather than as failures — which is exactly why the error
 counter and `aphelion_clock_skew_seconds` are the ones worth alerting on.
 
+`aphelion_sweep_candidates` is worth a panel on any network, whether or not
+this node is the one sweeping: it is the amount of voting weight currently being
+carried by nodes that have stopped earning it, which is a property of the
+network rather than of this process. A number that climbs and never falls means
+nobody is calling `sweep_absent`.
+
 Suggested alerts: `aphelion_seconds_since_submission > 2 × heartbeat`,
 `aphelion_clock_skew_seconds` outside ±30, `aphelion_reputation < 4000`,
-`aphelion_source_spread_bps` sustained above the usual band. All five ship in
-[`deploy/prometheus/alerts.yml`](deploy/prometheus/alerts.yml).
+`aphelion_source_spread_bps` sustained above the usual band, and
+`aphelion_sweep_candidates > 0` held for a couple of hours. All six ship in
+[`deploy/prometheus/alerts.yml`](deploy/prometheus/alerts.yml). The last is a
+warning rather than a page, and it is about other people's nodes: nothing is
+broken at your end, and the weight it names is still counting.
 
 `docker compose up` also provisions a Grafana dashboard
 ([`deploy/grafana/provisioning/dashboards/node-overview.json`](deploy/grafana/provisioning/dashboards/node-overview.json))
 at <http://localhost:3000>. Its panels are ordered by the question an operator
-asks first: am I still counted, is what I publish right, and if not, which venue
-is at fault. It is provisioned read-only from the repository — a dashboard that
+asks first: am I still counted, is what I publish right, if not then which venue
+is at fault, and — last, because it is about the network rather than this node —
+how much weight is being carried by nodes that have stopped earning it. It is provisioned read-only from the repository — a dashboard that
 exists only in one operator's browser is one nobody else can reproduce when they
 are the person on call.
 
@@ -898,6 +926,81 @@ operators for hardware failure drives away exactly the people the network needs.
 
 An empty reward pool skips payment but never blocks consensus: a round that
 cannot pay is still a round that produced a correct price.
+
+### Who charges an absence
+
+Every penalty above happens by itself except one. An outlier is caught by
+arithmetic the aggregator was already doing to close the round; a dispute is
+filed by whoever noticed. A **missed round** is different: `sweep_absent` is
+permissionless, and permissionless is not the same as automatic. Until somebody
+calls it, a node that stopped working keeps the weight it earned while it was
+working, and its last price goes on counting towards the median for as long as
+nobody bothers.
+
+That is a real hole and not a theoretical one. A dead node's weight is not
+merely stale — it is the difference between a median taken over the nodes that
+are working and a median taken over the nodes that were.
+
+The node closes it, opt-in, through `[upkeep]`:
+
+```toml
+[upkeep]
+sweep_absent = true
+interval     = "30m"
+max_batch    = 25
+```
+
+Why an operator would turn it on is that weight is relative. A feed's median is
+taken over whoever turns up, so every basis point a dead node still carries is a
+basis point the live ones do not have, and every reward paid to a round it did
+not join is smaller than it should be. Sweeping is a small fee to reduce a
+competitor's weight to what it has recently earned.
+
+Why it is **off by default** is that it is still a fee for a call that pays
+nothing back directly. An operator who did not ask to spend on network upkeep
+should not discover that they have been.
+
+Four properties, and the reasoning behind each:
+
+- **A node never sweeps itself.** Paying a fee to take reputation off your own
+  node is not something anyone wants, and the symmetry is what makes leaving it
+  out honest rather than self-serving: every other operator has exactly the
+  reason to sweep you that you have to sweep them. Your own absence is somebody
+  else's to charge, and on a network where more than one operator runs this
+  loop, somebody will.
+- **One silence is charged once,** however many operators sweep it. That
+  protection is the contract's `Swept` marker, not the node's own memory — a
+  network of ten sweepers must not bill one absence ten times, and a rule that
+  depended on each caller behaving would not be a rule.
+- **The node's view is deliberately the more pessimistic one.** It reads the
+  registry's `last_submission`, which moves only when a round the node joined
+  actually closed; the aggregator decides from the last submission it
+  *accepted*, closed round or not. So a node whose rounds keep falling short of
+  quorum can look absent from outside and not be absent to the contract. The
+  contract re-checks every key and declines the ones it should, which makes the
+  error safe — but not free, because the fee is paid either way. `sweep_absent`
+  returns how many keys it charged, so the gap between offered and charged is
+  reported rather than swallowed, and a key that was declined is not offered
+  again inside the same absence window.
+- **A batch is bounded and the overflow waits.** `max_batch` is capped at 50,
+  because one sweep reads a registry record per key and a transaction that
+  exceeds its resource budget fails as a whole — charging nobody and costing the
+  fee anyway. Candidates beyond the limit are carried to the next pass, longest
+  silence first.
+
+Nothing here needs to be running to inspect it. Both of these read the chain and
+submit nothing:
+
+```bash
+aphelion-node sweep                       # who is absent, and what it would cost
+curl -s localhost:8080/v1/upkeep | jq     # the same plan, from a running node
+aphelion-node sweep --commit              # charge them, once
+```
+
+And `scripts/verify-deployment.sh` reports the network-level version of the same
+question — how much weight is currently held by nodes that have stopped earning
+it. That figure is not a fault in the contracts; it is the measure of whether
+anybody is doing this upkeep at all.
 
 ### Jail and release
 
@@ -1078,7 +1181,7 @@ against a real network rather than in advance of one.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
 
@@ -1144,16 +1247,25 @@ decisions rather than the plumbing:
   cannot be removed
 - `aphelion-consumer-example` — that a single-round crash cannot liquidate a
   solvent borrower, and a sustained one can
+- `aphelion-node::engine::upkeep` — that a node never offers its own key to a
+  sweep, that a key the aggregator would decline is not paid for twice, and that
+  the longest silence goes first when a batch has to be truncated
 - `aphelion-node` integration `multi_node` — that the median a node predicts
   locally is the median the network publishes, and that one node's signature
   authorises nothing under another node's key
+- `aphelion-node` integration `sweep` — that sustained absence actually jails a
+  node and stops its vote counting, that one silence is charged once however many
+  operators sweep it, and that a key the aggregator has seen more recently is
+  declined and reported rather than assumed charged
 - `aphelion-harness` integration `multi_process` — the failures that only exist
   between processes: a node dying without taking the network with it, an
   endpoint disappearing under a node that is otherwise healthy, and a clock
   drifting far enough from the ledger's that the node stops signing. Also that
   the price the chain carries actually tracks the venues, that one exchange
-  printing a bad tick is absorbed rather than published, and that a node left
-  below `min_sources_per_feed` signs nothing until its venues return
+  printing a bad tick is absorbed rather than published, that a node left below
+  `min_sources_per_feed` signs nothing until its venues return, and that one live
+  node process charges a dead one for its silence while a node with upkeep
+  switched off charges nobody
 
 ### Multi-process harness
 

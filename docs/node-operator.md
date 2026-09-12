@@ -75,8 +75,9 @@ Confirm the configuration is coherent before going any further:
 Startup validation is deliberately strict, because a configuration that could
 never work should fail loudly at boot rather than quietly at 03:00: a feed
 mapping fewer sources than `min_sources_per_feed`, a feed pointing at a disabled
-source, a round interval shorter than the poll interval, or an account address
-where a contract address belongs are all startup failures.
+source, a round interval shorter than the poll interval, an upkeep interval
+faster than the round loop, or an account address where a contract address
+belongs are all startup failures.
 
 ---
 
@@ -198,6 +199,82 @@ shorter than a day and a day is the default, while unbonding takes
 `unbonding_period` on top of it, a week by default. So a change first noticed
 on the day it becomes executable is one you will be operating under whether or
 not you want to: the two windows do not overlap in your favour.
+
+### Charging the nodes that have gone quiet
+
+There is one penalty on this network that nothing does by itself. The aggregator
+catches an outlier with arithmetic it was already doing, and a dispute is filed
+by whoever noticed — but a **missed round** has to be charged by somebody.
+`sweep_absent` is permissionless, which means anyone may call it and nobody is
+obliged to. Until one of you does, an operator who switched their node off last
+month still carries the weight they earned while it was running, and their last
+price still counts towards every median.
+
+See who that currently is. This reads the chain and submits nothing:
+
+```bash
+aphelion-node sweep
+```
+
+```
+27 registered node(s); absence threshold 3600s
+    1 this node (never its own business)
+    2 carry no weight (unknown, jailed or exiting)
+   22 seen recently enough
+
+public key                                                             silent  weight
+9f2c1b4a5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708        91204s  10000bp
+4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7081920304       14511s   5000bp
+
+Nothing submitted. Re-run with --commit to charge these nodes a missed round.
+```
+
+Charge them once, by hand:
+
+```bash
+aphelion-node sweep --commit
+```
+
+Or have your node do it continuously, in `aphelion.toml`:
+
+```toml
+[upkeep]
+sweep_absent = true
+interval     = "30m"
+max_batch    = 25
+```
+
+A running node serves the same plan over HTTP, so this needs no shell on the
+box:
+
+```bash
+curl -s localhost:8080/v1/upkeep | jq
+```
+
+**Why you would.** Weight is relative. The median is taken over whoever turns
+up, so every basis point a dead node still carries is a basis point yours does
+not have, and every reward paid out to a round it did not join is smaller than
+it should be. A sweep is a small fee to reduce a competitor's weight to what it
+has recently earned.
+
+**Why it is off unless you ask.** It is a transaction fee for a call that pays
+nothing back directly, and nobody should find fees on their account for upkeep
+they did not opt into.
+
+**What it will not do.** It never includes your own key. Your absence is
+somebody else's to charge, and every other operator has the same reason to
+charge it that you have to charge theirs — see
+[Charged a missed round while you were down](#charged-a-missed-round-while-you-were-down)
+for that side of it.
+
+Two things to expect once it is on. First, a sweep sometimes charges fewer nodes
+than it offered: you read the registry's `last_submission`, which moves only
+when a round the node joined actually closed, while the aggregator decides from
+the last submission it *accepted*. Your view is the more pessimistic one, the
+contract declines the difference, and the log says so — the fee is spent either
+way, and the node will not re-offer a declined key inside the same window.
+Second, on a healthy network most passes send no transaction at all, and the
+`nothing to sweep` line in the log is the loop working.
 
 ### Reading a quiet node
 
@@ -338,6 +415,11 @@ it is swept, so this costs 25 reputation per absence window, not per caller.
 It is not a punishment for downtime as such — downtime never seizes stake — but
 it is why a node left switched off keeps losing weight rather than sitting
 frozen at its old standing.
+
+Expect it to be other operators' nodes doing the charging: the incentive is
+symmetric, and the same `[upkeep]` setting is available to you
+([Charging the nodes that have gone quiet](#charging-the-nodes-that-have-gone-quiet)).
+A node that swept itself would be paying a fee to penalise itself, so none does.
 
 Time spent in jail is not chargeable this way. A jailed node is silent because
 the aggregator refuses its submissions, not because it chose to be, and it is

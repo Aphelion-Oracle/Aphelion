@@ -22,7 +22,7 @@ use std::sync::Arc;
 use aphelion_core::FeedId;
 use async_trait::async_trait;
 
-use super::{ChainClient, OnChainNode, OnChainPrice, SubmitReceipt};
+use super::{ChainClient, OnChainNode, OnChainPrice, SubmitReceipt, SweepReceipt};
 use crate::error::{NodeError, Result};
 use crate::signer::SignedSubmission;
 
@@ -69,6 +69,26 @@ impl ChainClient for ReadOnlyChain {
 
     async fn last_nonce(&self, public_key_hex: &str, feed: &FeedId) -> Result<u64> {
         self.inner.last_nonce(public_key_hex, feed).await
+    }
+
+    async fn list_nodes(&self) -> Result<Vec<String>> {
+        self.inner.list_nodes().await
+    }
+
+    async fn absence_threshold(&self) -> Result<u64> {
+        self.inner.absence_threshold().await
+    }
+
+    /// Refused for the same reason `submit_price` is. A sweep costs a fee and
+    /// takes reputation off another operator: it is the second thing in this
+    /// trait that changes somebody's state, and a dry run that did it would be
+    /// spending an operator's money on a run they were told was inert.
+    async fn sweep_absent(&self, _pubkeys: &[String]) -> Result<SweepReceipt> {
+        Err(NodeError::Config(
+            "this node is running with submissions disabled (--dry-run); \
+             refusing to sweep"
+                .into(),
+        ))
     }
 }
 
@@ -130,6 +150,23 @@ mod tests {
             first + 120,
             "the wrapper served a stale ledger time"
         );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_is_refused_and_charges_nobody() {
+        // The other write in the trait. A dry run that swept would take
+        // reputation off a stranger and bill the operator for it.
+        let inner = chain();
+        let ro = ReadOnlyChain::new(Arc::clone(&inner) as Arc<dyn ChainClient>);
+
+        let err = ro.sweep_absent(&["ab12".into()]).await.unwrap_err();
+        assert!(
+            !err.is_transient(),
+            "a refusal to sweep must not be retried: {err}"
+        );
+        // The keys a sweep would read are still readable; only the write is not.
+        assert_eq!(ro.list_nodes().await.unwrap(), vec!["ab12".to_string()]);
+        assert_eq!(ro.absence_threshold().await.unwrap(), 3_600);
     }
 
     #[tokio::test]

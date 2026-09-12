@@ -77,6 +77,33 @@ heartbeat = "300s"
 max_clock_skew = "30s"
 
 
+[upkeep]
+# Network upkeep: work the network needs done by somebody and assigns to
+# nobody. All of it costs transaction fees and publishes no price, so all of it
+# is off unless you turn it on.
+#
+# `sweep_absent` charges a missed round to nodes the registry shows as silent
+# past the aggregator's absence threshold. The contract allows anyone to do it;
+# the reason to be the one who does is that weight is relative. A node that
+# stopped working keeps the weight it earned while it was working, and every
+# basis point of that is influence your node does not have and a share of the
+# rewards it is not getting. The reason it is off by default is that it is a
+# fee for a call that pays nothing back directly.
+#
+# It never includes your own node. Your absence is somebody else's to charge,
+# and every other operator has the same reason to charge it that you have.
+sweep_absent = false
+# How often to look. Absence thresholds are measured in hours and one silence
+# can only be charged once, so there is nothing to gain from looking often.
+interval  = "30m"
+# Most keys to offer in one transaction. The overflow waits for the next pass.
+max_batch = 25
+
+# See what a sweep would do, without submitting anything:
+#   aphelion-node sweep
+#   curl -s localhost:8080/v1/upkeep | jq
+
+
 [sources]
 # The three venues needing no credentials are on by default.
 binance  = true

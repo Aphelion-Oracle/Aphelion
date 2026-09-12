@@ -52,6 +52,18 @@ pub struct OnChainNode {
     pub last_submission: u64,
 }
 
+/// Result of a permissionless absence sweep.
+#[derive(Debug, Clone, Serialize)]
+pub struct SweepReceipt {
+    pub tx_hash: Option<String>,
+    /// How many of the offered keys the aggregator actually charged.
+    ///
+    /// Lower than the number offered whenever somebody else got there first,
+    /// or whenever the node's off-chain view of who is silent was more
+    /// pessimistic than the aggregator's. See [`crate::engine::upkeep`].
+    pub charged: u32,
+}
+
 /// Result of landing a submission.
 #[derive(Debug, Clone, Serialize)]
 pub struct SubmitReceipt {
@@ -92,6 +104,30 @@ pub trait ChainClient: Send + Sync {
     /// feed. Used at startup to resynchronise the local nonce counter after a
     /// restore from backup.
     async fn last_nonce(&self, public_key_hex: &str, feed: &FeedId) -> Result<u64>;
+
+    /// Every public key the registry knows, whatever state it is in.
+    ///
+    /// The whole set, not a page: the registry's index is bounded by the
+    /// number of operators a network has, and a paginated read would be a
+    /// second source of truth about who is a member.
+    async fn list_nodes(&self) -> Result<Vec<String>>;
+
+    /// How long the aggregator lets a node be silent before `sweep_absent`
+    /// may charge it a missed round.
+    ///
+    /// Read from the chain rather than mirrored in the node's config, because
+    /// governance can change it and a stale local copy would make the node
+    /// pay fees for calls the aggregator declines.
+    async fn absence_threshold(&self) -> Result<u64>;
+
+    /// Charge a missed round to whichever of `pubkeys` has been silent past
+    /// the absence threshold.
+    ///
+    /// Permissionless, and it is not this node's own submission — it is
+    /// upkeep on somebody else's record. The aggregator re-checks every key
+    /// against its own view, so offering a key it declines costs the fee and
+    /// nothing else.
+    async fn sweep_absent(&self, pubkeys: &[String]) -> Result<SweepReceipt>;
 }
 
 fn ser_price<S: serde::Serializer>(p: &Price, s: S) -> std::result::Result<S::Ok, S::Error> {

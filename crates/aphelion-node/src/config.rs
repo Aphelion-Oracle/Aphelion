@@ -25,6 +25,8 @@ pub struct Config {
     #[serde(default)]
     pub engine: EngineConfig,
     #[serde(default)]
+    pub upkeep: UpkeepConfig,
+    #[serde(default)]
     pub sources: SourcesConfig,
     #[serde(default)]
     pub feeds: Vec<FeedConfig>,
@@ -110,6 +112,35 @@ pub struct EngineConfig {
     /// as stale or future-dated.
     #[serde(with = "humantime_serde", default = "default_max_clock_skew")]
     pub max_clock_skew: Duration,
+}
+
+/// Network upkeep this node is willing to pay for.
+///
+/// Everything here is work the network needs done by somebody and assigns to
+/// nobody. It defaults to off: an operator who has not opted in should never
+/// find fees on their account for a call that publishes no price.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UpkeepConfig {
+    /// Charge a missed round to nodes the registry shows as silent past the
+    /// aggregator's absence threshold.
+    ///
+    /// The reason to enable it is that weight is relative: a dead node's
+    /// unearned weight is influence the live nodes do not have, and rewards
+    /// paid to a round it did not join are smaller than they should be. The
+    /// reason it is not the default is that it costs a transaction fee and
+    /// returns nothing directly. See [`crate::engine::upkeep`].
+    #[serde(default)]
+    pub sweep_absent: bool,
+    /// How often to look. Much slower than the round loop — nothing here is
+    /// urgent, and the absence threshold is measured in hours.
+    #[serde(with = "humantime_serde", default = "default_sweep_interval")]
+    pub interval: Duration,
+    /// Most keys to offer in one transaction. A batch is one call over a
+    /// vector, so this is bounded by what a Soroban transaction can afford to
+    /// read, not by the size of the network: the overflow waits for the next
+    /// pass rather than being dropped.
+    #[serde(default = "default_sweep_max_batch")]
+    pub max_batch: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -227,6 +258,33 @@ impl Config {
                 self.engine.max_observation_age, self.engine.poll_interval,
             )));
         }
+        if self.upkeep.sweep_absent {
+            if self.upkeep.max_batch == 0 {
+                return Err(NodeError::Config(
+                    "upkeep.max_batch must be at least 1 when upkeep.sweep_absent is on".into(),
+                ));
+            }
+            if self.upkeep.max_batch > MAX_SWEEP_BATCH {
+                return Err(NodeError::Config(format!(
+                    "upkeep.max_batch is {} but a sweep transaction reads one registry \
+                     record per key; {MAX_SWEEP_BATCH} is the most that reliably fits \
+                     within a Soroban transaction's resource limits. The overflow is \
+                     carried to the next pass, so a smaller batch loses nothing.",
+                    self.upkeep.max_batch
+                )));
+            }
+            // A sweep charges at most once per absence window per node, so
+            // looking more often than the round loop buys nothing and spends a
+            // fee each time it finds the same node it already offered.
+            if self.upkeep.interval < self.engine.round_interval {
+                return Err(NodeError::Config(format!(
+                    "upkeep.interval ({:?}) is shorter than engine.round_interval ({:?}); \
+                     absence is measured in hours and a sweep cannot charge the same node \
+                     twice in one window, so a faster loop only costs fees",
+                    self.upkeep.interval, self.engine.round_interval,
+                )));
+            }
+        }
         if !self.network.registry_contract.starts_with('C')
             || !self.network.aggregator_contract.starts_with('C')
         {
@@ -277,6 +335,16 @@ impl Default for SourcesConfig {
             coingecko: false,
             coingecko_key_env: None,
             timeout: default_source_timeout(),
+        }
+    }
+}
+
+impl Default for UpkeepConfig {
+    fn default() -> Self {
+        Self {
+            sweep_absent: false,
+            interval: default_sweep_interval(),
+            max_batch: default_sweep_max_batch(),
         }
     }
 }
@@ -350,6 +418,18 @@ fn default_max_clock_skew() -> Duration {
 fn default_source_timeout() -> Duration {
     Duration::from_secs(5)
 }
+fn default_sweep_interval() -> Duration {
+    Duration::from_secs(60 * 30)
+}
+fn default_sweep_max_batch() -> usize {
+    25
+}
+
+/// Ceiling on `upkeep.max_batch`. One `sweep_absent` reads a registry record
+/// and may write two entries per key, and a Soroban transaction has a finite
+/// read/write budget; a batch that exceeds it fails as a whole, charging
+/// nobody and costing the fee anyway.
+const MAX_SWEEP_BATCH: usize = 50;
 fn default_confidence_bps() -> u32 {
     50
 }
@@ -441,6 +521,58 @@ sources = { binance = "BTCUSDT", kraken = "XBTUSD" }
             "[database]\n\n[engine]\npoll_interval = \"30s\"\nmax_observation_age = \"30s\"",
         );
         assert!(parse(&bad).is_err());
+    }
+
+    #[test]
+    fn upkeep_is_off_unless_it_is_asked_for() {
+        // The default an operator gets by saying nothing. Sweeping costs fees
+        // and publishes no price; nobody should find it running unasked.
+        let cfg = parse(minimal_toml()).expect("should parse");
+        assert!(!cfg.upkeep.sweep_absent);
+    }
+
+    #[test]
+    fn rejects_a_sweep_loop_faster_than_the_round_loop() {
+        // A sweep cannot charge the same node twice inside one absence window,
+        // and absence is measured in hours. Looking every few seconds finds the
+        // same nodes and pays for the privilege.
+        let bad = minimal_toml().replace(
+            "[database]",
+            "[database]\n\n[upkeep]\nsweep_absent = true\ninterval = \"10s\"",
+        );
+        let err = parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("upkeep.interval"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_batch_no_transaction_could_carry() {
+        let bad = minimal_toml().replace(
+            "[database]",
+            "[database]\n\n[upkeep]\nsweep_absent = true\nmax_batch = 5000",
+        );
+        let err = parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("max_batch"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_batch_of_nothing() {
+        let bad = minimal_toml().replace(
+            "[database]",
+            "[database]\n\n[upkeep]\nsweep_absent = true\nmax_batch = 0",
+        );
+        assert!(parse(&bad).is_err());
+    }
+
+    #[test]
+    fn an_unsound_upkeep_setting_is_ignored_while_upkeep_is_off() {
+        // The validation guards a loop that is not running. Refusing to start
+        // over a setting that has no effect would make a commented-out
+        // experiment a boot failure.
+        let ok = minimal_toml().replace(
+            "[database]",
+            "[database]\n\n[upkeep]\nsweep_absent = false\ninterval = \"1s\"",
+        );
+        assert!(parse(&ok).is_ok());
     }
 
     #[test]

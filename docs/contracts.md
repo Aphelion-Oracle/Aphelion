@@ -182,9 +182,16 @@ be used to spend the network's CPU budget:
 A round closes when it holds `quorum` distinct nodes **and** `min_weight_bps` of
 total weight. Both, not either.
 
+Nothing on chain calls `sweep_absent`. It is upkeep the contracts permit and do
+not perform, so it happens only if somebody off chain does it: `aphelion-node`
+will, when `upkeep.sweep_absent` is set, and `aphelion-node sweep --commit` does
+it once by hand. A deployment where nobody runs either has nodes carrying weight
+for rounds they stopped taking part in;
+`scripts/verify-deployment.sh` counts them.
+
 | Function | Caller | Notes |
 | --- | --- | --- |
-| `sweep_absent(pubkeys) -> u32` | Anyone | Charges a missed round to nodes silent past `absence_threshold`. One charge per silence, not per sweep |
+| `sweep_absent(pubkeys) -> u32` | Anyone | Charges a missed round to nodes silent past `absence_threshold`. One charge per silence, not per sweep. Returns how many of the offered keys were actually charged |
 | `pending_round(feed)` | Anyone | The round currently accepting submissions |
 
 ### Reads

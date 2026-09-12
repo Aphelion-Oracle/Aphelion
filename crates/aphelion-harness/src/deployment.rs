@@ -42,6 +42,11 @@ use serde_json::{json, Value};
 pub const AGGREGATOR: &str = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
 pub const REGISTRY: &str = "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75";
 
+/// Silence a harness deployment tolerates before `sweep_absent` may charge, in
+/// seconds. A real deployment uses hours; this has to be something a test can
+/// step over.
+pub const ABSENCE_THRESHOLD: u64 = 300;
+
 struct Inner {
     chain: Arc<MockChain>,
     aggregator_id: [u8; 32],
@@ -82,8 +87,11 @@ impl Deployment {
     /// interesting case: it exercises the path where a node process is running,
     /// healthy and signing correctly, and the chain still refuses it.
     pub async fn start(quorum: usize, nodes: &[(String, u32)]) -> std::io::Result<Self> {
-        let mut chain =
-            MockChain::new(chrono::Utc::now().timestamp().max(0) as u64).with_quorum(quorum.max(1));
+        let mut chain = MockChain::new(chrono::Utc::now().timestamp().max(0) as u64)
+            .with_quorum(quorum.max(1))
+            // Short enough that a test can backdate a record past it without
+            // reasoning about hours, long enough to outlast a harness round.
+            .with_absence_threshold(ABSENCE_THRESHOLD);
         for (pubkey, weight) in nodes {
             chain = chain.with_registered(pubkey, *weight);
         }
@@ -144,6 +152,41 @@ impl Deployment {
     /// How many nodes have submitted into the currently open round.
     pub fn pending(&self, feed: &FeedId) -> usize {
         self.inner.chain.pending(feed)
+    }
+
+    /// This deployment's registry record for a key, as a node process sees it.
+    pub async fn node(&self, public_key_hex: &str) -> Option<aphelion_node::chain::OnChainNode> {
+        self.inner
+            .chain
+            .node_info(public_key_hex)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Move a registered key's last submission `seconds` into the past, so it
+    /// reads as having been quiet that long.
+    ///
+    /// Absence is the one property a harness cannot produce by waiting: the
+    /// thresholds a real deployment uses are measured in hours. Moving the
+    /// record is the same thing time would have done to it.
+    pub async fn backdate_submission(&self, public_key_hex: &str, seconds: u64) {
+        let now = self.inner.tick();
+        let Some(mut node) = self.node(public_key_hex).await else {
+            return;
+        };
+        let then = now.saturating_sub(seconds);
+        node.last_submission = then;
+        self.inner.chain.set_node(node);
+        // Both records, because both are what time would have moved: the
+        // registry's `last_submission`, which is all a node can read, and the
+        // aggregator's `LastSeen`, which is what it actually decides from.
+        self.inner.chain.set_last_seen(public_key_hex, then);
+    }
+
+    /// Silence the aggregator tolerates before a sweep may charge.
+    pub async fn absence_threshold(&self) -> u64 {
+        self.inner.chain.absence_threshold().await.unwrap_or(0)
     }
 }
 
@@ -239,6 +282,39 @@ async fn invoke(State(inner): State<Arc<Inner>>, Json(req): Json<Invoke>) -> Jso
                     .to_string(),
                 ),
                 Ok(None) => CliOutput::ok("null"),
+                Err(e) => CliOutput::err(e.to_string()),
+            }
+        }
+
+        "list_nodes" => match inner.chain.list_nodes().await {
+            Ok(keys) => CliOutput::ok(json!(keys).to_string()),
+            Err(e) => CliOutput::err(e.to_string()),
+        },
+
+        // Only the one field the node reads. A fixture that invented the rest
+        // of the aggregator's config would be asserting things about a
+        // deployment nobody made.
+        "get_config" => match inner.chain.absence_threshold().await {
+            Ok(threshold) => CliOutput::ok(json!({ "absence_threshold": threshold }).to_string()),
+            Err(e) => CliOutput::err(e.to_string()),
+        },
+
+        "sweep_absent" => {
+            // The CLI encodes a `Vec` argument as a JSON array, so that is what
+            // arrives here, as one string.
+            let raw = req.args.get("pubkeys").cloned().unwrap_or_default();
+            let Ok(pubkeys) = serde_json::from_str::<Vec<String>>(&raw) else {
+                return CliOutput::err("error: --pubkeys is not a JSON array of strings");
+            };
+            match inner.chain.sweep_absent(&pubkeys).await {
+                Ok(receipt) => Json(CliOutput {
+                    stdout: receipt.charged.to_string(),
+                    stderr: receipt
+                        .tx_hash
+                        .map(|h| format!("Transaction: {h}\n"))
+                        .unwrap_or_default(),
+                    error: None,
+                }),
                 Err(e) => CliOutput::err(e.to_string()),
             }
         }

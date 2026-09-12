@@ -496,3 +496,221 @@ async fn a_node_left_with_one_venue_signs_nothing_and_recovers() {
 
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_live_node_process_sweeps_a_dead_one() {
+    // The property that needs two processes and could not be shown with one:
+    // the node that charges an absence and the node being charged are separate
+    // programs, on separate databases, reaching the chain through separate
+    // subprocess calls. Nothing about the charge passes between them — the
+    // surviving node reads the registry, decides, and pays.
+    //
+    // Quorum of one, so each node's own submission closes a round and both are
+    // recorded as having taken part before either goes quiet.
+    let mut h = harness_or_skip!(Harness::with(Options {
+        nodes: 2,
+        quorum: 1,
+        sweep_absent: true,
+        ..Default::default()
+    }));
+
+    h.await_published(&feed(), PATIENCE)
+        .await
+        .unwrap_or_else(|| panic!("nothing published before the node died.\n{}", h.logs()));
+
+    let victim = h.nodes[1].public_key_hex.clone();
+    let seen = h
+        .until(PATIENCE, || async {
+            h.deployment
+                .node(&victim)
+                .await
+                .filter(|n| n.last_submission > 0)
+        })
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the node that is about to die never published.\n{}",
+                h.logs()
+            )
+        });
+
+    // It stops. Everything about it on chain stays exactly as it was, which is
+    // the problem: full weight, and a vote that would still count.
+    h.nodes[1].kill().await;
+    assert_eq!(seen.weight_bps, 10_000);
+
+    // Absence thresholds are measured in hours, so the silence is staged rather
+    // than waited out. See `Deployment::backdate_submission`.
+    let threshold = h.deployment.absence_threshold().await;
+    h.deployment
+        .backdate_submission(&victim, threshold * 2)
+        .await;
+
+    let charged = h
+        .until(PATIENCE, || async {
+            h.deployment
+                .node(&victim)
+                .await
+                .filter(|n| n.reputation < seen.reputation)
+        })
+        .await
+        .unwrap_or_else(|| {
+            panic!(
+                "the surviving node never charged the dead one for its silence.\n{}",
+                h.logs()
+            )
+        });
+
+    assert_eq!(
+        charged.reputation,
+        seen.reputation - 25,
+        "one silence should cost one missed round, not one per sweep.\n{}",
+        h.logs()
+    );
+
+    // And the node that did the sweeping did not charge itself along the way.
+    let sweeper = h.nodes[0].public_key_hex.clone();
+    let sweeper_record = h
+        .deployment
+        .node(&sweeper)
+        .await
+        .expect("the surviving node has a record");
+    assert!(
+        sweeper_record.reputation >= seen.reputation,
+        "the sweeping node lost reputation of its own.\n{}",
+        h.logs()
+    );
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_node_process_with_upkeep_off_sweeps_nothing() {
+    // The default, and the reason it is the default: an operator who has not
+    // opted in must not find fees on their account for calls that publish no
+    // price. The dead node here is unambiguously sweepable and stays untouched.
+    let mut h = harness_or_skip!(Harness::with(Options {
+        nodes: 2,
+        quorum: 1,
+        ..Default::default()
+    }));
+
+    h.await_published(&feed(), PATIENCE)
+        .await
+        .unwrap_or_else(|| panic!("nothing published.\n{}", h.logs()));
+
+    let victim = h.nodes[1].public_key_hex.clone();
+    let before = h
+        .until(PATIENCE, || async {
+            h.deployment
+                .node(&victim)
+                .await
+                .filter(|n| n.last_submission > 0)
+        })
+        .await
+        .unwrap_or_else(|| panic!("the node never published.\n{}", h.logs()));
+
+    h.nodes[1].kill().await;
+    let threshold = h.deployment.absence_threshold().await;
+    h.deployment
+        .backdate_submission(&victim, threshold * 2)
+        .await;
+
+    // Comfortably longer than the upkeep interval the harness configures, so
+    // this is a loop that did not run rather than one that has not run yet.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    let after = h
+        .deployment
+        .node(&victim)
+        .await
+        .expect("the dead node still has a record");
+    assert_eq!(
+        after.reputation,
+        before.reputation,
+        "a node swept with upkeep disabled.\n{}",
+        h.logs()
+    );
+    assert_eq!(after.weight_bps, before.weight_bps);
+
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_sweep_subcommand_reports_before_it_charges() {
+    // `aphelion-node sweep` is the hand-operated version of the upkeep loop,
+    // and its whole value is that an operator can look before paying. It is run
+    // here as a separate process against the same deployment, so what is
+    // exercised is the real argument shapes `chain::cli` builds for
+    // `list_nodes`, `get_config` and `sweep_absent`.
+    let mut h = harness_or_skip!(Harness::with(Options {
+        nodes: 2,
+        quorum: 1,
+        ..Default::default()
+    }));
+
+    h.await_published(&feed(), PATIENCE)
+        .await
+        .unwrap_or_else(|| panic!("nothing published.\n{}", h.logs()));
+
+    let victim = h.nodes[1].public_key_hex.clone();
+    let before = h
+        .until(PATIENCE, || async {
+            h.deployment
+                .node(&victim)
+                .await
+                .filter(|n| n.last_submission > 0)
+        })
+        .await
+        .unwrap_or_else(|| panic!("the node never published.\n{}", h.logs()));
+
+    // Nothing is absent yet, and the command has to say so rather than invent
+    // work: a bare `sweep` on a healthy network must not read as a problem.
+    let quiet = h.node_command(0, &["sweep"]).await;
+    let quiet_out = String::from_utf8_lossy(&quiet.stdout).to_string();
+    assert!(quiet.status.success(), "sweep failed: {quiet_out}");
+    assert!(
+        quiet_out.contains("Nothing to sweep"),
+        "expected a healthy network to report nothing to sweep, got:\n{quiet_out}"
+    );
+
+    h.nodes[1].kill().await;
+    let threshold = h.deployment.absence_threshold().await;
+    h.deployment
+        .backdate_submission(&victim, threshold * 2)
+        .await;
+
+    // Without --commit it names the node and charges nobody. That split is the
+    // point of the command existing at all.
+    let dry = h.node_command(0, &["sweep"]).await;
+    let dry_out = String::from_utf8_lossy(&dry.stdout).to_string();
+    assert!(dry.status.success(), "sweep failed: {dry_out}");
+    assert!(
+        dry_out.contains(&victim) && dry_out.contains("Re-run with --commit"),
+        "expected the silent node named and nothing submitted, got:\n{dry_out}"
+    );
+    assert_eq!(
+        h.deployment.node(&victim).await.unwrap().reputation,
+        before.reputation,
+        "a sweep without --commit charged somebody"
+    );
+
+    let committed = h.node_command(0, &["sweep", "--commit"]).await;
+    let committed_out = String::from_utf8_lossy(&committed.stdout).to_string();
+    assert!(
+        committed.status.success(),
+        "sweep --commit failed: {committed_out}\n{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    assert!(
+        committed_out.contains("charged 1"),
+        "expected one node charged, got:\n{committed_out}"
+    );
+    assert_eq!(
+        h.deployment.node(&victim).await.unwrap().reputation,
+        before.reputation - 25,
+        "--commit did not charge the missed round"
+    );
+
+    h.shutdown().await;
+}

@@ -536,10 +536,17 @@ if (( NODE_COUNT == 0 )); then
         "publishes nothing until operators bond stake. Nothing below can be" \
         "checked until at least $QUORUM have."
 else
+    # Ledger time, for measuring how long ago each node last took part. Read
+    # from the chain rather than taken from this machine's clock: the threshold
+    # it is compared against is the contract's, and so is the clock it is
+    # measured on.
+    NOW="$(invoke "$AGGREGATOR" ledger_time || true)"
+    NOW="${NOW//\"/}"
+
     # One call per node. Fine at the scale a deployment has any business
     # being at; if it is not, the registry index is the wrong thing to be
     # walking from a shell script anyway.
-    active=0; jailed=0; exiting=0
+    active=0; jailed=0; exiting=0; stale_weight=0; stale_bps=0
     for pubkey in $(jq -r '.[]' <<<"$NODES_JSON"); do
         node="$(invoke "$REGISTRY" get_node --pubkey "$pubkey" || echo null)"
         [[ "$node" == "null" || -z "$node" ]] && continue
@@ -549,8 +556,35 @@ else
             Jailed)  jailed=$(( jailed + 1 )) ;;
             Exiting) exiting=$(( exiting + 1 )) ;;
         esac
+
+        # Weight a node is still carrying for rounds it has stopped taking part
+        # in. sweep_absent exists to remove it and is permissionless, so a
+        # standing count here is not a bug in the contracts -- it is the
+        # measure of whether anybody is actually calling it.
+        weight="$(jq -r '.weight_bps // 0' <<<"$node" | tr -d '"')"
+        last="$(jq -r '.last_submission // 0' <<<"$node" | tr -d '"')"
+        if numeric "$NOW" && numeric "$ABSENCE" && numeric "$weight" && numeric "$last" \
+           && (( weight > 0 && last > 0 && NOW >= last && NOW - last >= ABSENCE )); then
+            stale_weight=$(( stale_weight + 1 ))
+            stale_bps=$(( stale_bps + weight ))
+        fi
     done
     ok "$NODE_COUNT node(s) registered: $active active, $jailed jailed, $exiting exiting"
+
+    if ! numeric "$NOW"; then
+        skip "whether any weight is unearned: the aggregator did not answer ledger_time" \
+            "How long ago each node last took part cannot be measured without" \
+            "the clock the threshold is measured on."
+    elif (( stale_weight > 0 )); then
+        warn "$stale_weight node(s) carry $stale_bps bps despite being silent past the ${ABSENCE}s absence threshold" \
+            "That weight still counts towards every median. sweep_absent" \
+            "removes it and anyone may call it, so this is a count of upkeep" \
+            "nobody is doing rather than a fault in the contracts. Operators" \
+            "can have their nodes do it continuously (upkeep.sweep_absent in" \
+            "aphelion.toml), or charge it once with: aphelion-node sweep --commit"
+    else
+        ok "no node is carrying weight for rounds it has stopped taking part in"
+    fi
 
     # Jailed and exiting nodes weigh zero, so total_weight is already the
     # number the aggregator will actually see -- no need to model it here.

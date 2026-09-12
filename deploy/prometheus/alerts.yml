@@ -63,3 +63,20 @@ groups:
         annotations:
           summary: "Submissions failing for {{ $labels.feed }}"
           description: "Check RPC reachability, the submitter account's balance, and node registration."
+
+      - alert: AphelionUnearnedWeight
+        # Not a fault in this node, and deliberately a warning rather than a
+        # page: it is weight held by *other* nodes that have stopped earning it,
+        # which still counts towards every median. sweep_absent removes it and
+        # anyone may call it, so a figure that stays up means nobody is.
+        expr: aphelion_sweep_candidates > 0
+        for: 2h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} node(s) carrying weight they have stopped earning"
+          description: >-
+            These nodes are silent past the aggregator's absence threshold and
+            still voting at full weight. Charge them with
+            `aphelion-node sweep --commit`, or set upkeep.sweep_absent to have
+            this node do it continuously. See /v1/upkeep for the list.

@@ -1,10 +1,19 @@
 //! In-memory `ChainClient` for tests, `--dry-run`, and multi-node simulation.
 //!
 //! It enforces the invariants the real aggregator enforces — monotonic nonces,
-//! a staleness window, quorum, and a reputation-weighted median across nodes —
-//! so a round loop that passes against this mock is exercising the same control
-//! flow it will hit on chain. A mock that accepted everything would only prove
-//! the node can build a transaction.
+//! a staleness window, quorum, a reputation-weighted median across nodes, and
+//! the absence accounting behind `sweep_absent` — so a round loop that passes
+//! against this mock is exercising the same control flow it will hit on chain. A
+//! mock that accepted everything would only prove the node can build a
+//! transaction.
+//!
+//! The absence rules are mirrored *including the cases where the contract
+//! declines to charge*, which is the part that matters: a mock that charged
+//! every key it was offered would let a sweeper pass its tests while paying, on
+//! a real network, for calls that do nothing. A node's registry record is kept
+//! here too, and reputation moves on it the way the registry moves it — up when
+//! a round it joined closes, down when a sweep charges it, to zero weight when
+//! it crosses the jail line.
 //!
 //! The median is computed with `aphelion_core::math::weighted_median`, the same
 //! function the node uses to predict a round and a deliberate mirror of the
@@ -21,7 +30,7 @@ use std::sync::Mutex;
 use aphelion_core::{deviation_bps, weighted_median, FeedId, Price, WeightedSample};
 use async_trait::async_trait;
 
-use super::{ChainClient, OnChainNode, OnChainPrice, SubmitReceipt};
+use super::{ChainClient, OnChainNode, OnChainPrice, SubmitReceipt, SweepReceipt};
 use crate::error::{NodeError, Result};
 use crate::signer::SignedSubmission;
 
@@ -43,10 +52,21 @@ struct State {
     /// Open rounds, keyed by feed.
     rounds: HashMap<String, Vec<Vote>>,
     round_counter: u64,
-    /// Registered nodes and their weight. Empty means "accept anyone at full
-    /// weight", which is what a single-node dry run needs.
-    weights: HashMap<String, u32>,
-    node: Option<OnChainNode>,
+    /// The registry's node set: one record per registered key, carrying the
+    /// reputation and weight the aggregator reads. Empty means "accept anyone
+    /// at full weight", which is what a single-node dry run needs.
+    nodes: HashMap<String, OnChainNode>,
+    /// The aggregator's `LastSeen`: ledger time of the last submission it
+    /// accepted from a key, on any feed.
+    last_seen: HashMap<String, u64>,
+    /// Every batch offered to `sweep_absent`, in order. A sweep that charges
+    /// nobody is still a transaction somebody paid for, so a test asserting
+    /// that none was sent has to be able to see the difference.
+    sweeps: Vec<Vec<String>>,
+    /// The aggregator's `Swept`: ledger time a key was last examined by an
+    /// absence sweep. Separate from `last_seen` for the reason the contract
+    /// keeps them separate — it is what stops one silence being billed twice.
+    swept: HashMap<String, u64>,
     failure: Option<String>,
 }
 
@@ -61,6 +81,8 @@ pub struct MockChain {
     /// Deviation from the round median beyond which a submission is an outlier
     /// and is excluded from the published statistics.
     max_deviation_bps: u32,
+    /// Silence beyond which `sweep_absent` may charge a node a missed round.
+    absence_threshold: u64,
 }
 
 impl MockChain {
@@ -71,11 +93,53 @@ impl MockChain {
             max_staleness: 300,
             quorum: 1,
             max_deviation_bps: 500,
+            absence_threshold: 3_600,
         }
     }
 
+    /// Replace a key's whole registry record, for tests that need a specific
+    /// reputation, stake or last-submission time rather than a derived one.
     pub fn with_node(self, node: OnChainNode) -> Self {
-        self.state.lock().unwrap().node = Some(node);
+        self.state
+            .lock()
+            .unwrap()
+            .nodes
+            .insert(node.public_key_hex.clone(), node);
+        self
+    }
+
+    /// Replace a registry record on a running chain.
+    ///
+    /// The builder form cannot reach a chain that is already serving, and
+    /// absence is the one property a test cannot produce by waiting — a real
+    /// threshold is measured in hours. Moving the record is what time would
+    /// have done to it.
+    pub fn set_node(&self, node: OnChainNode) {
+        self.state
+            .lock()
+            .unwrap()
+            .nodes
+            .insert(node.public_key_hex.clone(), node);
+    }
+
+    /// Move the aggregator's `LastSeen` for a key.
+    ///
+    /// The companion to [`Self::set_node`]: the registry's `last_submission`
+    /// and the aggregator's `LastSeen` are two different records of when a node
+    /// last spoke, and real time passing moves both. A fixture that moved only
+    /// the one the node can read would be staging the divergence rather than
+    /// the absence.
+    pub fn set_last_seen(&self, public_key_hex: &str, at: u64) {
+        self.state
+            .lock()
+            .unwrap()
+            .last_seen
+            .insert(public_key_hex.to_string(), at);
+    }
+
+    /// Set the silence the aggregator tolerates before a sweep may charge.
+    pub fn with_absence_threshold(mut self, seconds: u64) -> Self {
+        self.absence_threshold = seconds;
         self
     }
 
@@ -89,12 +153,17 @@ impl MockChain {
     ///
     /// Once any node is registered, unregistered keys are rejected — the same
     /// way the aggregator rejects a key the registry does not know.
+    ///
+    /// The weight is stored as a whole registry record, with the reputation
+    /// that produces it, because weight is derived on chain rather than set:
+    /// a test that could pin a weight independently of reputation could not
+    /// observe a node losing one by losing the other, which is exactly what an
+    /// absence sweep does.
     pub fn with_registered(self, public_key_hex: &str, weight_bps: u32) -> Self {
-        self.state
-            .lock()
-            .unwrap()
-            .weights
-            .insert(public_key_hex.to_string(), weight_bps);
+        self.state.lock().unwrap().nodes.insert(
+            public_key_hex.to_string(),
+            node_at_weight(public_key_hex, weight_bps),
+        );
         self
     }
 
@@ -116,6 +185,12 @@ impl MockChain {
         self.state.lock().unwrap().submissions.len()
     }
 
+    /// Every batch of keys offered to `sweep_absent`, in order, whether or not
+    /// the call went on to charge anybody or to fail.
+    pub fn sweeps(&self) -> Vec<Vec<String>> {
+        self.state.lock().unwrap().sweeps.clone()
+    }
+
     /// How many nodes have submitted to the open round for a feed.
     pub fn pending(&self, feed: &FeedId) -> usize {
         self.state
@@ -129,7 +204,13 @@ impl MockChain {
 
     /// Close a round: weighted median across every vote, statistics from the
     /// in-band ones only. Mirrors `Aggregator::finalize`.
-    fn finalize(state: &mut State, feed: &FeedId, votes: &[Vote], max_deviation_bps: u32) {
+    fn finalize(
+        state: &mut State,
+        feed: &FeedId,
+        votes: &[Vote],
+        max_deviation_bps: u32,
+        now: u64,
+    ) {
         let mut samples: Vec<WeightedSample> = votes
             .iter()
             .map(|v| WeightedSample::new(v.price.raw(), v.weight_bps))
@@ -173,6 +254,19 @@ impl MockChain {
                 round_id: state.round_counter,
             },
         );
+
+        // Settle the submitters against the published price, as the aggregator
+        // does through `Registry::record_success`. Without this the registry
+        // view would never record a node as having taken part, and every node
+        // would look permanently absent to an absence sweep.
+        let credited: Vec<String> = in_band.iter().map(|v| v.public_key_hex.clone()).collect();
+        for pubkey in credited {
+            if let Some(node) = state.nodes.get_mut(&pubkey) {
+                node.reputation = (node.reputation + REPUTATION_REWARD).min(MAX_REPUTATION);
+                node.last_submission = now;
+                node.weight_bps = weight_for(&node.status, node.reputation);
+            }
+        }
     }
 }
 
@@ -223,11 +317,11 @@ impl ChainClient for MockChain {
         }
         // Weight is read now and stored with the vote, so a reputation change
         // between here and finalisation cannot re-weight a vote already cast.
-        let weight_bps = if state.weights.is_empty() {
+        let weight_bps = if state.nodes.is_empty() {
             10_000
         } else {
-            match state.weights.get(public_key_hex) {
-                Some(&w) if w > 0 => w,
+            match state.nodes.get(public_key_hex) {
+                Some(n) if n.weight_bps > 0 => n.weight_bps,
                 _ => return Err(NodeError::Chain("NotAuthorizedNode".into())),
             }
         };
@@ -238,6 +332,11 @@ impl ChainClient for MockChain {
         }
 
         state.nonces.insert(key, m.nonce);
+        // Accepting a submission is what resets the absence clock, before the
+        // round it joined has closed and whether or not it ever does. The
+        // aggregator writes `LastSeen` at exactly this point for the same
+        // reason: a node whose round is still short of quorum has still spoken.
+        state.last_seen.insert(public_key_hex.to_string(), now);
         state
             .submissions
             .push((public_key_hex.to_string(), submission.clone()));
@@ -254,7 +353,7 @@ impl ChainClient for MockChain {
         let finalized = round.len() >= self.quorum;
         if finalized {
             let votes = state.rounds.remove(m.feed.as_str()).unwrap_or_default();
-            Self::finalize(&mut state, &m.feed, &votes, self.max_deviation_bps);
+            Self::finalize(&mut state, &m.feed, &votes, self.max_deviation_bps, now);
         }
 
         Ok(SubmitReceipt {
@@ -273,8 +372,14 @@ impl ChainClient for MockChain {
             .cloned())
     }
 
-    async fn node_info(&self, _public_key_hex: &str) -> Result<Option<OnChainNode>> {
-        Ok(self.state.lock().unwrap().node.clone())
+    async fn node_info(&self, public_key_hex: &str) -> Result<Option<OnChainNode>> {
+        Ok(self
+            .state
+            .lock()
+            .unwrap()
+            .nodes
+            .get(public_key_hex)
+            .cloned())
     }
 
     async fn last_nonce(&self, public_key_hex: &str, feed: &FeedId) -> Result<u64> {
@@ -287,6 +392,125 @@ impl ChainClient for MockChain {
             .copied()
             .unwrap_or(0))
     }
+
+    async fn list_nodes(&self) -> Result<Vec<String>> {
+        // Sorted, because the registry's index has an order and a caller that
+        // batches the set should not get a different batch each pass.
+        let mut keys: Vec<String> = self.state.lock().unwrap().nodes.keys().cloned().collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    async fn absence_threshold(&self) -> Result<u64> {
+        Ok(self.absence_threshold)
+    }
+
+    /// Mirrors `Aggregator::sweep_absent`, including the cases where it
+    /// declines to charge. Those are the whole point of mirroring it: a mock
+    /// that charged every key offered would let a sweeper pass its tests while
+    /// paying, on a real network, for calls that do nothing.
+    async fn sweep_absent(&self, pubkeys: &[String]) -> Result<SweepReceipt> {
+        let now = *self.ledger_time.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+
+        // Recorded before the failure check, because this is the batch the node
+        // *offered*: a test asking whether one pass tried twice needs to see an
+        // attempt that never landed as much as one that did.
+        state.sweeps.push(pubkeys.to_vec());
+
+        if let Some(reason) = state.failure.take() {
+            return Err(NodeError::Chain(reason));
+        }
+
+        let mut charged = 0u32;
+        for pubkey in pubkeys {
+            let last_seen = state.last_seen.get(pubkey).copied().unwrap_or(0);
+            let last_swept = state.swept.get(pubkey).copied().unwrap_or(0);
+            let reference = last_seen.max(last_swept);
+            let weight = state.nodes.get(pubkey).map(|n| n.weight_bps).unwrap_or(0);
+
+            // No weight means unknown, jailed or exiting. The clock is still
+            // recorded for a key we have a record of — a jailed node is silent
+            // because the aggregator refuses it, and leaving its clock stopped
+            // would bill it for that silence the moment it was released.
+            if weight == 0 {
+                if reference != 0 {
+                    state.swept.insert(pubkey.clone(), now);
+                }
+                continue;
+            }
+            if reference == 0 {
+                // Never seen and never swept: no evidence of when the silence
+                // began, so start the clock rather than assume the worst.
+                state.swept.insert(pubkey.clone(), now);
+                continue;
+            }
+            if now < reference || now - reference < self.absence_threshold {
+                continue;
+            }
+
+            if let Some(node) = state.nodes.get_mut(pubkey) {
+                node.reputation = node.reputation.saturating_sub(REPUTATION_MISS);
+                if node.reputation < JAIL_THRESHOLD {
+                    node.status = "jailed".into();
+                }
+                node.weight_bps = weight_for(&node.status, node.reputation);
+            }
+            state.swept.insert(pubkey.clone(), now);
+            charged += 1;
+        }
+
+        Ok(SweepReceipt {
+            tx_hash: Some(format!("{:064x}", now)),
+            charged,
+        })
+    }
+}
+
+// The registry's reputation arithmetic, mirrored from
+// `contracts/registry/src/types.rs`. Duplicated rather than shared because that
+// workspace targets wasm and pins `soroban-sdk`, and a dependency from here into
+// it would drag both into this one.
+//
+// Nothing keeps the two in sync automatically, and the shared vectors in
+// `tests/vectors/` do not cover these — they pin the consensus arithmetic, where
+// a one-unit disagreement lets an honest node be slashed. The contract is the
+// authority here; a drift in these numbers shows up as fixtures that predict the
+// wrong penalty, never as production behaviour, because nothing outside tests
+// reads them.
+const MAX_REPUTATION: u32 = 10_000;
+const FULL_WEIGHT_THRESHOLD: u32 = 7_000;
+const JAIL_THRESHOLD: u32 = 3_000;
+const REPUTATION_REWARD: u32 = 50;
+const REPUTATION_MISS: u32 = 25;
+
+fn weight_for(status: &str, reputation: u32) -> u32 {
+    match status {
+        "active" if reputation >= FULL_WEIGHT_THRESHOLD => 10_000,
+        "active" if reputation >= JAIL_THRESHOLD => 5_000,
+        _ => 0,
+    }
+}
+
+/// The registry record that produces a given weight.
+///
+/// Weight is derived from reputation on chain, so a fixture asking for a weight
+/// is really asking for a reputation band: full weight is a proven node, half
+/// weight a new one, and no weight a jailed one.
+fn node_at_weight(public_key_hex: &str, weight_bps: u32) -> OnChainNode {
+    let (reputation, status) = match weight_bps {
+        0 => (JAIL_THRESHOLD - 1_000, "jailed"),
+        w if w >= 10_000 => (8_000, "active"),
+        _ => (5_000, "active"),
+    };
+    OnChainNode {
+        public_key_hex: public_key_hex.to_string(),
+        stake: 1_000 * 10_000_000,
+        reputation,
+        status: status.into(),
+        weight_bps: weight_for(status, reputation),
+        last_submission: 0,
+    }
 }
 
 /// Decode a hex public key, or `None` if it is not one.
@@ -297,14 +521,7 @@ fn verifying_key(public_key_hex: &str) -> Option<ed25519_dalek::VerifyingKey> {
 
 /// A registered, full-weight node. The starting point for most tests.
 pub fn healthy_node(public_key_hex: &str) -> OnChainNode {
-    OnChainNode {
-        public_key_hex: public_key_hex.to_string(),
-        stake: 1_000 * 10_000_000,
-        reputation: 8_000,
-        status: "active".into(),
-        weight_bps: 10_000,
-        last_submission: 0,
-    }
+    node_at_weight(public_key_hex, 10_000)
 }
 
 #[allow(dead_code)]
