@@ -183,7 +183,30 @@ what makes registering many fresh identities an expensive way to buy influence.
 
 ## 5. Daily operation
 
+### The one command
+
+```bash
+./target/release/aphelion-node status
+```
+
+Identity, chain, registry standing, per-feed source counts, live exchange
+probes and outstanding duties, on one page with a verdict on the end. It exits
+0 when healthy, 1 when degraded and 2 when critical, so it works as a health
+check or a cron line with nothing parsing its output.
+
+Run it first whenever something looks wrong. It needs no database and does not
+need the node to be running -- which is the case it is most useful in, because
+a node that will not start cannot serve `/health`. Add `--no-probe` to skip the
+exchange calls when this machine cannot reach them, and `--json` for a monitor.
+
+A section it cannot read is reported as unread rather than as empty. Contract
+reads in particular go through the Stellar CLI, which wants
+`APHELION_STELLAR_SECRET` even though `status` never writes; without it the
+page still renders and those lines say so.
+
 ### What to watch
+
+Once the node is up, these are the same facts continuously:
 
 ```bash
 curl -s localhost:8080/health           | jq   # 503 when any feed is degraded

@@ -150,7 +150,10 @@ coinbase = true
 # the per-feed mapping below before it covers anything.
 okx      = false
 bybit    = false
-bitstamp = false
+# Bitstamp is on here because USDC_USD below needs it: Coinbase Exchange has no
+# USDC-USD book to quote (USDC is its quote asset, not a product), so a feed
+# relying on Coinbase for the peg is one venue short of ever publishing.
+bitstamp = true
 # CoinGecko is an aggregator, not an exchange: it partly resells venues already
 # polled above, so enabling it adds correlation as well as coverage. Useful for
 # long-tail assets the exchanges do not list.
@@ -195,7 +198,9 @@ sources = { binance = "XLMUSDT", kraken = "XLMUSD", coinbase = "XLM-USD" }
 id = "USDC_USD"
 # A stablecoin peg should be tight; a wide confidence here is itself a signal.
 confidence_bps = 10
-sources = { kraken = "USDCUSD", coinbase = "USDC-USD" }
-#   bitstamp = "usdcusd"
-# OKX and Bybit quote USDC against USDT rather than USD, which is a different
-# peg question; they are left out here rather than quietly answering it.
+sources = { kraken = "USDCUSD", bitstamp = "usdcusd" }
+# Not Coinbase: `/products/USDC-USD/ticker` is a 404, so mapping it here would
+# leave this feed permanently one source short of min_sources_per_feed.
+# Not OKX or Bybit either: both quote USDC against USDT rather than USD, which
+# is a different peg question, and answering it silently under a USD feed id is
+# exactly the sort of thing this network exists not to do.

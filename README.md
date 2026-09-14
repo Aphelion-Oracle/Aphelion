@@ -318,7 +318,7 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 131 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 148 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
@@ -328,6 +328,7 @@ repository, not the target architecture.
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 9 |
+| Operator status page — five reads, one verdict, an exit code | ✅ Implemented | 17 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 34 |
 | Testnet deployment | 📋 Planned | — |
@@ -335,7 +336,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-436 tests in total: 202 off-chain (`cargo test --workspace`), 200 against the
+453 tests in total: 219 off-chain (`cargo test --workspace`), 200 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
 Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
@@ -344,7 +345,7 @@ are its own integration suite; the decision it makes has a further 13 unit tests
 counted inside the node's 118. Committee participation is the same shape: its 9
 cover assembling a snapshot off the chain, and the rules applied to that
 snapshot have 25 more unit tests, with 12 on decoding what the contract returns
-and 5 on the commands — all four counted inside the 131. The harness's 15 are 12
+and 5 on the commands — all four counted inside the 148. The harness's 15 are 12
 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
@@ -584,6 +585,7 @@ docker compose logs -f node
 | `keygen --out <path>` | Generate an Ed25519 node key (refuses to overwrite) |
 | `pubkey` | Print the configured node's public key |
 | `check-sources` | Fetch every configured source once and print the result |
+| `status [--json] [--no-probe]` | Identity, chain, standing, feeds, sources and duties in one page, with a verdict and an exit code |
 | `sweep [--commit]` | Show which registered nodes have gone silent; charge them with `--commit` |
 | `duties [--json]` | What the slashing contract is waiting on from this operator, and by when |
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
@@ -826,6 +828,71 @@ no position depends on. Submitting only on movement leaves consumers unable to
 tell "unchanged" from "this node is dead". Aphelion resolves this with movement
 **and** a heartbeat: publish when the price moves more than
 `submit_deviation_bps`, and at least once per `heartbeat` regardless.
+
+### Is the node all right?
+
+```bash
+aphelion-node status              # probe everything
+aphelion-node status --no-probe   # skip the live exchange calls
+aphelion-node status --json       # for a monitor rather than a person
+```
+
+```
+aphelion-node-1 0.1.0
+key        : 565cfc4e2239fcabea063061080790d58324fdd4a984c87c87055a08eff7dd62
+ledger     : 4674851
+registry   : active · 10000 bps · reputation 8000 · stake 100000000
+
+feeds
+  BTC_USD    3/2 sources · on chain: 41s old
+  USDC_USD   1/2 sources · on chain: 612s old
+
+sources    : 10 of 11 answered
+  coinbase   USDC_USD   HTTP 404 Not Found: {"message":"NotFound"}
+
+duties     : 0 costly · 1 forfeited · 0 owed · 2 housekeeping
+
+DEGRADED
+  [degraded] USDC_USD: 1 live source(s), 2 required; this feed will not be signed
+  [degraded] 1 of 11 source probe(s) failed, across coinbase
+  [degraded] 1 duty(s) forfeit a say if left — run `aphelion-node duties`
+```
+
+Five reads an operator could already do separately — `pubkey`, `check-sources`,
+`duties`, `/v1/node`, `/ready` — assembled into one page with a verdict on the
+end. Nothing here is a new fact; the assembly and the grade are the point.
+
+It **needs no database and does not need the node to be running**, which is
+when it is worth the most: a node that will not start is exactly the case where
+an operator should not be told to start it first. That is also why the round
+history is not on this page — it lives in Postgres, and `/v1/rounds` already
+serves it to anyone whose node is up.
+
+**No single failure stops the page.** Each section is read on its own and one
+that cannot be read says so, rather than being reported as empty. "No duties
+outstanding" and "could not ask" are different facts and only one of them is
+reassuring. In particular, contract reads go through the Stellar CLI, which
+wants the signing secret even though `status` never writes; without it the page
+still renders, with those sections marked unread.
+
+The verdict is also the exit code, so this works as a health check with nothing
+parsing its output:
+
+| Exit | Verdict | Meaning |
+| --- | --- | --- |
+| 0 | `healthy` | Nothing to do |
+| 1 | `degraded` | Working, with something that becomes critical if ignored |
+| 2 | `critical` | Not doing the job it is staked to do, now |
+
+Critical is reserved for: an unreachable RPC endpoint, a key the registry does
+not know, a jailed node, every feed short of sources at once, and a duty whose
+deadline costs stake. That last one is not a fault in the node at all — the
+grade answers "should somebody act now?", and a closing appeal window is the
+one thing on the page that cannot be done late.
+
+Housekeeping duties deliberately never colour the verdict. They are work the
+network needs and anybody may do; charging them to this operator's status page
+would leave every node in the network permanently amber.
 
 ### HTTP API
 
@@ -1336,7 +1403,7 @@ refusal repeats it.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
 

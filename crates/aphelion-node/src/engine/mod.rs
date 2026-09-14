@@ -8,10 +8,15 @@ pub mod aggregate;
 pub mod collector;
 pub mod duty;
 pub mod round;
+pub mod status;
 pub mod upkeep;
 
 pub use aggregate::{aggregate, confidence_bps, Aggregated, AggregationParams};
 pub use collector::{run_retention, Collector};
 pub use duty::{derive as derive_duties, Consequence, Duty, DutyKind, Snapshot, Standing, Watch};
 pub use round::{RoundOutcome, RoundRunner};
+pub use status::{
+    assess as assess_status, ChainStatus, DutiesStatus, FeedStatus, Finding, Registration, Report,
+    SourceStatus, Verdict,
+};
 pub use upkeep::{plan_sweep, Candidate, Excuse, SweepPlan, SweepReport, Sweeper};

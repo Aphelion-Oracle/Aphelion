@@ -118,6 +118,21 @@ enum Command {
         cmd: DisputeCmd,
     },
 
+    /// One page: identity, chain, registry standing, feeds, sources and
+    /// outstanding duties, with a verdict and an exit code.
+    ///
+    /// Needs no database and does not need the node to be running, which is
+    /// when it is worth the most. Exits 0 healthy, 1 degraded, 2 critical.
+    Status {
+        /// Machine-readable output, for an alert rather than an operator.
+        #[arg(long)]
+        json: bool,
+        /// Skip the live source probe. Faster, and the only way to get an
+        /// answer when this machine cannot reach the exchanges at all.
+        #[arg(long)]
+        no_probe: bool,
+    },
+
     /// Apply database migrations and exit.
     Migrate,
 
@@ -303,6 +318,11 @@ async fn run() -> Result<()> {
                 None => println!("\nNothing left to sweep."),
             }
             Ok(())
+        }
+
+        Command::Status { json, no_probe } => {
+            let config = Config::load(&cli.config)?;
+            cmd::status::status(&config, json, !no_probe).await
         }
 
         Command::Duties { json } => {

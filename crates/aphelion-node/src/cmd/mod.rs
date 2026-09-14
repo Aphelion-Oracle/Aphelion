@@ -9,3 +9,4 @@
 //! chain.
 
 pub mod committee;
+pub mod status;
