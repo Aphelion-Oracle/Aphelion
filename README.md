@@ -338,21 +338,29 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-502 tests in total: 219 off-chain (`cargo test --workspace`), 249 against the
+507 tests in total: 224 off-chain (`cargo test --workspace`), 249 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
-deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
-Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
-their 6 are reported as one figure of 68 by `cargo test`. The absence sweep's 11
-are its own integration suite; the decision it makes has a further 13 unit tests
-counted inside the node's 118. Committee participation is the same shape: its 9
-cover assembling a snapshot off the chain, and the rules applied to that
-snapshot have 25 more unit tests, with 12 on decoding what the contract returns
-and 5 on the commands — all four counted inside the 148. The harness's 15 are 12
-process-level tests plus 3 covering the fake CLI's argument parsing.
+deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
+
+The off-chain 224 are: 26 in `aphelion-core`, 148 in the node's library, 5 in
+its binary — the subcommands live in `main.rs` and are compiled as a separate
+target, so they are *not* inside the 148 — 15 in the harness, and 30 across the
+three integration suites (duties 9, multi-node 10, sweep 11).
+
+Several figures in the table above are smaller than the suite they belong to,
+because the suite shares a crate with something else. The Byzantine
+simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
+as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
+integration suite while the decision it makes has 13 more unit tests inside the
+node's 148. Committee participation is the same shape: its 9 cover assembling a
+snapshot off the chain, and the rules applied to that snapshot have 25 more
+unit tests with 12 on decoding what the contract returns, all inside the 148 —
+with the 5 command tests in the binary target beside it. The harness's 15 are
+12 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 129 tests and reported 141. The skip prints a `SKIP`
+with no Postgres has run 212 tests and reported 224. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
