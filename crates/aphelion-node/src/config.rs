@@ -237,6 +237,12 @@ pub struct SourcesConfig {
     #[serde(default = "default_true")]
     pub coinbase: bool,
     #[serde(default)]
+    pub okx: bool,
+    #[serde(default)]
+    pub bybit: bool,
+    #[serde(default)]
+    pub bitstamp: bool,
+    #[serde(default)]
     pub coingecko: bool,
     /// Name of the environment variable holding a CoinGecko Pro API key, if any.
     #[serde(default)]
@@ -402,6 +408,9 @@ impl SourcesConfig {
             "binance" => self.binance,
             "kraken" => self.kraken,
             "coinbase" => self.coinbase,
+            "okx" => self.okx,
+            "bybit" => self.bybit,
+            "bitstamp" => self.bitstamp,
             "coingecko" => self.coingecko,
             _ => false,
         }
@@ -409,14 +418,21 @@ impl SourcesConfig {
 }
 
 impl Default for SourcesConfig {
-    /// The three exchanges that need no credentials are on by default;
-    /// CoinGecko is off because its free tier rate-limits hard enough to be a
-    /// liability in a 60-second loop.
+    /// Three of the six exchanges are on by default. All six need no
+    /// credentials, so the split is not about access: turning one on changes
+    /// what this node's median is, and that is a decision an operator makes
+    /// rather than one an upgrade makes for them.
+    ///
+    /// CoinGecko stays off for a different reason — its free tier rate-limits
+    /// hard enough to be a liability in a 60-second loop.
     fn default() -> Self {
         Self {
             binance: true,
             kraken: true,
             coinbase: true,
+            okx: false,
+            bybit: false,
+            bitstamp: false,
             coingecko: false,
             coingecko_key_env: None,
             timeout: default_source_timeout(),
@@ -548,6 +564,30 @@ sources = { binance = "BTCUSDT", kraken = "XBTUSD" }
         let cfg: Config = toml::from_str(toml_str).map_err(|e| NodeError::Config(e.to_string()))?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// The file an operator is told to copy must load as shipped.
+    ///
+    /// It is easy to document a new source by adding it to a feed's symbol map
+    /// and forgetting that the same source is still `false` in `[sources]` —
+    /// which `validate` rejects, so the first thing a new operator would meet
+    /// is a startup error in a file they had not yet edited.
+    #[test]
+    fn the_shipped_example_config_loads_and_validates() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../aphelion.example.toml");
+        let raw = std::fs::read_to_string(path).expect("example config is missing");
+        let cfg = parse(&raw).expect("shipped example config must validate");
+
+        // Every venue a feed names must be one the node can actually start.
+        for feed in &cfg.feeds {
+            for name in feed.sources.keys() {
+                assert!(
+                    cfg.sources.is_enabled(name),
+                    "feed {} names disabled source {name}",
+                    feed.id
+                );
+            }
+        }
     }
 
     #[test]

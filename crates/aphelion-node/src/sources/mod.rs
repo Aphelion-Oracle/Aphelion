@@ -3,23 +3,36 @@
 //! Each source is an independent view of the same market. Independence is the
 //! whole point: three venues that all resell the same upstream feed give the
 //! appearance of redundancy without any of the substance, so the built-in set
-//! is three separate order books (Binance, Kraken, Coinbase) plus one
-//! aggregator (CoinGecko) that is off by default and, when on, is treated as a
-//! tie-breaker rather than a peer.
+//! is six separate order books (Binance, Kraken, Coinbase, OKX, Bybit,
+//! Bitstamp) plus one aggregator (CoinGecko) that is off by default and, when
+//! on, is treated as a tie-breaker rather than a peer.
+//!
+//! Three of the six are on by default and three are not. That is not a ranking
+//! of the venues: the outlier filter needs a majority it can trust to be
+//! honest, and a default that silently grows the set would change every
+//! existing node's median the moment it was upgraded. An operator turns the
+//! others on deliberately, which is also when they choose the symbol each one
+//! covers.
 //!
 //! Where a venue exposes an order book, the quote is the **mid of best bid and
 //! ask**, not the last trade. A single small trade at a bad price moves the
 //! last-trade print; it does not move the mid.
 
 mod binance;
+mod bitstamp;
+mod bybit;
 mod coinbase;
 mod coingecko;
 mod kraken;
+mod okx;
 
 pub use binance::Binance;
+pub use bitstamp::Bitstamp;
+pub use bybit::Bybit;
 pub use coinbase::Coinbase;
 pub use coingecko::CoinGecko;
 pub use kraken::Kraken;
+pub use okx::Okx;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,6 +76,15 @@ pub fn build(cfg: &SourcesConfig) -> Result<Vec<Arc<dyn PriceSource>>> {
     }
     if cfg.coinbase {
         sources.push(Arc::new(Coinbase::new(client.clone())));
+    }
+    if cfg.okx {
+        sources.push(Arc::new(Okx::new(client.clone())));
+    }
+    if cfg.bybit {
+        sources.push(Arc::new(Bybit::new(client.clone())));
+    }
+    if cfg.bitstamp {
+        sources.push(Arc::new(Bitstamp::new(client.clone())));
     }
     if cfg.coingecko {
         let api_key = cfg
@@ -244,6 +266,9 @@ mod tests {
             binance: false,
             kraken: false,
             coinbase: false,
+            okx: false,
+            bybit: false,
+            bitstamp: false,
             coingecko: false,
             coingecko_key_env: None,
             timeout: Duration::from_secs(5),
@@ -252,11 +277,63 @@ mod tests {
     }
 
     #[test]
+    fn the_new_venues_are_off_until_asked_for() {
+        // An operator who upgrades without touching their config must keep the
+        // median they had, so the defaults cannot grow.
+        let cfg = SourcesConfig::default();
+        let names: Vec<_> = build(&cfg).unwrap().iter().map(|s| s.name()).collect();
+        assert_eq!(names, vec!["binance", "kraken", "coinbase"]);
+    }
+
+    #[test]
+    fn build_includes_every_venue_when_all_are_enabled() {
+        let cfg = SourcesConfig {
+            binance: true,
+            kraken: true,
+            coinbase: true,
+            okx: true,
+            bybit: true,
+            bitstamp: true,
+            coingecko: false,
+            coingecko_key_env: None,
+            timeout: Duration::from_secs(5),
+        };
+        let names: Vec<_> = build(&cfg).unwrap().iter().map(|s| s.name()).collect();
+        assert_eq!(
+            names,
+            vec!["binance", "kraken", "coinbase", "okx", "bybit", "bitstamp"]
+        );
+    }
+
+    #[test]
+    fn is_enabled_knows_every_venue_build_can_produce() {
+        // These two must not drift: a venue `build` can start but `is_enabled`
+        // does not recognise would be polled and then reported as unconfigured.
+        let cfg = SourcesConfig {
+            binance: true,
+            kraken: true,
+            coinbase: true,
+            okx: true,
+            bybit: true,
+            bitstamp: true,
+            coingecko: true,
+            coingecko_key_env: None,
+            timeout: Duration::from_secs(5),
+        };
+        for source in build(&cfg).unwrap() {
+            assert!(cfg.is_enabled(source.name()), "{}", source.name());
+        }
+    }
+
+    #[test]
     fn build_includes_exactly_the_enabled_sources() {
         let cfg = SourcesConfig {
             binance: true,
             kraken: true,
             coinbase: false,
+            okx: false,
+            bybit: false,
+            bitstamp: false,
             coingecko: false,
             coingecko_key_env: None,
             timeout: Duration::from_secs(5),

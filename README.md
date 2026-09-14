@@ -92,7 +92,7 @@ collecting evidence while it waits.
 
 ```
   ┌── continuously ─────────────────────────────────────────────────────┐
-  │  Binance · Kraken · Coinbase · CoinGecko                            │
+  │  Binance · Kraken · Coinbase · OKX · Bybit · Bitstamp · CoinGecko   │
   │        │  best bid / best ask, per venue                            │
   │        ▼                                                            │
   │  collector ──▶ Postgres  (raw_prices: every observation, retained)  │
@@ -133,6 +133,40 @@ Quotes are the **mid of best bid and ask**, not the last trade: one small trade
 at a bad price moves the last print, but it does not move the mid. A crossed
 book (bid above ask) or an implausibly wide spread is rejected outright, because
 the mid of an inconsistent snapshot is a number nobody could have traded at.
+
+#### The venues
+
+| Source | Kind | Default | Stamps its own quote | Symbol example |
+| --- | --- | --- | --- | --- |
+| `binance` | Order book | ✅ on | — | `BTCUSDT` |
+| `kraken` | Order book | ✅ on | — | `XBTUSD` |
+| `coinbase` | Order book | ✅ on | ✅ | `BTC-USD` |
+| `okx` | Order book | off | ✅ | `BTC-USDT` |
+| `bybit` | Order book | off | ✅ | `BTCUSDT` |
+| `bitstamp` | Order book | off | ✅ | `btcusd` |
+| `coingecko` | Aggregator | off | ✅ | `bitcoin` |
+
+Six order books, three of them on by default. All six need credentials for
+nothing, so the split is not about access — enabling one changes what this
+node's median is, and that belongs to the operator rather than to whoever
+publishes the next release. A node that upgrades without touching its config
+keeps exactly the median it had.
+
+Enabling a venue is two edits, not one: the flag in `[sources]` **and** the
+symbol in each feed's `sources` map. A feed naming a disabled source is refused
+at startup rather than quietly polled — see
+[Configuration](#configuration). `check-sources` fetches every enabled venue
+once and prints what came back, which is the fastest way to confirm a symbol is
+spelled the way that venue spells it.
+
+A venue that stamps its own quote is worth more than one that does not during
+an outage: the age check sees the real staleness rather than the moment the
+response happened to arrive. Where a venue publishes no stamp, the node records
+receipt time and never backdates it.
+
+CoinGecko remains the exception to all of this. It is an aggregator that partly
+resells the venues already polled above, so it adds correlation along with
+coverage, and it is treated as a tie-breaker rather than a peer.
 
 ### Cross-node aggregation, on chain
 
@@ -284,7 +318,7 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 118 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 131 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
@@ -301,7 +335,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-423 tests in total: 189 off-chain (`cargo test --workspace`), 200 against the
+436 tests in total: 202 off-chain (`cargo test --workspace`), 200 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
 Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
@@ -310,7 +344,7 @@ are its own integration suite; the decision it makes has a further 13 unit tests
 counted inside the node's 118. Committee participation is the same shape: its 9
 cover assembling a snapshot off the chain, and the rules applied to that
 snapshot have 25 more unit tests, with 12 on decoding what the contract returns
-and 5 on the commands — all four counted inside the 118. The harness's 15 are 12
+and 5 on the commands — all four counted inside the 131. The harness's 15 are 12
 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
@@ -349,7 +383,7 @@ aphelion/
 │   ├── aphelion-harness/       Multi-process test harness (not shipped)
 │   └── aphelion-node/          The node binary
 │       └── src/
-│           ├── sources/        Binance, Kraken, Coinbase, CoinGecko
+│           ├── sources/        Binance, Kraken, Coinbase, OKX, Bybit, Bitstamp, CoinGecko
 │           ├── engine/         Collector, aggregation, round loop, absence sweeps, duties
 │           ├── chain/          ChainClient and CommitteeClient: CLI-backed, RPC reads, mock
 │           ├── cmd/            Subcommands belonging to the binary rather than the library

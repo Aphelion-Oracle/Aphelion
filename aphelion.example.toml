@@ -140,10 +140,17 @@ scan_depth = 50
 
 
 [sources]
-# The three venues needing no credentials are on by default.
+# Three of the six order books are on by default.
 binance  = true
 kraken   = true
 coinbase = true
+# The other three are off, and none of them needs credentials either. Turning
+# one on changes what this node's median is, which is a decision worth making
+# deliberately rather than inheriting from an upgrade. Each needs a symbol in
+# the per-feed mapping below before it covers anything.
+okx      = false
+bybit    = false
+bitstamp = false
 # CoinGecko is an aggregator, not an exchange: it partly resells venues already
 # polled above, so enabling it adds correlation as well as coverage. Useful for
 # long-tail assets the exchanges do not list.
@@ -163,11 +170,18 @@ id = "BTC_USD"
 # this and what its sources' actual disagreement implies.
 confidence_bps = 50
 sources = { binance = "BTCUSDT", kraken = "XBTUSD", coinbase = "BTC-USD" }
+# Add these to the line above when the matching venue is enabled in [sources].
+# A feed that names a disabled source is a startup error, not a warning, so
+# the two are changed together:
+#   okx = "BTC-USDT", bybit = "BTCUSDT", bitstamp = "btcusd"
+# Bitstamp spells its pair in the URL path and in lower case; the others are
+# query parameters. The mapping is taken literally either way.
 
 [[feeds]]
 id = "ETH_USD"
 confidence_bps = 50
 sources = { binance = "ETHUSDT", kraken = "ETHUSD", coinbase = "ETH-USD" }
+#   okx = "ETH-USDT", bybit = "ETHUSDT", bitstamp = "ethusd"
 
 [[feeds]]
 id = "XLM_USD"
@@ -175,9 +189,13 @@ id = "XLM_USD"
 # venues is larger and claiming BTC-level precision would be misleading.
 confidence_bps = 200
 sources = { binance = "XLMUSDT", kraken = "XLMUSD", coinbase = "XLM-USD" }
+#   okx = "XLM-USDT", bybit = "XLMUSDT", bitstamp = "xlmusd"
 
 [[feeds]]
 id = "USDC_USD"
 # A stablecoin peg should be tight; a wide confidence here is itself a signal.
 confidence_bps = 10
 sources = { kraken = "USDCUSD", coinbase = "USDC-USD" }
+#   bitstamp = "usdcusd"
+# OKX and Bybit quote USDC against USDT rather than USD, which is a different
+# peg question; they are left out here rather than quietly answering it.
