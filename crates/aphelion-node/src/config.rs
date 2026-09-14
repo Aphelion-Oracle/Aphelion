@@ -27,6 +27,8 @@ pub struct Config {
     #[serde(default)]
     pub upkeep: UpkeepConfig,
     #[serde(default)]
+    pub committee: CommitteeConfig,
+    #[serde(default)]
     pub sources: SourcesConfig,
     #[serde(default)]
     pub feeds: Vec<FeedConfig>,
@@ -53,12 +55,95 @@ pub struct NetworkConfig {
     pub registry_contract: String,
     /// Contract id (C...) of the deployed aggregator.
     pub aggregator_contract: String,
+    /// Contract id (C...) of the deployed slashing contract.
+    ///
+    /// Optional because the round loop never touches it: a node can collect,
+    /// sign and submit without knowing where the committee lives. It is what
+    /// the `duties`, `election` and `dispute` commands need, and they say so
+    /// by name when it is missing rather than failing inside the CLI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slashing_contract: Option<String>,
     /// Name of the environment variable holding the Stellar secret seed (S...)
     /// used to pay for submission transactions. Never the seed itself.
     #[serde(default = "default_secret_env")]
     pub submitter_secret_env: String,
     /// Public account (G...) that pays for submissions.
     pub submitter_account: String,
+
+    /// Public account (G...) that bonded this node's stake.
+    ///
+    /// Committee actions — standing, balloting, voting on a dispute, appealing
+    /// one — are authorised against this account, because it is the one the
+    /// registry answers `owner_of` with. The submitter deliberately has no
+    /// authority over the node's identity, so the two are allowed to differ;
+    /// most single-operator deployments leave this unset and use one account
+    /// for both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_account: Option<String>,
+    /// Name of the environment variable holding the operator account's secret
+    /// seed. Defaults to `submitter_secret_env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator_secret_env: Option<String>,
+}
+
+impl NetworkConfig {
+    /// The account committee actions are signed by.
+    ///
+    /// Falling back to the submitter rather than refusing is the right default
+    /// for the common case — one operator, one account — and the fallback is
+    /// visible: a wrong guess produces `NotEligible` from the contract, and
+    /// every command that can hit it prints the account it signed as.
+    pub fn operator_account(&self) -> &str {
+        self.operator_account
+            .as_deref()
+            .unwrap_or(&self.submitter_account)
+    }
+
+    /// The environment variable holding that account's seed.
+    pub fn operator_secret_env(&self) -> &str {
+        self.operator_secret_env
+            .as_deref()
+            .unwrap_or(&self.submitter_secret_env)
+    }
+}
+
+/// Watching the slashing contract.
+///
+/// Separate from [`UpkeepConfig`] because nothing here spends anything: it is
+/// reads, and what it produces is a log line and a gauge. The distinction is
+/// the one an operator cares about — upkeep is opt-in because it costs money,
+/// and this is on by default because being told that a dispute has been filed
+/// against you should not be something you have to switch on.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CommitteeConfig {
+    /// How often the running node re-reads the slashing contract.
+    ///
+    /// Slow on purpose. The windows it is watching are measured in days, and
+    /// each pass is one RPC round trip per dispute in the scan; polling it at
+    /// the round interval would spend a great deal of RPC budget to learn the
+    /// same thing 900 times.
+    #[serde(with = "humantime_serde", default = "default_watch_interval")]
+    pub watch_interval: Duration,
+    /// How many disputes back from the newest each pass reads.
+    #[serde(default = "default_scan_depth")]
+    pub scan_depth: u64,
+}
+
+impl Default for CommitteeConfig {
+    fn default() -> Self {
+        Self {
+            watch_interval: default_watch_interval(),
+            scan_depth: default_scan_depth(),
+        }
+    }
+}
+
+fn default_watch_interval() -> Duration {
+    Duration::from_secs(900)
+}
+
+fn default_scan_depth() -> u64 {
+    crate::engine::duty::DEFAULT_SCAN_DEPTH
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

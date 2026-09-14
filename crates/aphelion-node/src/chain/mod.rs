@@ -11,9 +11,11 @@
 //! this trait, with no change to the engine.
 
 pub mod cli;
+pub mod committee;
 pub mod mock;
 pub mod readonly;
 pub mod rpc;
+pub mod stellar;
 
 use aphelion_core::{FeedId, Price};
 use async_trait::async_trait;
@@ -23,9 +25,14 @@ use crate::error::Result;
 use crate::signer::SignedSubmission;
 
 pub use cli::CliChain;
+pub use committee::{
+    CandidateRecord, CliCommittee, CommitteeClient, DisputeRecord, DisputeStatus, ElectionPhase,
+    ElectionRecord, Receipt, SlashingParams,
+};
 pub use mock::MockChain;
 pub use readonly::ReadOnlyChain;
 pub use rpc::RpcClient;
+pub use stellar::StellarCli;
 
 /// A price as the aggregator currently holds it.
 #[derive(Debug, Clone, Serialize)]

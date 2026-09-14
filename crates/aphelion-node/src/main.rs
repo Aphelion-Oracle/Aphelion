@@ -6,15 +6,20 @@ use std::time::Instant;
 
 use aphelion_core::{FeedId, Price};
 use aphelion_node::api::AppState;
-use aphelion_node::chain::{ChainClient, CliChain, ReadOnlyChain, RpcClient};
+use aphelion_node::chain::{
+    ChainClient, CliChain, CliCommittee, CommitteeClient, ReadOnlyChain, RpcClient,
+};
 use aphelion_node::config::Config;
 use aphelion_node::db::Repo;
-use aphelion_node::engine::{run_retention, Collector, RoundRunner, Sweeper};
+use aphelion_node::engine::{run_retention, Collector, RoundRunner, Sweeper, Watch};
 use aphelion_node::error::{NodeError, Result};
 use aphelion_node::signer::NodeSigner;
 use aphelion_node::strkey::contract_id_bytes;
 use aphelion_node::{api, db, sources, telemetry};
 use clap::{Parser, Subcommand};
+
+mod cmd;
+use cmd::committee::{DisputeCmd, ElectionCmd};
 
 #[derive(Parser)]
 #[command(
@@ -88,6 +93,29 @@ enum Command {
         /// absent.
         #[arg(long)]
         commit: bool,
+    },
+
+    /// Show what the slashing contract is asking of this operator, and by when.
+    ///
+    /// A dispute against this node, a committee vote outstanding, a ballot not
+    /// cast. Reads only — nothing here votes on anybody's behalf. Needs no
+    /// database.
+    Duties {
+        /// Machine-readable output, for an alert rather than an operator.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// The committee's elections: stand, vote, count.
+    Election {
+        #[command(subcommand)]
+        cmd: ElectionCmd,
+    },
+
+    /// Disputes: file, answer, vote, appeal, settle.
+    Dispute {
+        #[command(subcommand)]
+        cmd: DisputeCmd,
     },
 
     /// Apply database migrations and exit.
@@ -277,6 +305,21 @@ async fn run() -> Result<()> {
             Ok(())
         }
 
+        Command::Duties { json } => {
+            let config = Config::load(&cli.config)?;
+            cmd::committee::duties(&config, json).await
+        }
+
+        Command::Election { cmd } => {
+            let config = Config::load(&cli.config)?;
+            cmd::committee::election(&config, cmd).await
+        }
+
+        Command::Dispute { cmd } => {
+            let config = Config::load(&cli.config)?;
+            cmd::committee::dispute(&config, cmd).await
+        }
+
         Command::Run { dry_run } => serve(cli.config, dry_run).await,
     }
 }
@@ -374,6 +417,42 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
         tracing::warn!("dry run: absence sweeps are configured but will not be submitted");
     }
 
+    // Watching the slashing contract. Reads only, and off only when the
+    // deployment has not been configured with one: an operator should not have
+    // to opt in to being told that a dispute has been filed against them.
+    //
+    // Enabled in a dry run too, for the same reason the reads are live there:
+    // the disputes and elections it reports are the deployment's real ones. It
+    // needs no read-only wrapper to be safe there, because the loop calls only
+    // `CommitteeClient`'s reads and every one of those is a simulated call the
+    // CLI is told not to send.
+    let watch = match config.network.slashing_contract {
+        Some(_) => match CliCommittee::new(&config.network) {
+            Ok(c) => Some(Arc::new(
+                Watch::new(
+                    Arc::clone(&chain),
+                    Arc::new(c) as Arc<dyn CommitteeClient>,
+                    signer.public_key_hex(),
+                )
+                .with_scan_depth(config.committee.scan_depth),
+            )),
+            // Not fatal. A misconfigured operator account stops this node
+            // taking part in the committee; it does not stop it publishing
+            // prices, and refusing to start would be a worse trade.
+            Err(e) => {
+                tracing::warn!(error = %e, "not watching the slashing contract");
+                None
+            }
+        },
+        None => {
+            tracing::info!(
+                "no `slashing_contract` configured; disputes and elections \
+                 concerning this node will not be reported"
+            );
+            None
+        }
+    };
+
     let state = AppState {
         config: Arc::clone(&config),
         repo: repo.clone(),
@@ -381,6 +460,7 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
         rpc,
         signer: Arc::clone(&signer),
         sweeper: Arc::clone(&sweeper),
+        watch: watch.clone(),
         metrics,
         started_at: Instant::now(),
     };
@@ -389,6 +469,9 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
     tasks.spawn(collector.run(shutdown_rx.clone()));
     tasks.spawn(runner.run(shutdown_rx.clone()));
     tasks.spawn(sweeper.run(shutdown_rx.clone()));
+    if let Some(watch) = watch {
+        tasks.spawn(watch.run(config.committee.watch_interval, shutdown_rx.clone()));
+    }
     {
         let repo = repo.clone();
         let retention = config.database.retention;

@@ -550,6 +550,11 @@ Next:
   2. Point a node at it:
        registry_contract   = "$REGISTRY"
        aggregator_contract = "$AGGREGATOR"
+       slashing_contract   = "$SLASHING"
+
+     The third is optional and worth setting: without it a node cannot tell
+     its operator that a dispute has been filed against them, or that an
+     election is taking ballots.
   3. Register the node:
        APHELION_REGISTRY_CONTRACT=$REGISTRY \\
          scripts/register-node.sh "\$(aphelion-node pubkey)"

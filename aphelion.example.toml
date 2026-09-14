@@ -24,12 +24,29 @@ network            = "testnet"
 # Deployed contract ids. Fill these in after running scripts/deploy.sh.
 registry_contract   = "C..."
 aggregator_contract = "C..."
+# Optional, and strongly recommended. Without it this node cannot tell you that
+# a dispute has been filed against it, or that an election is taking ballots.
+# The round loop never touches it.
+slashing_contract   = "C..."
 
 # Stellar account that pays for submission transactions. Deliberately separate
 # from the signing key above: it can be rotated or shared with a relayer
 # without ever being able to sign a price.
 submitter_account    = "G..."
 submitter_secret_env = "APHELION_STELLAR_SECRET"
+
+# The account that bonded this node's stake, if it is not the submitter.
+#
+# Committee actions -- standing for a seat, casting a ballot, voting on a
+# dispute, appealing one -- are authorised against whoever the registry
+# answers `owner_of` with, and the submitter deliberately has no authority
+# over the node's identity. Leave both unset to sign committee actions with
+# the submitter, which is right when one account does both.
+#
+# `aphelion-node duties` prints the account it would sign as and warns when it
+# is not the one that bonded the stake.
+# operator_account    = "G..."
+# operator_secret_env = "APHELION_OPERATOR_SECRET"
 
 
 [database]
@@ -102,6 +119,24 @@ max_batch = 25
 # See what a sweep would do, without submitting anything:
 #   aphelion-node sweep
 #   curl -s localhost:8080/v1/upkeep | jq
+
+
+[committee]
+# Watching the slashing contract: disputes filed against this node, and
+# elections it is entitled to vote in.
+#
+# Unlike [upkeep] this spends nothing -- it is reads, and what it produces is a
+# log line, a gauge and `/v1/duties`. It is on whenever `slashing_contract` is
+# set, because being told that somebody is trying to take your stake should not
+# be something you have to switch on.
+#
+# Slow on purpose: the windows it watches close in days, and each pass is one
+# RPC round trip per dispute scanned.
+watch_interval = "15m"
+# How many disputes back from the newest each pass reads. `/v1/duties` reports
+# the range it covered, so a window that is too small is visible rather than
+# silent.
+scan_depth = 50
 
 
 [sources]

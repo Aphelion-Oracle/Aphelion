@@ -558,9 +558,12 @@ Soroban returns these as `Error(Contract, #n)`.
 
 ## The interface the node depends on
 
-`aphelion-node` calls exactly four aggregator functions and one registry
-function. Changing any of these signatures breaks running nodes, so they are
-listed here as the contract between the two halves of the repository:
+Changing any of these signatures breaks running nodes, so they are listed here
+as the contract between the two halves of the repository. They are grouped by
+what stops working when one of them changes, because that is not the same for
+all of them.
+
+**The round loop.** A break here stops the node publishing.
 
 | Contract | Function | Used by |
 | --- | --- | --- |
@@ -569,6 +572,38 @@ listed here as the contract between the two halves of the repository:
 | Aggregator | `get_price(feed)` | `/v1/prices/{feed}`, to report divergence from the network |
 | Aggregator | `last_nonce(pubkey, feed)` | Startup, to move past nonces a restored database has forgotten |
 | Registry | `get_node(pubkey)` | `/v1/node`, and the cached standing behind `/health` |
+
+**Absence sweeps.** A break here stops the node doing upkeep on other people's
+records; it goes on publishing. See [`engine::upkeep`](../crates/aphelion-node/src/engine/upkeep.rs).
+
+| Contract | Function | Used by |
+| --- | --- | --- |
+| Registry | `list_nodes()` | The candidate set for a sweep |
+| Aggregator | `get_config()` | The absence threshold, read from the chain rather than mirrored in config |
+| Aggregator | `sweep_absent(pubkeys)` | Charging a missed round |
+
+**Committee participation.** A break here stops the node reporting disputes and
+elections; it goes on publishing and sweeping. Every read is through
+[`CommitteeClient`](../crates/aphelion-node/src/chain/committee.rs), and every
+write is authorised by the account that bonded the stake rather than by the
+submitter.
+
+| Contract | Function | Used by |
+| --- | --- | --- |
+| Registry | `owner_of(pubkey)` | Establishing which account may act for this node |
+| Slashing | `get_config()` | Quorum, bonds, and the length of every window |
+| Slashing | `committee()` | Whether this operator holds a seat |
+| Slashing | `dispute_count()`, `get_dispute(id)`, `vote_of(id, member)` | The dispute scan behind `duties` |
+| Slashing | `current_election()`, `next_election()`, `get_election(id)`, `candidates(id)`, `ballot_of(id, node)` | The election half of `duties` |
+| Slashing | `open_dispute`, `vote`, `resolve`, `appeal`, `settle` | `aphelion-node dispute ...` |
+| Slashing | `open_election`, `nominate`, `cast_ballot`, `finalize_election` | `aphelion-node election ...` |
+
+One decoding rule spans all of them, and it is the one most likely to bite a
+future contract change: a status or phase the node does not recognise is an
+error rather than a default. A dispute whose `status` this build cannot name is
+refused at the point it is read, because the duty derived from that status is
+whether to tell an operator to appeal — and guessing wrong in the reassuring
+direction costs them their stake.
 
 The canonical signing payload is the fifth and most important part of that
 contract, and the one that cannot be checked at compile time. It is pinned by

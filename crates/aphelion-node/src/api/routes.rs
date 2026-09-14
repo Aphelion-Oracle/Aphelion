@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/prices/{feed}", get(price))
         .route("/v1/rounds", get(rounds))
         .route("/v1/upkeep", get(upkeep))
+        .route("/v1/duties", get(duties))
         .route("/v1/sources", get(sources))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -271,6 +272,38 @@ async fn upkeep(State(state): State<AppState>) -> ApiResult<Json<serde_json::Val
             .into_iter()
             .map(|(excuse, count)| json!({ "reason": excuse, "nodes": count }))
             .collect::<Vec<_>>(),
+    })))
+}
+
+/// What the slashing contract is waiting on from this operator.
+///
+/// The same read the committee loop makes, so an alert built on this and one
+/// built on `aphelion_duties_outstanding` cannot disagree.
+///
+/// A node with no `slashing_contract` answers `watching: false` rather than an
+/// empty list: "nothing is outstanding" and "nobody is looking" are different
+/// facts, and a dashboard that rendered the second as the first would go green
+/// for the one deployment where it means the opposite.
+async fn duties(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    let Some(watch) = state.watch.as_ref() else {
+        return Ok(Json(json!({
+            "watching": false,
+            "reason": "no `slashing_contract` configured in the [network] section",
+        })));
+    };
+
+    let (snapshot, duties) = watch.duties().await?;
+    Ok(Json(json!({
+        "watching": true,
+        "ledger_time": snapshot.now,
+        "standing": snapshot.standing,
+        "duties": duties,
+        "disputes": {
+            "total": snapshot.total_disputes,
+            "scanned_from": snapshot.scanned.0,
+            "scanned_to": snapshot.scanned.1,
+            "complete": snapshot.scan_is_complete(),
+        },
     })))
 }
 

@@ -284,7 +284,7 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 79 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 118 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
@@ -293,6 +293,7 @@ repository, not the target architecture.
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
+| Committee participation — disputes and elections, from the node | ✅ Implemented | 9 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 34 |
 | Testnet deployment | 📋 Planned | — |
@@ -300,14 +301,17 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-375 tests in total: 141 off-chain (`cargo test --workspace`), 200 against the
+423 tests in total: 189 off-chain (`cargo test --workspace`), 200 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
 Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
 their 6 are reported as one figure of 58 by `cargo test`. The absence sweep's 11
 are its own integration suite; the decision it makes has a further 13 unit tests
-counted inside the node's 79. The harness's 15 are 12 process-level tests plus 3
-covering the fake CLI's argument parsing.
+counted inside the node's 118. Committee participation is the same shape: its 9
+cover assembling a snapshot off the chain, and the rules applied to that
+snapshot have 25 more unit tests, with 12 on decoding what the contract returns
+and 5 on the commands — all four counted inside the 118. The harness's 15 are 12
+process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
@@ -346,8 +350,9 @@ aphelion/
 │   └── aphelion-node/          The node binary
 │       └── src/
 │           ├── sources/        Binance, Kraken, Coinbase, CoinGecko
-│           ├── engine/         Collector, aggregation, round loop, absence sweeps
-│           ├── chain/          ChainClient trait: CLI-backed, RPC reads, in-memory mock
+│           ├── engine/         Collector, aggregation, round loop, absence sweeps, duties
+│           ├── chain/          ChainClient and CommitteeClient: CLI-backed, RPC reads, mock
+│           ├── cmd/            Subcommands belonging to the binary rather than the library
 │           ├── db/             Postgres schema access
 │           └── api/            Read-only HTTP surface
 ├── migrations/                 SQL migrations, applied automatically at startup
@@ -512,7 +517,12 @@ cargo run -p aphelion-node -- check-sources
 #    refused, one layer below the code that decides whether to submit.
 cargo run -p aphelion-node -- run --dry-run
 
-# 5. Register on chain, then run for real.
+# 5. Check what the slashing contract is asking of you. Reads only; no
+#    database needed, and safe to run before registering -- an unregistered
+#    key simply has nothing outstanding.
+cargo run -p aphelion-node -- duties
+
+# 6. Register on chain, then run for real.
 scripts/register-node.sh "$(cargo run -q -p aphelion-node -- pubkey)"
 cargo run --release -p aphelion-node -- run
 ```
@@ -522,6 +532,7 @@ Health, once running:
 ```bash
 curl -s localhost:8080/health          | jq   # per-feed liveness; 503 when degraded
 curl -s localhost:8080/v1/prices/BTC_USD | jq # local price, on-chain price, per-source breakdown
+curl -s localhost:8080/v1/duties       | jq   # disputes and elections outstanding, with deadlines
 ```
 
 ### With Docker Compose
@@ -540,6 +551,9 @@ docker compose logs -f node
 | `pubkey` | Print the configured node's public key |
 | `check-sources` | Fetch every configured source once and print the result |
 | `sweep [--commit]` | Show which registered nodes have gone silent; charge them with `--commit` |
+| `duties [--json]` | What the slashing contract is waiting on from this operator, and by when |
+| `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
+| `dispute list \| show \| open \| vote \| resolve \| appeal \| settle` | Disputes |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
 | `migrate` | Apply database migrations and exit |
 | `show-config` | Print the effective configuration after environment overrides |
@@ -714,8 +728,11 @@ rpc_url             = "https://soroban-testnet.stellar.org"
 network_passphrase  = "Test SDF Network ; September 2015"
 registry_contract   = "C..."
 aggregator_contract = "C..."
+slashing_contract   = "C..."   # optional; without it, disputes go unreported
 submitter_account   = "G..."
 submitter_secret_env = "APHELION_STELLAR_SECRET"   # the name, not the secret
+# operator_account    = "G..."   # the account that bonded the stake, if not the
+# operator_secret_env = "..."    # submitter. Committee actions are signed by it.
 
 [engine]
 round_interval           = "60s"   # must match the aggregator's min_round_interval
@@ -731,6 +748,10 @@ max_clock_skew           = "30s"   # refuse to sign beyond this drift from ledge
 sweep_absent = false   # charge silent nodes the missed round anyone may charge
 interval     = "30m"
 max_batch    = 25
+
+[committee]
+watch_interval = "15m"  # re-read the slashing contract this often. Reads only.
+scan_depth     = 50     # how many disputes back from the newest each pass reads
 
 [[feeds]]
 id             = "BTC_USD"
@@ -789,6 +810,7 @@ auth layer.
 | `GET /v1/rounds?feed=&limit=` | Recent rounds and their outcomes |
 | `GET /v1/sources` | Per-source health |
 | `GET /v1/upkeep` | Which registered nodes read as absent, and what a sweep would charge |
+| `GET /v1/duties` | Disputes and elections outstanding against this operator, with deadlines |
 
 `/health` reports **usefulness**, not just liveness: a process that is running
 but has not composed a round in ten minutes is not healthy in any sense an
@@ -839,6 +861,8 @@ debug a problem that lives at the exchanges.
 | `aphelion_sweep_candidates` | Registered nodes this node currently reads as absent |
 | `aphelion_sweeps_total{outcome}` | Sweep passes by outcome — `submitted`, `nothing_to_do`, `error` |
 | `aphelion_nodes_charged_total` | Missed rounds this node has actually charged |
+| `aphelion_duties_outstanding{consequence}` | Things the slashing contract is waiting on from this operator |
+| `aphelion_duty_deadline_seconds` | Seconds to the soonest deadline that can cost stake; negative once one has closed |
 
 `aphelion_round_errors_total` carries a `feed` label only when a feed is to
 blame. Two failures abort the whole tick before any feed is reached — an
@@ -855,22 +879,39 @@ carried by nodes that have stopped earning it, which is a property of the
 network rather than of this process. A number that climbs and never falls means
 nobody is calling `sweep_absent`.
 
+`aphelion_duties_outstanding` is labelled by what going undone costs, and the
+label is the point: `costly` is stake or a finding that could have been
+contested, `forfeited` is a vote not cast, `owed` is money sitting unsettled,
+`housekeeping` is work anybody may do. One number covering all four would be
+tuned for whichever is most common — which is the routine one — and would then
+be too quiet for the one that matters. `aphelion_duty_deadline_seconds` is
+absent rather than zero when there is nothing costly outstanding, so a
+threshold rule on it does not fire permanently on a quiet network.
+
 Suggested alerts: `aphelion_seconds_since_submission > 2 × heartbeat`,
 `aphelion_clock_skew_seconds` outside ±30, `aphelion_reputation < 4000`,
-`aphelion_source_spread_bps` sustained above the usual band, and
-`aphelion_sweep_candidates > 0` held for a couple of hours. All six ship in
-[`deploy/prometheus/alerts.yml`](deploy/prometheus/alerts.yml). The last is a
-warning rather than a page, and it is about other people's nodes: nothing is
-broken at your end, and the weight it names is still counting.
+`aphelion_source_spread_bps` sustained above the usual band,
+`aphelion_sweep_candidates > 0` held for a couple of hours, and
+`aphelion_duties_outstanding{consequence="costly"} > 0` with no `for:` at all.
+All nine ship in
+[`deploy/prometheus/alerts.yml`](deploy/prometheus/alerts.yml). Two are
+deliberately not pages. `aphelion_sweep_candidates` is about other people's
+nodes: nothing is broken at your end, and the weight it names is still
+counting. An outstanding *vote* is a warning on a twelve-hour delay, because
+nothing is taken from an operator who has not voted yet and a committee member
+is entitled to think about it. A dispute against your own node is the
+exception: it pages immediately, because the window it names does not reopen.
 
 `docker compose up` also provisions a Grafana dashboard
 ([`deploy/grafana/provisioning/dashboards/node-overview.json`](deploy/grafana/provisioning/dashboards/node-overview.json))
 at <http://localhost:3000>. Its panels are ordered by the question an operator
 asks first: am I still counted, is what I publish right, if not then which venue
-is at fault, and — last, because it is about the network rather than this node —
-how much weight is being carried by nodes that have stopped earning it. It is provisioned read-only from the repository — a dashboard that
-exists only in one operator's browser is one nobody else can reproduce when they
-are the person on call.
+is at fault, how much weight is being carried by nodes that have stopped earning
+it, and — last, because it is the one thing on the dashboard with a deadline
+attached — what the slashing contract is waiting on from this operator. It is
+provisioned read-only from the repository — a dashboard that exists only in one
+operator's browser is one nobody else can reproduce when they are the person on
+call.
 
 ---
 
@@ -1173,6 +1214,86 @@ And every seat turns over at once, which is simple to reason about and loses
 the continuity a staggered committee would keep. Both are worth revisiting
 against a real network rather than in advance of one.
 
+### Taking part
+
+Everything above is permissionless on chain, which is not the same as
+reachable. A franchise nobody can exercise is not a franchise, and an appeal
+window nobody is told about is a penalty by default — so the node watches the
+slashing contract on the operator's behalf and reports what it finds.
+
+```console
+$ aphelion-node duties
+node       : 608dd6533ec133907390ad8dd4c9ecdb256ebef2db914be9a6e48801dc1e7227
+owner      : GOPERATOR...
+signing as : GOPERATOR...
+weight     : 7500 bps
+committee  : seated
+
+[COSTLY] dispute 2 against this node (BTC_USD round 91); 1 for, 0 against,
+         quorum 3. Evidence: ipfs://bafyevidence
+    10h left
+    aphelion-node dispute show 2
+[FORFEITED] election 4 is balloting for 5 seats until 1700090000; this node's
+            7500 bps has not been cast
+    24h left
+    aphelion-node election ballot <candidate>
+
+1 that can cost stake, 1 that can cost a say. Deadlines are ledger time, not
+this machine's clock.
+```
+
+A running node does the same pass every `committee.watch_interval` and
+publishes it three ways: a log line, `GET /v1/duties`, and
+`aphelion_duties_outstanding`. That is what makes it an alert rather than
+something an operator has to remember to check — see
+[Metrics](#metrics). It needs `slashing_contract` in the `[network]` section;
+without it the node says so at startup and `/v1/duties` answers
+`watching: false` rather than an empty list, because "nothing is outstanding"
+and "nobody is looking" are different facts and only one of them is reassuring.
+
+Duties are sorted by what going undone costs, which is also how they are
+labelled:
+
+| Label | Meaning | Example |
+| --- | --- | --- |
+| `COSTLY` | Stake, or a finding that could have been contested. A window closes and does not reopen | A dispute against this node; an open appeal window |
+| `FORFEITED` | A say this operator is entitled to, spent by not using it | A committee vote; a ballot in a running election |
+| `OWED` | Money already owed, sitting until somebody moves it. No deadline | A dismissed dispute whose bond is due to you |
+| `HOUSEKEEPING` | Nothing, to you. The network needs it and anybody may do it | Counting a closed ballot; opening an election after a served term |
+
+Acting on one is always a separate command, run on purpose:
+
+| Command | What it does |
+| --- | --- |
+| `dispute list` / `dispute show <id>` | The allegation, the evidence link, the votes and the clock |
+| `dispute open <accused> <feed> <round> <evidence> --commit` | File, posting the bond |
+| `dispute vote <id> --uphold\|--dismiss` | A committee vote |
+| `dispute resolve <id>` | Record the outcome once voting has closed |
+| `dispute appeal <id> --commit` | Contest a resolved dispute, posting the larger bond |
+| `dispute settle <id>` | Move the money once the appeal window has closed |
+| `election show` | Phase, deadlines, candidates, and whether this node has voted |
+| `election open` / `election finalize` | Open one after a served term; count a closed ballot |
+| `election nominate` | Stand for a seat, on the strength of this node |
+| `election ballot <candidate>` | Cast this node's weight |
+
+**Nothing here votes on anybody's behalf.** A node that cast committee votes on
+a schedule would be a committee seat held by a cron job, which is the failure
+the elected committee exists to avoid; a node that appealed automatically would
+spend the appeal bond on every dispute it ever lost. The one thing automation
+is good for here is noticing, and that is all the watcher does. The two
+commands that move the operator's own money — `dispute open` and
+`dispute appeal` — print the bond and send nothing until `--commit`, the same
+shape as `sweep`.
+
+One configuration trap is worth naming, because the contract's answer to it is
+`NotEligible` and that does not distinguish it from a jailed node. Committee
+actions are authorised by the account the registry answers `owner_of` with —
+the one that bonded the stake — and the submitter deliberately holds no
+authority over the node's identity. Where the two differ, set
+`operator_account` and `operator_secret_env`. `duties` prints the account it
+would sign as and warns when it is not the one that bonded the stake, and every
+refusal repeats it.
+
 ---
 
 ## Roadmap
@@ -1181,7 +1302,7 @@ against a real network rather than in advance of one.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
 

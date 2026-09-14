@@ -106,4 +106,20 @@ fn describe_metrics() {
         "aphelion_seconds_since_submission",
         "Seconds since this node last landed a submission for a feed"
     );
+    describe_gauge!(
+        "aphelion_duties_outstanding",
+        "Things the slashing contract is waiting on from this operator, \
+         labelled by what going undone costs: `costly` is stake or a finding \
+         that could have been contested, `forfeited` is a vote not cast, \
+         `owed` is money sitting unsettled, `housekeeping` is work anyone may \
+         do. Alert on `costly` separately -- the others are routine and a rule \
+         that could not tell them apart would be tuned for the routine one"
+    );
+    describe_gauge!(
+        "aphelion_duty_deadline_seconds",
+        "Seconds until the soonest deadline among the duties that can cost \
+         stake; negative once one has closed. Absent rather than zero when \
+         there are none, so a threshold rule does not fire permanently on a \
+         quiet network"
+    );
 }

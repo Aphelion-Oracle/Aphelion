@@ -26,7 +26,7 @@ way you would store any other production credential.
 
 ---
 
-## 2. Two keys, on purpose
+## 2. Two keys, and one account
 
 | Key | What it does | Where it lives |
 | --- | --- | --- |
@@ -38,6 +38,23 @@ price. Practically: you can rotate the funding account, share it with a relayer,
 or run out of XLM in it, and none of that lets anyone publish a price as you.
 Losing the *node* key, by contrast, means losing the identity your stake is
 bonded to.
+
+There is a third account in the picture, and on most deployments it is the same
+one as the second: **the account that bonded the stake**. It is what the
+registry answers `owner_of` with, and it is what authorises everything to do
+with the committee — standing for a seat, casting a ballot, voting on a
+dispute, appealing one. If you bonded from a different account than the one
+that pays for submissions, say so in the config:
+
+```toml
+[network]
+operator_account    = "G..."
+operator_secret_env = "APHELION_OPERATOR_SECRET"
+```
+
+Getting this wrong produces `NotEligible` from the contract, which reads
+exactly like a jailed node. `aphelion-node duties` prints the account it would
+sign as, and warns when it is not the one that bonded the stake.
 
 **Back up `node-key.json` before you register.** `keygen` refuses to overwrite an
 existing file for the same reason.
@@ -62,6 +79,7 @@ export DATABASE_URL="postgres://aphelion:aphelion@localhost/aphelion"
 # Configuration
 cp aphelion.example.toml aphelion.toml
 $EDITOR aphelion.toml    # contract ids, submitter account, feeds
+                         # set slashing_contract too, or disputes go unreported
 
 export APHELION_STELLAR_SECRET="S..."
 ```
@@ -135,14 +153,23 @@ anything else — a node that cannot see the market cannot publish it.
 ./target/release/aphelion-node run --dry-run
 ```
 
-Dry run composes and signs real rounds but cannot submit them; it is wired to an
-in-memory chain client rather than trusted not to call a live one. Watch it for
-a few minutes and compare `/v1/prices/{feed}` against a public price.
+Dry run composes and signs real rounds but cannot submit them. Its *reads* are
+live — real ledger time, your real registry record — so what it reports is the
+deployment you are pointed at; only submission is refused, one layer below the
+code that decides whether to submit. Watch it for a few minutes and compare
+`/v1/prices/{feed}` against a public price.
 
 ```bash
-# 3. Register, then run for real.
+# 3. Check what the slashing contract is asking of you. Reads only, and safe
+#    before registering: an unregistered key simply has nothing outstanding.
+./target/release/aphelion-node duties
+
+# 4. Register, then run for real.
 export APHELION_REGISTRY_CONTRACT="C..."
-export APHELION_OWNER_ACCOUNT="G..."
+export APHELION_OWNER_ACCOUNT="G..."   # this is the account that owns the node;
+                                       # it is also what authorises committee
+                                       # actions, so see `operator_account` in
+                                       # section 2 if it is not the submitter
 scripts/register-node.sh "$(./target/release/aphelion-node pubkey)"
 
 ./target/release/aphelion-node run
@@ -163,6 +190,7 @@ curl -s localhost:8080/health           | jq   # 503 when any feed is degraded
 curl -s localhost:8080/v1/node          | jq   # reputation, stake, status
 curl -s localhost:8080/v1/prices/BTC_USD | jq  # per-source breakdown and divergence
 curl -s localhost:8080/v1/rounds?limit=20 | jq # why recent rounds were skipped
+curl -s localhost:8080/v1/duties        | jq   # disputes and elections, with deadlines
 ```
 
 `/health` returns 503 when a feed is short of sources or overdue, not merely
@@ -436,36 +464,102 @@ Anything else — a claim that you colluded across rounds, or fed a manipulated
 venue on purpose — goes through the slashing contract, where people decide it on
 evidence.
 
+**You will be told.** A node with `slashing_contract` configured re-reads it
+every `committee.watch_interval` and reports what it finds to the log, to
+`/v1/duties` and to `aphelion_duties_outstanding`. The shipped alert rules page
+on the last of those with no delay at all, because the windows below close and
+do not reopen. Check it by hand at any time:
+
+```bash
+aphelion-node duties         # everything outstanding, worst first
+aphelion-node dispute show 7 # one allegation in full
+```
+
 What happens, and what you should do:
 
 1. **A dispute is filed** against your public key for a specific `(feed, round)`,
    with a bond the reporter forfeits to you if it is dismissed, and a link to
-   their evidence. Watch for `DisputeOpened` on the slashing contract; the topic
-   is your public key.
+   their evidence. `duties` reports it as `COSTLY` with the time left on the
+   voting period; `dispute show` prints the evidence link.
 2. **The committee votes** for the configured voting period. If it does not reach
    quorum, or the vote ties, the dispute is **dismissed** — silence is not
    evidence against you.
-3. **Answer it.** Your case is your own records: `/v1/rounds` shows what you
-   signed and when, and `raw_prices` retains every observation that produced it.
-   This is the reason observations are retained at all, and the reason to check
-   that your retention window is longer than the dispute window before you need
+3. **Answer it.** There is nothing to file on chain: a dispute is answered by
+   evidence and argument in front of the committee, wherever that conversation
+   happens. Your case is your own records — `/v1/rounds` shows what you signed
+   and when, and `raw_prices` retains every observation that produced it. This
+   is the reason observations are retained at all, and the reason to check that
+   your retention window is longer than the dispute window *before* you need
    it.
 4. **Appeal, once**, within the appeal window, if the committee finds against you
    and you believe it is wrong. The appeal bond is larger than the dispute bond
-   and is returned only if the second vote changes the outcome.
-5. **Settlement** moves stake after the appeal window closes. Nothing moves
-   before then.
+   and is returned only if the second vote changes the outcome — so
+   `dispute appeal` prints the bond and sends nothing until you add `--commit`.
+
+   ```bash
+   aphelion-node dispute appeal 7            # shows what it would cost
+   aphelion-node dispute appeal 7 --commit   # posts the bond
+   ```
+5. **Settlement** moves stake after the appeal window closes, and only when
+   somebody calls it. Nothing moves before then. If the dispute was *dismissed*,
+   settling is what hands you the reporter's bond, and `duties` reports it as
+   `OWED` once the window has passed:
+
+   ```bash
+   aphelion-node dispute settle 7
+   ```
 
 Your stake stays reachable through the unbonding period even if you have asked
 to exit, which is the point of the delay.
 
 If a committee member is also the operator of the node under dispute, the
 contract refuses their vote. That is checked on chain rather than left to
-etiquette.
+etiquette, and `duties` never offers you a vote on your own node — it would be
+a transaction fee spent on a guaranteed refusal.
 
 ---
 
-## 8. Exiting
+## 8. Electing the committee
+
+The committee that can take your stake is elected by operators, weighted by the
+same `weight_of` that decides how much your price counts. Your node is part of
+that electorate, and nothing casts its ballot for you.
+
+```bash
+aphelion-node election show          # phase, deadlines, who stands, whether you voted
+aphelion-node election nominate      # stand, on the strength of this node
+aphelion-node election ballot G...   # cast this node's weight for one candidate
+```
+
+Four things are worth knowing before the first one runs.
+
+**One ballot names one candidate**, in a race with several winners. That is
+deliberate: a slate ballot would let a bare majority of weight take every seat.
+
+**A failed election changes nothing.** Too few eligible candidates draw weight
+to fill the quorum and the sitting committee stays. The cost is real — a
+committee nobody replaces holds over indefinitely — and the alternative is
+worse, because vacating the seats would let an attacker switch slashing off for
+everybody by suppressing turnout.
+
+**Two steps are permissionless and nobody is assigned them**, in the same way
+`sweep_absent` is. An election has to be *opened* once the sitting term is
+served, and a closed ballot has to be *counted* before any later election can
+open. `duties` reports both as `HOUSEKEEPING`; either costs a transaction fee
+and nothing else:
+
+```bash
+aphelion-node election open
+aphelion-node election finalize
+```
+
+**A jailed or exiting node has no ballot and cannot stand**, because its weight
+is zero. `duties` says so in the `weight` line rather than offering you
+something the contract would refuse.
+
+---
+
+## 9. Exiting
 
 ```bash
 stellar contract invoke --id "$APHELION_REGISTRY_CONTRACT" ... -- \

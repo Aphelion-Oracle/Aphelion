@@ -14,160 +14,33 @@
 //! key is passed through the environment of the child process. Both are
 //! acceptable at a 60-second cadence; neither would be at 60 per second, which
 //! is when to reach for a native client (see the note on [`super::ChainClient`]).
-
-use std::process::Stdio;
+//!
+//! The process plumbing itself lives in [`super::stellar`], shared with the
+//! committee client.
 
 use aphelion_core::{FeedId, Price};
 use async_trait::async_trait;
-use tokio::process::Command;
 
+use super::stellar::{as_i128, as_u64, StellarCli};
 use super::{ChainClient, OnChainNode, OnChainPrice, SubmitReceipt, SweepReceipt};
 use crate::config::NetworkConfig;
 use crate::error::{NodeError, Result};
 use crate::signer::SignedSubmission;
 
 pub struct CliChain {
-    binary: String,
+    cli: StellarCli,
     network: NetworkConfig,
-    secret: String,
-    timeout: std::time::Duration,
 }
 
 impl CliChain {
     pub fn new(network: NetworkConfig) -> Result<Self> {
-        let secret = crate::Config::secret_from_env(&network.submitter_secret_env)?;
-        if !secret.starts_with('S') {
-            return Err(NodeError::Config(format!(
-                "`{}` does not look like a Stellar secret seed (expected it to start with `S`)",
-                network.submitter_secret_env
-            )));
-        }
-        Ok(Self {
-            binary: std::env::var("APHELION_STELLAR_BIN").unwrap_or_else(|_| "stellar".into()),
-            network,
-            secret,
-            timeout: std::time::Duration::from_secs(60),
-        })
-    }
-
-    /// Common prefix for every `contract invoke`.
-    fn base_args(&self, contract: &str) -> Vec<String> {
-        vec![
-            "contract".into(),
-            "invoke".into(),
-            "--id".into(),
-            contract.into(),
-            "--source-account".into(),
-            self.secret.clone(),
-            "--rpc-url".into(),
-            self.network.rpc_url.clone(),
-            "--network-passphrase".into(),
-            self.network.network_passphrase.clone(),
-        ]
-    }
-
-    /// Run the CLI and return `(stdout, stderr)`.
-    ///
-    /// The secret is passed as an argument to a child process, which would
-    /// normally be visible in `ps`. It is instead written to an environment
-    /// variable and referenced, keeping it off the process's argv.
-    async fn run(&self, args: Vec<String>) -> Result<(String, String)> {
-        let mut sanitised = args.clone();
-        if let Some(pos) = sanitised.iter().position(|a| a == &self.secret) {
-            sanitised[pos] = "$APHELION_STELLAR_SECRET".into();
-        }
-        tracing::debug!(cmd = %self.binary, args = ?sanitised, "invoking stellar CLI");
-
-        let child = Command::new(&self.binary)
-            .args(&args)
-            .env("STELLAR_ACCOUNT", &self.network.submitter_account)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .output();
-
-        let output = tokio::time::timeout(self.timeout, child)
-            .await
-            .map_err(|_| {
-                NodeError::Chain(format!(
-                    "`{}` did not return within {:?}",
-                    self.binary, self.timeout
-                ))
-            })?
-            .map_err(|e| {
-                NodeError::Chain(format!(
-                    "cannot run `{}`: {e}. Install the Stellar CLI or set APHELION_STELLAR_BIN.",
-                    self.binary
-                ))
-            })?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-        if !output.status.success() {
-            let detail = if stderr.is_empty() { &stdout } else { &stderr };
-            let snippet: String = detail.chars().take(600).collect();
-            return Err(NodeError::Chain(format!(
-                "stellar CLI exited with {}: {snippet}",
-                output.status
-            )));
-        }
-        Ok((stdout, stderr))
-    }
-
-    /// Read-only call: simulated, never submitted, so it costs nothing.
-    async fn view(
-        &self,
-        contract: &str,
-        func: &str,
-        args: &[(&str, String)],
-    ) -> Result<serde_json::Value> {
-        let mut cmd = self.base_args(contract);
-        cmd.push("--send".into());
-        cmd.push("no".into());
-        cmd.push("--".into());
-        cmd.push(func.into());
-        for (name, value) in args {
-            cmd.push(format!("--{name}"));
-            cmd.push(value.clone());
-        }
-        let (stdout, _) = self.run(cmd).await?;
-        parse_json(&stdout)
-    }
-
-    /// The CLI prints the transaction hash on stderr in a line that also
-    /// contains an explorer URL. Nothing depends on finding it — a submission
-    /// that landed without a recoverable hash is still a landed submission —
-    /// so a miss degrades to `None` rather than an error.
-    fn extract_tx_hash(stderr: &str) -> Option<String> {
-        stderr
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .find(|token| token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()))
-            .map(|s| s.to_string())
-    }
-}
-
-fn parse_json(stdout: &str) -> Result<serde_json::Value> {
-    if stdout.is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    serde_json::from_str(stdout).map_err(|e| {
-        let snippet: String = stdout.chars().take(300).collect();
-        NodeError::Chain(format!(
-            "stellar CLI returned unparseable output ({e}): {snippet}"
-        ))
-    })
-}
-
-/// Soroban's JSON encoding renders `i128` and `u64` as strings when they
-/// exceed what JSON numbers hold safely, and as numbers when they do not.
-/// Both shapes have to be accepted.
-fn as_i128(v: &serde_json::Value) -> Option<i128> {
-    match v {
-        serde_json::Value::String(s) => s.parse().ok(),
-        serde_json::Value::Number(n) => n.as_i64().map(i128::from),
-        _ => None,
+        let cli = StellarCli::new(
+            &network.rpc_url,
+            &network.network_passphrase,
+            &network.submitter_account,
+            &network.submitter_secret_env,
+        )?;
+        Ok(Self { cli, network })
     }
 }
 
@@ -195,18 +68,11 @@ fn decode_pubkeys(value: &serde_json::Value) -> Result<Vec<String>> {
         .collect())
 }
 
-fn as_u64(v: &serde_json::Value) -> Option<u64> {
-    match v {
-        serde_json::Value::String(s) => s.parse().ok(),
-        serde_json::Value::Number(n) => n.as_u64(),
-        _ => None,
-    }
-}
-
 #[async_trait]
 impl ChainClient for CliChain {
     async fn ledger_time(&self) -> Result<u64> {
         let value = self
+            .cli
             .view(&self.network.aggregator_contract, "ledger_time", &[])
             .await?;
         as_u64(&value).ok_or_else(|| {
@@ -222,38 +88,34 @@ impl ChainClient for CliChain {
         submission: &SignedSubmission,
     ) -> Result<SubmitReceipt> {
         let m = &submission.message;
-        let mut cmd = self.base_args(&self.network.aggregator_contract);
-        cmd.push("--".into());
-        cmd.push("submit_price".into());
-        for (name, value) in [
-            ("feed", m.feed.to_string()),
-            ("pubkey", public_key_hex.to_string()),
-            ("price", m.price.raw().to_string()),
-            ("timestamp", m.timestamp.to_string()),
-            ("confidence_bps", m.confidence_bps.to_string()),
-            ("nonce", m.nonce.to_string()),
-            ("signature", submission.signature_hex()),
-        ] {
-            cmd.push(format!("--{name}"));
-            cmd.push(value);
-        }
-
-        let (stdout, stderr) = self.run(cmd).await?;
-        // `submit_price` returns true when this submission was the one that
-        // closed the round.
-        let finalized = parse_json(&stdout)
-            .ok()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let (value, tx_hash) = self
+            .cli
+            .invoke(
+                &self.network.aggregator_contract,
+                "submit_price",
+                &[
+                    ("feed", m.feed.to_string()),
+                    ("pubkey", public_key_hex.to_string()),
+                    ("price", m.price.raw().to_string()),
+                    ("timestamp", m.timestamp.to_string()),
+                    ("confidence_bps", m.confidence_bps.to_string()),
+                    ("nonce", m.nonce.to_string()),
+                    ("signature", submission.signature_hex()),
+                ],
+            )
+            .await?;
 
         Ok(SubmitReceipt {
-            tx_hash: Self::extract_tx_hash(&stderr),
-            finalized_round: finalized,
+            tx_hash,
+            // `submit_price` returns true when this submission was the one
+            // that closed the round.
+            finalized_round: value.as_bool().unwrap_or(false),
         })
     }
 
     async fn latest_price(&self, feed: &FeedId) -> Result<Option<OnChainPrice>> {
         let value = self
+            .cli
             .view(
                 &self.network.aggregator_contract,
                 "get_price",
@@ -279,6 +141,7 @@ impl ChainClient for CliChain {
 
     async fn node_info(&self, public_key_hex: &str) -> Result<Option<OnChainNode>> {
         let value = self
+            .cli
             .view(
                 &self.network.registry_contract,
                 "get_node",
@@ -307,6 +170,7 @@ impl ChainClient for CliChain {
 
     async fn last_nonce(&self, public_key_hex: &str, feed: &FeedId) -> Result<u64> {
         let value = self
+            .cli
             .view(
                 &self.network.aggregator_contract,
                 "last_nonce",
@@ -321,6 +185,7 @@ impl ChainClient for CliChain {
 
     async fn list_nodes(&self) -> Result<Vec<String>> {
         let value = self
+            .cli
             .view(&self.network.registry_contract, "list_nodes", &[])
             .await?;
         decode_pubkeys(&value)
@@ -328,6 +193,7 @@ impl ChainClient for CliChain {
 
     async fn absence_threshold(&self) -> Result<u64> {
         let value = self
+            .cli
             .view(&self.network.aggregator_contract, "get_config", &[])
             .await?;
         value
@@ -350,60 +216,28 @@ impl ChainClient for CliChain {
             });
         }
 
-        let mut cmd = self.base_args(&self.network.aggregator_contract);
-        cmd.push("--".into());
-        cmd.push("sweep_absent".into());
-        cmd.push("--pubkeys".into());
-        cmd.push(
-            serde_json::to_string(pubkeys)
-                .map_err(|e| NodeError::Chain(format!("cannot encode --pubkeys: {e}")))?,
-        );
+        let encoded = serde_json::to_string(pubkeys)
+            .map_err(|e| NodeError::Chain(format!("cannot encode --pubkeys: {e}")))?;
+        let (value, tx_hash) = self
+            .cli
+            .invoke(
+                &self.network.aggregator_contract,
+                "sweep_absent",
+                &[("pubkeys", encoded)],
+            )
+            .await?;
 
-        let (stdout, stderr) = self.run(cmd).await?;
         Ok(SweepReceipt {
-            tx_hash: Self::extract_tx_hash(&stderr),
-            charged: parse_json(&stdout)
-                .ok()
-                .as_ref()
-                .and_then(as_u64)
-                .unwrap_or(0) as u32,
+            tx_hash,
+            charged: as_u64(&value).unwrap_or(0) as u32,
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::stellar::parse_json;
     use super::*;
-
-    #[test]
-    fn finds_a_transaction_hash_in_cli_chatter() {
-        let stderr = "ℹ️ Transaction hash is \
-            9f2c1b4a5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708\n\
-            ℹ️ Signing transaction";
-        assert_eq!(
-            CliChain::extract_tx_hash(stderr).as_deref(),
-            Some("9f2c1b4a5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708")
-        );
-    }
-
-    #[test]
-    fn missing_hash_is_not_an_error() {
-        assert_eq!(CliChain::extract_tx_hash("no hash here"), None);
-        // A 63-char token must not be mistaken for one.
-        assert_eq!(CliChain::extract_tx_hash(&"a".repeat(63)), None);
-    }
-
-    #[test]
-    fn accepts_both_json_shapes_soroban_uses_for_integers() {
-        assert_eq!(
-            as_i128(&serde_json::json!("170141183460469231731")),
-            Some(170141183460469231731)
-        );
-        assert_eq!(as_i128(&serde_json::json!(42)), Some(42));
-        assert_eq!(as_u64(&serde_json::json!("1735689600")), Some(1735689600));
-        assert_eq!(as_u64(&serde_json::json!(1735689600)), Some(1735689600));
-        assert_eq!(as_i128(&serde_json::json!(null)), None);
-    }
 
     #[test]
     fn decodes_a_node_index_and_drops_what_is_not_a_key() {
@@ -432,7 +266,10 @@ mod tests {
 
     #[test]
     fn empty_cli_output_decodes_as_null_not_an_error() {
+        // Re-checked here because `submit_price` reads its return value
+        // through it: a function that returned nothing must not be reported as
+        // a round that closed.
         assert!(parse_json("").unwrap().is_null());
-        assert!(parse_json("not json").is_err());
+        assert!(!parse_json("").unwrap().as_bool().unwrap_or(false));
     }
 }

@@ -80,3 +80,51 @@ groups:
             still voting at full weight. Charge them with
             `aphelion-node sweep --commit`, or set upkeep.sweep_absent to have
             this node do it continuously. See /v1/upkeep for the list.
+
+      - alert: AphelionDisputeAgainstThisNode
+        # The one alert on this list with a deadline attached to it. A dispute
+        # is answered by evidence and argument off chain, and an appeal window
+        # that closes is not reopened — so this pages rather than warns, and it
+        # does so as soon as the watcher sees it rather than after a `for:`.
+        # The false-positive cost is one message; the false-negative cost is
+        # the node's stake.
+        expr: aphelion_duties_outstanding{consequence="costly"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value }} thing(s) that can cost this node stake"
+          description: >-
+            A dispute against this node is being voted on, or one was upheld
+            and its appeal window is still open. Run `aphelion-node duties`, or
+            read /v1/duties, for the allegation, the evidence link and the
+            deadline.
+
+      - alert: AphelionDutyDeadlineClosing
+        # Separately, and louder, when the window is nearly gone. A node that
+        # has been paging for two days is a node whose pages are being muted.
+        expr: aphelion_duty_deadline_seconds < 21600
+        labels:
+          severity: critical
+        annotations:
+          summary: "A window that costs stake closes in {{ $value | humanizeDuration }}"
+          description: >-
+            Ledger time, not wall clock. Once it passes, the finding stands and
+            cannot be contested. See /v1/duties.
+
+      - alert: AphelionVoteOutstanding
+        # A warning, not a page: nothing is taken from this operator by not
+        # voting. What is lost is a say — in a committee seat this operator
+        # stood for, or in a dispute the committee cannot resolve without
+        # quorum. `for: 12h` because a committee member is entitled to think
+        # about it.
+        expr: aphelion_duties_outstanding{consequence="forfeited"} > 0
+        for: 12h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} vote(s) this operator has not cast"
+          description: >-
+            A committee vote on an open dispute, or a ballot in a running
+            election. A dispute short of quorum is dismissed whatever the
+            evidence, so an absent committee is how slashing switches itself
+            off. See /v1/duties.
