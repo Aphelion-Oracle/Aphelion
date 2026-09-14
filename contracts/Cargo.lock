@@ -58,6 +58,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aphelion-randomness"
+version = "0.1.0"
+dependencies = [
+ "aphelion-registry",
+ "ed25519-dalek",
+ "sha2",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "aphelion-registry"
 version = "0.1.0"
 dependencies = [

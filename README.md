@@ -323,6 +323,8 @@ repository, not the target architecture.
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
+| `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 36 |
+| Randomness participation from the node — commit/reveal loop and CLI | 📋 Planned | — |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
@@ -336,7 +338,7 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-466 tests in total: 219 off-chain (`cargo test --workspace`), 213 against the
+502 tests in total: 219 off-chain (`cargo test --workspace`), 249 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
 Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
@@ -378,6 +380,7 @@ aphelion/
 │   ├── aggregator/             Submission verification, consensus, price storage, TWAP
 │   ├── slashing/               Dispute resolution, and the committee's elections
 │   ├── governance/             Timelock: every privileged call, queued and published first
+│   ├── randomness/             Commit–reveal beacon, produced by the same staked node set
 │   └── consumer-example/       Reference integration for dApp authors
 ├── crates/                     Off-chain services (root cargo workspace, host target)
 │   ├── aphelion-core/          Shared price math and the canonical signing payload
@@ -385,7 +388,7 @@ aphelion/
 │   └── aphelion-node/          The node binary
 │       └── src/
 │           ├── sources/        Binance, Kraken, Coinbase, OKX, Bybit, Bitstamp, CoinGecko
-│           ├── engine/         Collector, aggregation, round loop, absence sweeps, duties
+│           ├── engine/         Collector, aggregation, round loop, absence sweeps, duties, status
 │           ├── chain/          ChainClient and CommitteeClient: CLI-backed, RPC reads, mock
 │           ├── cmd/            Subcommands belonging to the binary rather than the library
 │           ├── db/             Postgres schema access
@@ -1053,6 +1056,79 @@ call.
 
 ---
 
+## Randomness
+
+The same staked node set that produces prices also produces a public,
+unpredictable 32-byte value per round, by commit and reveal.
+
+```text
+  open_round ──▶ commit ──────▶ reveal ───────▶ finalize
+  (anyone,       (a node, with   (the same node,  (anyone, once the
+   once the       H(secret)       with the        window closes or
+   interval is    bound to this   secret)         everyone revealed)
+   served)        round and key)
+```
+
+```bash
+stellar contract invoke --id <randomness> -- latest                       # (round, beacon)
+stellar contract invoke --id <randomness> -- random --round_id 41         # or None
+stellar contract invoke --id <randomness> -- random_in_range \
+    --round_id 41 --bound 52
+```
+
+> [!IMPORTANT]
+> **The last revealer can choose between two outcomes.** Whoever reveals last
+> can compute the beacon before sending, so they pick between the value where
+> they reveal and the value where they do not. That is one bit of adversarial
+> choice per withholding participant, it is inherent to commit–reveal, and no
+> contract logic removes it. Aphelion **prices** it — a node that commits and
+> does not reveal loses reputation and stake — rather than claiming to prevent
+> it. If one bit of adversarial choice would break your application, do not
+> build it on a commit–reveal beacon, from anybody.
+
+### Why commit–reveal and not a VRF
+
+A verifiable random function, or a threshold signature used as one, is the
+better construction: one party produces a value with a proof, and nobody could
+have produced a different one. Soroban cannot check either. The host offers
+`ed25519_verify`, SHA-256 and Keccak; ECVRF needs scalar–point arithmetic on the
+curve, and a BLS threshold scheme needs pairings. Implementing one in contract
+code would cost more per round than the beacon is worth, and would put a
+hand-rolled cryptographic primitive inside a contract that holds stake — the
+worse of the two problems. If Soroban grows a pairing or VRF host function, this
+contract is the thing to replace.
+
+### What makes it unpredictable
+
+The output is the XOR of every revealed secret, hashed with the round id and the
+contract id. A participant who committed before seeing anyone else's secret
+cannot steer it, and — because XOR is order-independent — cannot grind it by
+choosing *when* to reveal either. As long as one secret was chosen by somebody
+who did not know the rest, the output is unpredictable.
+
+Three details carry most of the weight:
+
+| Detail | Without it |
+| --- | --- |
+| The commitment hashes `domain ‖ contract ‖ round ‖ pubkey ‖ secret` | A node could copy another's published commitment and reveal the same secret once they did — and since the accumulator is an XOR, two copies of one secret cancel, letting the copier subtract somebody else's contribution from the beacon |
+| Only registered, unjailed nodes may commit | Contributing entropy would cost a keypair rather than bonded stake, and a withholder would have nothing to take |
+| A round below `min_participants` publishes nothing | A beacon assembled from too few parties looks exactly like a good one |
+
+`min_participants` is a security parameter, not a liveness one. A round that
+falls short is recorded as `Failed` rather than erased, because "this round will
+never have an answer" and "this round has not finished" are different facts and
+only one is worth waiting on. Either way the no-shows are charged — otherwise
+withholding to force a failure would cost less than withholding to flip a bit.
+
+> [!NOTE]
+> The contract is implemented and tested; **the node does not take part in it
+> yet**. The commit/reveal loop and its CLI are the next step, in the shape the
+> committee commands took: nothing automatic that spends an operator's money
+> without them asking. Until then a round needs participants driving the
+> contract themselves.
+
+---
+
 ## Economics
 
 Aphelion's incentives are a mechanism, not a forecast. This section describes how
@@ -1442,7 +1518,7 @@ refusal repeats it.
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
 | **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
-| **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance ✅ |
+| **5 — Expansion** | Additional feeds · a randomness beacon ✅ (contract; node-side participation next) · non-price data · parameter governance ✅ |
 
 Phase boundaries are gated on the work being done, not on a date.
 

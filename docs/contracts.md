@@ -457,6 +457,114 @@ aimed at anything else.
 
 ---
 
+## Randomness
+
+A public 32-byte value per round, produced by commit and reveal over the same
+staked node set. See the README's [Randomness](../README.md#randomness) for the
+construction and its one unavoidable weakness.
+
+### Rounds
+
+| Function | Caller | Notes |
+| --- | --- | --- |
+| `open_round() -> u64` | Anyone | One round at a time, and not before `min_round_interval` |
+| `commit(pubkey, commitment, signature)` | A registered, unjailed node | Inside the commit window; one per node per round |
+| `reveal(pubkey, secret)` | Anyone holding the secret | Only after the commit window closes |
+| `finalize(round_id)` | Anyone | Once the reveal window closes, or as soon as every committer has revealed |
+
+### Reads
+
+| Function | Returns |
+| --- | --- |
+| `random(round_id)` | The beacon, or `None` — no such round, unfinished, or failed |
+| `latest()` | `(round_id, beacon)` for the newest finalized round, looking back 32 |
+| `random_in_range(round_id, bound)` | A value in `0..bound`, or `None` |
+| `get_round(round_id)` | The whole record: deadlines, who committed, who revealed, status |
+| `round_count()` | |
+| `get_config()` / `param_bounds()` | |
+
+`random` collapses three situations into `None` on purpose — no such round, not
+finished, finished without enough participants — because the common call is one
+question. A consumer that needs to tell them apart reads `get_round` and looks
+at the status.
+
+`random_in_range` reduces the first 16 bytes of the beacon modulo `bound`. That
+is biased whenever `bound` does not divide the range, and here the range is
+2^128, so for any `bound` expressible in a `u64` the bias is at most 2^-64 of a
+share — far below the weakest thing about this beacon. A caller needing an
+unbiased draw from a bound near 2^128 should take `random` and reject-sample it.
+
+### The two payloads
+
+Both are rebuilt by the contract from parts it already holds, so a node that
+builds them differently fails verification rather than disagreeing quietly.
+
+**The commitment** is `SHA-256` of:
+
+```text
+offset  len  field
+     0   18  "APHELION_RANDOM_V1"
+    18   32  randomness contract id
+    50    8  round id, u64
+    58   32  the committing node's public key
+    90   32  the secret
+```
+
+**The signature** is over:
+
+```text
+offset  len  field
+     0   18  "APHELION_COMMIT_V1"
+    18   32  randomness contract id
+    50    8  round id, u64
+    58   32  the commitment
+```
+
+Every field before the secret earns its place. Without the contract id, a
+commitment made on testnet is valid on mainnet. Without the round id, it can be
+replayed into a later round — where the node already knows the secret it is
+"committing" to. Without the public key, a node can copy somebody else's
+published commitment and reveal the same secret once they do; since the
+accumulator is an XOR, two copies of one secret cancel, which would let the
+copier subtract another node's contribution from the beacon entirely.
+
+### Reveals are unsigned, and that is deliberate
+
+`commit` carries a signature; `reveal` does not. A secret opens exactly one
+commitment, and that commitment is already bound to one node by its preimage —
+so the most a third party who somehow learned a secret could do is help the
+round finish on time.
+
+### Administration
+
+| Function | Caller | Notes |
+| --- | --- | --- |
+| `initialize(config)` | Admin, once | |
+| `set_config(config)` | Admin | Bounded; see below |
+| `param_bounds()` | Anyone | |
+
+| Parameter | Range | Why the edge is there |
+| --- | --- | --- |
+| `commit_window` | 30 s – 1 day | Below the floor a node misses it to a slow ledger rather than to inattention |
+| `reveal_window` | 30 s – 1 day | |
+| `min_participants` | 2 – 100 | One "participant" is a value one party chose alone |
+| `min_round_interval` | 0 – 30 days | |
+| `no_show_rep_penalty` | 0 – 10 000 | The registry's whole reputation scale |
+
+### Penalties
+
+| Situation | What happens |
+| --- | --- |
+| Committed and revealed | Nothing |
+| Committed, did not reveal | `no_show_rep_penalty` reputation and `no_show_slash` stake, at finalisation, whoever calls it |
+| Did not commit | Nothing — taking part is voluntary |
+
+The no-shows are charged whether the round succeeds or fails. Otherwise
+withholding to force a failure would cost less than withholding to flip a bit,
+and the cheaper attack is the one that gets used.
+
+---
+
 ## Consumer example
 
 A collateralised vault. Not a lending protocol — no interest, no per-asset risk
@@ -511,13 +619,39 @@ Soroban returns these as `Error(Contract, #n)`.
 | 15 | `NotJailed` | `release` on a node that is not in jail |
 | 16 | `StillJailed` | `release` before `jailed_until` |
 
+### Randomness
+
+| # | Name | |
+| ---: | --- | --- |
+| 1–3 | `AlreadyInitialized`, `NotInitialized`, `NotAdmin` | |
+| 4 | `InvalidConfig` | A negative `no_show_slash` |
+| 5 | `ParameterOutOfRange` | |
+| 6 | `NotContractAddress` | |
+| 10 | `RoundInProgress` | One round runs at a time |
+| 11 | `RoundTooSoon` | Inside `min_round_interval` |
+| 12 | `UnknownRound` | |
+| 20 | `NotCommitting` | The commit window has closed, or has not opened |
+| 21 | `NotRevealing` | The reveal window has closed, or has not opened |
+| 22 | `AlreadyCommitted` | |
+| 23 | `AlreadyRevealed` | |
+| 24 | `DidNotCommit` | Revealing without committing is choosing after seeing |
+| 25 | `BadReveal` | The secret does not hash to the commitment |
+| 26 | `BadSignature` | |
+| 27 | `NotAuthorizedNode` | Unregistered, jailed or exiting |
+| 30 | `NotReadyToFinalize` | Somebody may still reveal |
+| 31 | `AlreadyFinalized` | |
+| 32 | `NoOutput` | |
+| 33 | `InvalidBound` | `random_in_range` with a bound of zero |
+
 ### Aggregator
 
 | # | Name | |
 | ---: | --- | --- |
 | 1–3 | `AlreadyInitialized`, `NotInitialized`, `NotAdmin` | |
-| 4 | `InvalidConfig` | A configuration that could never work |
+| 4 | `InvalidConfig` | A value that could never work — a negative fee |
 | 5 | `NotContractAddress` | An account address where a contract belongs |
+| 6 | `ParameterOutOfRange` | A value that works and stops the parameter meaning what its name says |
+| 7 | `InconsistentConfig` | Two values each in range that cannot both hold |
 | 10–12 | `UnknownFeed`, `FeedDisabled`, `FeedAlreadyExists` | |
 | 20 | `BadSignature` | Usually surfaces as a host trap: `ed25519_verify` does not return on failure |
 | 21 | `NotAuthorizedNode` | Unregistered, jailed or exiting |

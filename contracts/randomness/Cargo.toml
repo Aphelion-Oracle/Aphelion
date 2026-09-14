@@ -1,0 +1,22 @@
+[package]
+name = "aphelion-randomness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+# The registry decides who may take part and absorbs the penalty for a node
+# that commits and then does not reveal, so the pair is exercised together
+# rather than against a stub.
+aphelion-registry = { path = "../registry" }
+ed25519-dalek = { workspace = true }
+sha2 = "0.10"
