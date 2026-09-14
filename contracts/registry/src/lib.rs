@@ -61,6 +61,12 @@ impl Registry {
     /// initially and be repointed once those contracts are deployed, which is
     /// how the three-contract deployment bootstraps without a circular
     /// dependency.
+    ///
+    /// `randomness` takes no parameter and starts at `admin` for the same
+    /// reason, one step further on: the beacon is optional, a deployment that
+    /// never runs one should not have to name a contract for it, and adding an
+    /// eighth positional address to this call is how a deployment script ends
+    /// up handing the slasher's powers to the token.
     #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
@@ -100,6 +106,7 @@ impl Registry {
         env.storage().instance().set(
             &DataKey::Config,
             &Config {
+                randomness: admin.clone(),
                 admin,
                 aggregator,
                 slasher,
@@ -129,6 +136,19 @@ impl Registry {
         let mut config = Self::config(&env);
         config.admin.require_auth();
         config.slasher = slasher;
+        env.storage().instance().set(&DataKey::Config, &config);
+    }
+
+    /// Point the no-show penalty at the randomness contract.
+    ///
+    /// Until this is called it points at the admin, which means the beacon's
+    /// `finalize` cannot charge anybody — so a deployment that runs a beacon
+    /// and forgets this step gets a contract whose one penalty silently does
+    /// nothing. `scripts/verify-deployment.sh` checks for exactly that.
+    pub fn set_randomness(env: Env, randomness: Address) {
+        let mut config = Self::config(&env);
+        config.admin.require_auth();
+        config.randomness = randomness;
         env.storage().instance().set(&DataKey::Config, &config);
     }
 
@@ -509,6 +529,29 @@ impl Registry {
             reputation_delta,
             slash_amount,
             symbol_short!("dispute"),
+        );
+    }
+
+    /// Penalise a node that committed to a beacon round and did not reveal.
+    /// Callable only by the randomness contract.
+    ///
+    /// A separate entry point rather than a second caller allowed into
+    /// `slash`, for two reasons. `require_auth` authorises one address, so
+    /// "either of these two contracts" is not something one call can express
+    /// without reading the invoker and deciding — which is exactly the sort of
+    /// bespoke authorisation logic that should not sit in front of a function
+    /// that takes stake. And the reasons are genuinely different: the penalty
+    /// event carries `noshow` rather than `dispute`, so an operator reading
+    /// their own history can tell a finding against them from a missed reveal.
+    pub fn slash_no_show(env: Env, pubkey: BytesN<32>, reputation_delta: u32, slash_amount: i128) {
+        let config = Self::config(&env);
+        config.randomness.require_auth();
+        Self::apply_penalty(
+            &env,
+            pubkey,
+            reputation_delta,
+            slash_amount,
+            symbol_short!("noshow"),
         );
     }
 

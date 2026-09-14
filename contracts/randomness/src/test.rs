@@ -56,17 +56,19 @@ fn setup() -> Harness<'static> {
     let randomness_id = env.register(Randomness, ());
 
     let registry = RegistryClient::new(&env, &registry_id);
+    let slashing = Address::generate(&env);
     registry.initialize(
         &admin,
         &aggregator,
-        // The randomness contract is the slasher here: it is the only thing in
-        // this test that takes stake.
-        &randomness_id,
+        &slashing,
         &sac.address(),
         &MIN_STAKE,
         &UNBONDING,
         &JAIL_PERIOD,
     );
+    // The step a deployment has to remember: until the registry is pointed at
+    // this contract, `finalize` cannot charge a no-show anything.
+    registry.set_randomness(&randomness_id);
 
     let randomness = RandomnessClient::new(&env, &randomness_id);
     randomness.initialize(&base_config(&admin, &registry_id));

@@ -80,6 +80,7 @@ REG=CCCP65FAZK5QJEUDLJY3MHX56SP7DTV2IQZH2P4EQGDQBHSNKZRU3P5Q
 AGG=CAREHR44HR57R6JNDZTQ5TGVBCJFRKYQ66ZDIV5CVPPSZZA33I3PJAOC
 SLA=CALKFEVQ4TT3B6U4HGTKY3PTDRCNWIH7P6GA2NDXPPQ7LS3BASS43P5J
 GOV=CDGOVXX4TT3B6U4HGTKY3PTDRCNWIH7P6GA2NDXPPQ7LS3BASS43QQQQ
+RND=CDRNDXX4TT3B6U4HGTKY3PTDRCNWIH7P6GA2NDXPPQ7LS3BASS43QQQQ
 DEPLOYER=GCNS2KFQDCMRG4EWA2DQY5XZDPIAFUWNSA7236OCEMDCU7PY7G3ZHF2V
 GUARDIAN=GDGUARDIANQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
 STRANGER=GDSTRANGERQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
@@ -200,6 +201,33 @@ case_is "rewards promised from an empty pool" 0 "the pool holds 0"
 # registry did not answer" would print as "carrying 0 bps".
 run "del(.\"$REG.total_weight\")" .
 case_is "a weight the registry would not report" 0 "the weights are not comparable"
+
+# -- the beacon -------------------------------------------------------------
+#
+# The randomness contract is optional, which makes every case here about
+# telling "not deployed" apart from "deployed and mis-wired". The second is
+# the dangerous one: the registry's `randomness` address starts at the admin
+# rather than unset, so a deployment that skips `set_randomness` produces
+# rounds that finalize cleanly and charge nobody -- a failure that looks
+# exactly like success from every other angle.
+
+run . 'del(.contracts.randomness)'
+case_is "no randomness id: reported as absent, not as broken" 0 "randomness not deployed"
+
+run "del(.\"$RND.get_config\")" .
+case_is "a randomness id pointing at nothing" 1 "randomness does not answer get_config"
+
+run ".\"$REG.get_config\".randomness = \"$GOV\"" .
+case_is "the registry never pointed at the beacon" 1 "registry -> randomness"
+
+run "del(.\"$REG.get_config\".randomness)" .
+case_is "a registry with no randomness field at all" 1 "registry -> randomness"
+
+run ".\"$RND.get_config\".registry = \"$AGG\"" .
+case_is "a beacon asking the wrong contract who may commit" 1 "randomness -> registry"
+
+run ".\"$RND.get_config\".admin = \"$DEPLOYER\"" .
+case_is "a beacon left with the deploying key" 1 "randomness admin is still the deploying key"
 
 # -- reaching a deployment without a record ---------------------------------
 #

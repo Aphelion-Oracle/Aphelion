@@ -112,6 +112,16 @@ pub struct Config {
     pub aggregator: Address,
     /// The slashing contract, allowed to penalise after a dispute.
     pub slasher: Address,
+    /// The randomness contract, allowed to penalise a node that committed to a
+    /// beacon round and then did not reveal.
+    ///
+    /// A second privileged caller rather than a second use of `slasher`,
+    /// because these two take stake for unrelated reasons and the registry is
+    /// the one place where "who may take an operator's stake" should be
+    /// enumerated rather than inferred. Points at the admin until
+    /// `set_randomness` is called, the same bootstrap `aggregator` and
+    /// `slasher` use.
+    pub randomness: Address,
     /// Token used for stake and rewards (the native XLM SAC in production).
     pub token: Address,
     pub min_stake: i128,

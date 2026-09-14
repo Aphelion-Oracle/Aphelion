@@ -97,7 +97,11 @@ pub trait RegistryInterface {
     /// or exiting. The same question the aggregator asks every round, so who
     /// counts is never maintained in two places.
     fn weight_of(env: Env, pubkey: BytesN<32>) -> u32;
-    fn slash(env: Env, pubkey: BytesN<32>, reputation_delta: u32, slash_amount: i128);
+    /// The no-show penalty specifically, not the dispute one. The registry
+    /// authorises this against its `randomness` address, which a deployment
+    /// points here with `set_randomness` — until it does, this call fails and
+    /// no-shows go uncharged.
+    fn slash_no_show(env: Env, pubkey: BytesN<32>, reputation_delta: u32, slash_amount: i128);
 }
 
 #[contract]
@@ -369,7 +373,7 @@ impl Randomness {
             {
                 continue;
             }
-            registry.slash(&node, &config.no_show_rep_penalty, &config.no_show_slash);
+            registry.slash_no_show(&node, &config.no_show_rep_penalty, &config.no_show_slash);
             NoShow {
                 round_id: round.id,
                 node: node.clone(),

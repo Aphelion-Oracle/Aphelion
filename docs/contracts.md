@@ -72,6 +72,7 @@ transaction fee carries no authority at all.
 | `set_aggregator(aggregator)` | Admin | Repoint after deployment |
 | `set_slasher(slasher)` | Admin | Repoint after deployment |
 | `set_min_stake(min_stake)` | Admin | 1 stroop – 10 million XLM; does not retroactively jail nodes below the new floor |
+| `set_randomness(randomness)` | Admin | Points the no-show penalty at the beacon; starts at the admin |
 | `set_admin(new_admin)` | Admin | |
 | `get_config()` | Anyone | |
 
@@ -559,6 +560,19 @@ round finish on time.
 | Committed, did not reveal | `no_show_rep_penalty` reputation and `no_show_slash` stake, at finalisation, whoever calls it |
 | Did not commit | Nothing — taking part is voluntary |
 
+The penalty goes through `registry.slash_no_show`, which is a **different entry
+point** from the dispute penalty and is authorised against a different address.
+`require_auth` authorises one address, so "either of these two contracts" is not
+something one call can express without reading the invoker and deciding — which
+is exactly the bespoke authorisation logic that should not sit in front of a
+function that takes stake. The penalty event carries `noshow` rather than
+`dispute`, so an operator reading their own history can tell a finding against
+them from a missed reveal.
+
+A deployment must call `registry.set_randomness` for any of this to work. Until
+it does, `randomness` on the registry is the admin, the beacon's `finalize`
+cannot charge anybody, and every round looks healthy.
+
 The no-shows are charged whether the round succeeds or fails. Otherwise
 withholding to force a failure would cost less than withholding to flip a bit,
 and the cheaper attack is the one that gets used.
@@ -612,7 +626,7 @@ Soroban returns these as `Error(Contract, #n)`.
 | 8 | `StakeTooLow` | Below `min_stake` |
 | 9 | `StillBonded` | Withdrawal before `unbonding_until` |
 | 10 | `NodeExiting` | |
-| 11 | `InvalidAmount` | |
+| 11 | `InvalidAmount` | Also a `min_stake` outside 1 stroop – 10 million XLM |
 | 12 | `RewardPoolExhausted` | |
 | 13 | `SlashPoolExhausted` | |
 | 14 | `InvalidConfig` | A zero `unbonding_period` or `jail_period` |

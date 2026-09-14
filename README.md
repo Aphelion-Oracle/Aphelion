@@ -319,7 +319,7 @@ repository, not the target architecture.
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
 | `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 148 |
-| `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 38 |
+| `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 41 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
@@ -332,14 +332,14 @@ repository, not the target architecture.
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 9 |
 | Operator status page — five reads, one verdict, an exit code | ✅ Implemented | 17 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
-| `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 34 |
+| `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
 | Testnet deployment | 📋 Planned | — |
 | Mainnet deployment | 📋 Planned | — |
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-507 tests in total: 224 off-chain (`cargo test --workspace`), 249 against the
-contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
+516 tests in total: 224 off-chain (`cargo test --workspace`), 252 against the
+contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
 The off-chain 224 are: 26 in `aphelion-core`, 148 in the node's library, 5 in
@@ -1128,8 +1128,29 @@ never have an answer" and "this round has not finished" are different facts and
 only one is worth waiting on. Either way the no-shows are charged — otherwise
 withholding to force a failure would cost less than withholding to flip a bit.
 
+### Deploying it
+
+`scripts/deploy.sh` deploys and initialises the beacon alongside the other
+contracts, hands it to the timelock, and — the step that is easy to miss —
+points the registry at it:
+
+```bash
+stellar contract invoke --id <registry> -- set_randomness --randomness <beacon>
+```
+
+The registry authorises the no-show penalty against exactly that address, and
+it starts at the **admin** rather than unset. A deployment that forgets this
+gets rounds that finalize cleanly and charge nobody: the one failure here that
+looks exactly like success from every other angle. `verify-deployment.sh`
+checks for it, and there are six cases in `tests/deployment/run.sh` covering
+each way the wiring can be wrong.
+
+Set `APHELION_SKIP_RANDOMNESS=1` to leave it undeployed. A network that only
+wants prices is complete without one, and the verifier reports its absence as a
+fact about the deployment rather than a fault in it.
+
 > [!NOTE]
-> The contract is implemented and tested; **the node does not take part in it
+> The contract is deployed and verified; **the node does not take part in it
 > yet**. The commit/reveal loop and its CLI are the next step, in the shape the
 > committee commands took: nothing automatic that spends an operator's money
 > without them asking. Until then a round needs participants driving the

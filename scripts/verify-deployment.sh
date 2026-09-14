@@ -82,6 +82,9 @@ REGISTRY="${APHELION_REGISTRY_CONTRACT:-$(from_record .contracts.registry)}"
 AGGREGATOR="${APHELION_AGGREGATOR_CONTRACT:-$(from_record .contracts.aggregator)}"
 SLASHING="${APHELION_SLASHING_CONTRACT:-$(from_record .contracts.slashing)}"
 GOVERNANCE="${APHELION_GOVERNANCE_CONTRACT:-$(from_record .contracts.governance)}"
+# Optional: a network that only wants prices never deploys one, so an absent
+# randomness contract is a fact about the deployment rather than a fault in it.
+RANDOMNESS="${APHELION_RANDOMNESS_CONTRACT:-$(from_record .contracts.randomness)}"
 
 for pair in "REGISTRY:registry" "AGGREGATOR:aggregator" "SLASHING:slashing"; do
     var="${pair%%:*}"
@@ -165,6 +168,10 @@ section "Reachability ($NETWORK, $RPC_URL)"
 REG_CFG="$(invoke "$REGISTRY" get_config || true)"
 AGG_CFG="$(invoke "$AGGREGATOR" get_config || true)"
 SLA_CFG="$(invoke "$SLASHING" get_config || true)"
+RND_CFG=""
+if [[ -n "$RANDOMNESS" ]]; then
+    RND_CFG="$(invoke "$RANDOMNESS" get_config || true)"
+fi
 
 unreachable=0
 for pair in "REG_CFG:registry:$REGISTRY" "AGG_CFG:aggregator:$AGGREGATOR" "SLA_CFG:slashing:$SLASHING"; do
@@ -233,6 +240,36 @@ expect "slashing -> registry" \
     "The slashing contract resolves accused nodes and committee eligibility" \
     "through this address."
 
+# The beacon's one penalty depends on a call that is easy to leave out, because
+# it is the only piece of wiring that runs after a contract the registry knew
+# nothing about at initialisation.
+if [[ -n "$RANDOMNESS" ]]; then
+    if [[ -n "$RND_CFG" ]] && jq -e 'type == "object"' <<<"$RND_CFG" >/dev/null 2>&1; then
+        ok "randomness answers get_config  ($RANDOMNESS)"
+    else
+        fail "randomness does not answer get_config  ($RANDOMNESS)" \
+            "The deployment record names a randomness contract at this address" \
+            "and nothing is there. Either it failed to deploy or the record is" \
+            "pointing at the wrong network."
+    fi
+
+    expect "registry -> randomness" \
+        "$(jq -r .randomness <<<"$REG_CFG")" "$RANDOMNESS" \
+        "The registry only accepts a no-show penalty from this address, and it" \
+        "starts at the admin rather than unset. Left unpointed, every beacon" \
+        "round finalizes cleanly and charges nobody -- the one failure here" \
+        "that looks exactly like success."
+
+    expect "randomness -> registry" \
+        "$(jq -r .registry <<<"$RND_CFG")" "$REGISTRY" \
+        "The randomness contract asks this address who may commit, and charges" \
+        "no-shows through it."
+else
+    skip "randomness not deployed" \
+        "No randomness contract in the deployment record. A network that only" \
+        "wants prices is complete without one."
+fi
+
 REG_TOKEN="$(jq -r .token <<<"$REG_CFG")"
 AGG_TOKEN="$(jq -r .token <<<"$AGG_CFG")"
 SLA_TOKEN="$(jq -r .token <<<"$SLA_CFG")"
@@ -267,9 +304,13 @@ if [[ -z "$GOV_CFG" ]]; then
 else
     DEPLOYER="$(from_record .deployer)"
     handover_complete=1
-    for pair in "registry:$(jq -r .admin <<<"$REG_CFG")" \
-                "aggregator:$(jq -r .admin <<<"$AGG_CFG")" \
-                "slashing:$(jq -r .admin <<<"$SLA_CFG")"; do
+    admin_pairs=("registry:$(jq -r .admin <<<"$REG_CFG")"
+                 "aggregator:$(jq -r .admin <<<"$AGG_CFG")"
+                 "slashing:$(jq -r .admin <<<"$SLA_CFG")")
+    if [[ -n "$RND_CFG" ]]; then
+        admin_pairs+=("randomness:$(jq -r .admin <<<"$RND_CFG")")
+    fi
+    for pair in "${admin_pairs[@]}"; do
         name="${pair%%:*}"
         admin="${pair##*:}"
         if [[ "$admin" == "$GOVERNANCE" ]]; then

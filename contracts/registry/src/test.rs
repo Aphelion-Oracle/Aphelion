@@ -740,3 +740,95 @@ fn the_shipped_minimum_stake_sits_inside_its_bounds() {
     let configured = h.registry.get_config().min_stake;
     assert!((MIN_MIN_STAKE..=MAX_MIN_STAKE).contains(&configured));
 }
+
+// -- who may take stake ------------------------------------------------------
+//
+// Every other test in this suite runs under `mock_all_auths`, which authorises
+// everything and therefore cannot see an authorisation mistake at all. These
+// three do not, and they exist because the randomness contract shipped calling
+// `slash` — which the registry authorises against the *slashing* contract — and
+// the whole suite stayed green, because the mock said yes on its behalf.
+
+use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+use soroban_sdk::IntoVal;
+
+#[test]
+fn the_randomness_contract_may_charge_a_no_show() {
+    let h = setup();
+    let (_owner, pubkey) = h.register_node(1);
+    let randomness = Address::generate(&h.env);
+    h.registry.set_randomness(&randomness);
+
+    let before = h.registry.get_node(&pubkey).unwrap();
+    let args = (pubkey.clone(), 500u32, 1_000_000i128);
+    h.env.mock_auths(&[MockAuth {
+        address: &randomness,
+        invoke: &MockAuthInvoke {
+            contract: &h.registry.address,
+            fn_name: "slash_no_show",
+            args: args.clone().into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    h.registry.slash_no_show(&pubkey, &500u32, &1_000_000i128);
+
+    let after = h.registry.get_node(&pubkey).unwrap();
+    assert_eq!(after.stake, before.stake - 1_000_000);
+    assert_eq!(after.reputation, before.reputation - 500);
+}
+
+#[test]
+fn the_randomness_contract_may_not_use_the_dispute_penalty() {
+    // The two entry points take stake for unrelated reasons and are authorised
+    // against different addresses. Sharing one would mean a bug in either
+    // contract could reach the other's power.
+    let h = setup();
+    let (_owner, pubkey) = h.register_node(1);
+    let randomness = Address::generate(&h.env);
+    h.registry.set_randomness(&randomness);
+
+    let args = (pubkey.clone(), 500u32, 1_000_000i128);
+    h.env.mock_auths(&[MockAuth {
+        address: &randomness,
+        invoke: &MockAuthInvoke {
+            contract: &h.registry.address,
+            fn_name: "slash",
+            args: args.into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h
+        .registry
+        .try_slash(&pubkey, &500u32, &1_000_000i128)
+        .is_err());
+}
+
+#[test]
+fn a_deployment_that_forgets_set_randomness_cannot_charge_a_no_show() {
+    // `randomness` starts at the admin, so the beacon's one penalty silently
+    // does nothing until a deployment points it somewhere. That is the failure
+    // `scripts/verify-deployment.sh` looks for.
+    let h = setup();
+    let (_owner, pubkey) = h.register_node(1);
+    assert_eq!(
+        h.registry.get_config().randomness,
+        h.admin,
+        "unset, it is the admin"
+    );
+
+    let beacon = Address::generate(&h.env);
+    let args = (pubkey.clone(), 500u32, 1_000_000i128);
+    h.env.mock_auths(&[MockAuth {
+        address: &beacon,
+        invoke: &MockAuthInvoke {
+            contract: &h.registry.address,
+            fn_name: "slash_no_show",
+            args: args.into_val(&h.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(h
+        .registry
+        .try_slash_no_show(&pubkey, &500u32, &1_000_000i128)
+        .is_err());
+}

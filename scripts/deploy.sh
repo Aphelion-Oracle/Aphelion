@@ -82,6 +82,29 @@ READ_FEE="${APHELION_READ_FEE:-0}"
 FEEDS="${APHELION_FEEDS:-BTC_USD ETH_USD XLM_USD}"
 HEARTBEAT="${APHELION_HEARTBEAT:-300}"
 
+# -- randomness ------------------------------------------------------------
+#
+# The beacon is optional. APHELION_SKIP_RANDOMNESS=1 leaves it undeployed, and
+# a network that only wants prices loses nothing by doing so.
+COMMIT_WINDOW="${APHELION_COMMIT_WINDOW:-300}"
+REVEAL_WINDOW="${APHELION_REVEAL_WINDOW:-300}"
+# Three independent secrets before a beacon is published at all. The same
+# figure as the price quorum and for the same reason: it is the number of
+# parties the round insists took part, not a liveness target.
+MIN_PARTICIPANTS="${APHELION_MIN_PARTICIPANTS:-3}"
+BEACON_INTERVAL="${APHELION_BEACON_INTERVAL:-600}"
+# Withholding a reveal is the one attack commit-reveal cannot prevent, so it is
+# priced. Zero by default like the other penalties: a new network should not
+# start by taking stake from operators still learning to run a node.
+NO_SHOW_REP_PENALTY="${APHELION_NO_SHOW_REP_PENALTY:-500}"
+NO_SHOW_SLASH="${APHELION_NO_SHOW_SLASH:-0}"
+
+if [[ -n "${APHELION_SKIP_RANDOMNESS:-}" ]]; then
+    RANDOMNESS_ENABLED=0
+else
+    RANDOMNESS_ENABLED=1
+fi
+
 # -- slashing --------------------------------------------------------------
 COMMITTEE="${APHELION_COMMITTEE:-$APHELION_ADMIN_ACCOUNT}"
 DISPUTE_QUORUM="${APHELION_DISPUTE_QUORUM:-1}"
@@ -263,6 +286,34 @@ if (( MIN_STAKE < 1 || MIN_STAKE > 100000000000000 )); then
     exit 64
 fi
 
+# The randomness contract's own bounds, mirrored like the rest.
+if (( RANDOMNESS_ENABLED )); then
+    if (( COMMIT_WINDOW < 30 || COMMIT_WINDOW > 86400 )); then
+        echo "error: APHELION_COMMIT_WINDOW ($COMMIT_WINDOW s) must be between" >&2
+        echo "30 and a day (86400). Below the floor a node misses the window to" >&2
+        echo "a slow ledger rather than to inattention." >&2
+        exit 64
+    fi
+    if (( REVEAL_WINDOW < 30 || REVEAL_WINDOW > 86400 )); then
+        echo "error: APHELION_REVEAL_WINDOW ($REVEAL_WINDOW s) must be between" >&2
+        echo "30 and a day (86400)." >&2
+        exit 64
+    fi
+    if (( MIN_PARTICIPANTS < 2 || MIN_PARTICIPANTS > 100 )); then
+        echo "error: APHELION_MIN_PARTICIPANTS ($MIN_PARTICIPANTS) must be" >&2
+        echo "between 2 and 100. One participant is a value one party chose" >&2
+        echo "alone, which is not a beacon however it is labelled." >&2
+        exit 64
+    fi
+    if (( BEACON_INTERVAL < COMMIT_WINDOW + REVEAL_WINDOW )); then
+        echo "error: APHELION_BEACON_INTERVAL ($BEACON_INTERVAL s) is shorter" >&2
+        echo "than one round's windows ($COMMIT_WINDOW + $REVEAL_WINDOW s). The" >&2
+        echo "next round could not open until the previous one had closed" >&2
+        echo "anyway, so this only reads as a cadence the beacon cannot keep." >&2
+        exit 64
+    fi
+fi
+
 # The guardian authorises `initialize`, and the stellar CLI signs with exactly
 # one account. If the guardian is somebody else -- which is the arrangement
 # worth having -- their secret has to be here too, and the account has to be
@@ -291,7 +342,7 @@ if [[ -n "$(printf '%s\n' $PROPOSERS | sort | uniq -d)" ]]; then
     exit 64
 fi
 
-for wasm in registry aggregator slashing governance; do
+for wasm in registry aggregator slashing governance randomness; do
     if [[ ! -f "$WASM_DIR/aphelion_$wasm.wasm" ]]; then
         # Checked one by one rather than on the registry alone: a tree built
         # before the timelock existed has three of the four, and would
@@ -386,6 +437,13 @@ echo "==> Deploying governance"
 GOVERNANCE="$(deploy aphelion_governance.wasm)"
 echo "    $GOVERNANCE"
 
+RANDOMNESS=""
+if (( RANDOMNESS_ENABLED )); then
+    echo "==> Deploying randomness"
+    RANDOMNESS="$(deploy aphelion_randomness.wasm)"
+    echo "    $RANDOMNESS"
+fi
+
 echo
 echo "==> Initialising registry"
 invoke "$REGISTRY" initialize \
@@ -463,6 +521,33 @@ invoke "$SLASHING" initialize \
     --config "$SLASHING_CONFIG" \
     --committee "$COMMITTEE_JSON"
 
+if (( RANDOMNESS_ENABLED )); then
+    echo "==> Initialising randomness"
+    RANDOMNESS_CONFIG="$(jq -nc \
+        --arg admin "$APHELION_ADMIN_ACCOUNT" \
+        --arg registry "$REGISTRY" \
+        --argjson commit_window "$COMMIT_WINDOW" \
+        --argjson reveal_window "$REVEAL_WINDOW" \
+        --argjson min_participants "$MIN_PARTICIPANTS" \
+        --argjson min_round_interval "$BEACON_INTERVAL" \
+        --argjson no_show_rep_penalty "$NO_SHOW_REP_PENALTY" \
+        --arg no_show_slash "$NO_SHOW_SLASH" \
+        '{admin: $admin, registry: $registry, commit_window: $commit_window,
+          reveal_window: $reveal_window, min_participants: $min_participants,
+          min_round_interval: $min_round_interval,
+          no_show_rep_penalty: $no_show_rep_penalty,
+          no_show_slash: $no_show_slash}')"
+    invoke "$RANDOMNESS" initialize --config "$RANDOMNESS_CONFIG"
+
+    # Without this the beacon's one penalty silently does nothing: the registry
+    # authorises `slash_no_show` against its `randomness` address, which starts
+    # at the admin. A separate call rather than an eighth argument to
+    # `registry.initialize`, because the beacon is optional and the contract
+    # does not exist yet when the registry is set up.
+    echo "==> Pointing the registry at the randomness contract"
+    invoke "$REGISTRY" set_randomness --randomness "$RANDOMNESS"
+fi
+
 echo "==> Initialising governance"
 GOVERNANCE_CONFIG="$(jq -nc \
     --arg guardian "$GUARDIAN" \
@@ -505,6 +590,12 @@ if (( HANDOVER )); then
         --config "$(jq -c --arg gov "$GOVERNANCE" '.admin = $gov' <<<"$SLASHING_CONFIG")"
     echo "    slashing   -> the timelock"
 
+    if (( RANDOMNESS_ENABLED )); then
+        invoke "$RANDOMNESS" set_config \
+            --config "$(jq -c --arg gov "$GOVERNANCE" '.admin = $gov' <<<"$RANDOMNESS_CONFIG")"
+        echo "    randomness -> the timelock"
+    fi
+
     ADMIN_NOW="$GOVERNANCE"
 else
     echo
@@ -530,11 +621,13 @@ jq -nc \
     --arg aggregator "$AGGREGATOR" \
     --arg slashing "$SLASHING" \
     --arg governance "$GOVERNANCE" \
+    --arg randomness "$RANDOMNESS" \
     --arg deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     '{network: $network, network_passphrase: $passphrase, rpc_url: $rpc,
       deployer: $deployer, admin: $admin, guardian: $guardian, token: $token,
-      contracts: {registry: $registry, aggregator: $aggregator,
-                  slashing: $slashing, governance: $governance},
+      contracts: ({registry: $registry, aggregator: $aggregator,
+                   slashing: $slashing, governance: $governance}
+                  + (if $randomness == "" then {} else {randomness: $randomness} end)),
       deployed_at: $deployed_at}' | jq . > "$RECORD"
 
 # Whether the separation the guardian exists for is actually present. It is a
@@ -587,6 +680,7 @@ Deployed.
   aggregator : $AGGREGATOR
   slashing   : $SLASHING
   governance : $GOVERNANCE
+  randomness : ${RANDOMNESS:-not deployed (APHELION_SKIP_RANDOMNESS)}
 
 Written to deployments/$NETWORK.json (gitignored: contract ids are per
 deployment, and a committed one is a contract id somebody will paste into the
@@ -601,10 +695,12 @@ Next:
        registry_contract   = "$REGISTRY"
        aggregator_contract = "$AGGREGATOR"
        slashing_contract   = "$SLASHING"
+       randomness_contract = "${RANDOMNESS:-}"
 
-     The third is optional and worth setting: without it a node cannot tell
-     its operator that a dispute has been filed against them, or that an
-     election is taking ballots.
+     The last two are optional. Without the slashing contract a node cannot
+     tell its operator that a dispute has been filed against them, or that an
+     election is taking ballots. Without the randomness contract it simply
+     does not take part in the beacon.
   3. Register the node:
        APHELION_REGISTRY_CONTRACT=$REGISTRY \\
          scripts/register-node.sh "\$(aphelion-node pubkey)"
