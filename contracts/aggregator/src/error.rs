@@ -7,13 +7,26 @@ pub enum AggregatorError {
     AlreadyInitialized = 1,
     NotInitialized = 2,
     NotAdmin = 3,
-    /// A configuration value that could never work was supplied — a quorum of
-    /// zero, a negative fee, a history ring of length zero. Rejected at the
-    /// point it is set rather than at the round it would have broken.
+    /// A configuration value that could never work was supplied — a negative
+    /// fee, a negative reward, a heartbeat of zero. Rejected at the point it
+    /// is set rather than at the round it would have broken.
+    ///
+    /// Values that *would* work and should still not be allowed are
+    /// `ParameterOutOfRange` instead.
     InvalidConfig = 4,
     /// An address that must be a contract (the registry, this aggregator) is
     /// an account address instead.
     NotContractAddress = 5,
+    /// A parameter is outside the range this contract publishes in
+    /// `param_bounds`. Distinct from `InvalidConfig`: the value would work, it
+    /// just stops the parameter meaning what its name says — a quorum of one,
+    /// a deviation band no price can fall outside. Governance may tune these;
+    /// it may not tune them past the point where they are guarantees.
+    ParameterOutOfRange = 6,
+    /// Two parameters that are each within range and cannot both hold — a
+    /// future-drift tolerance wider than the staleness window, an absence
+    /// threshold shorter than the time a round is allowed to stay open.
+    InconsistentConfig = 7,
 
     /// No such feed, or the feed has been disabled.
     UnknownFeed = 10,

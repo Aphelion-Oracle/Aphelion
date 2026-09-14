@@ -213,6 +213,56 @@ if (( TIMELOCK_GRACE < 86400 || TIMELOCK_GRACE > 2592000 )); then
     exit 64
 fi
 
+# The aggregator's own parameter bounds, mirrored for the same reason as the
+# timelock's: the contract enforces them, and an operator would rather read a
+# sentence here than decode contract error #6 out of a transaction they have
+# already paid for. The contract publishes them through `param_bounds`, which
+# is what to check against if these ever look out of date.
+if (( QUORUM < 2 || QUORUM > 100 )); then
+    echo "error: APHELION_QUORUM ($QUORUM) must be between 2 and 100. A quorum" >&2
+    echo "of one makes the aggregator a relay for a single key, which is the" >&2
+    echo "failure the whole network exists to remove." >&2
+    exit 64
+fi
+
+if (( MAX_DEVIATION_BPS < 1 || MAX_DEVIATION_BPS > 10000 )); then
+    echo "error: APHELION_MAX_DEVIATION_BPS ($MAX_DEVIATION_BPS) must be" >&2
+    echo "between 1 and 10000. Above 100% a submission would have to be more" >&2
+    echo "than double the median to be penalised, so the outlier penalty stops" >&2
+    echo "existing while still reading like a safety limit." >&2
+    exit 64
+fi
+
+if (( MAX_STALENESS < 1 || MAX_STALENESS > 86400 )); then
+    echo "error: APHELION_MAX_STALENESS ($MAX_STALENESS s) must be between 1" >&2
+    echo "and a day (86400). Past that, \"the current price\" is not a" >&2
+    echo "description of anything." >&2
+    exit 64
+fi
+
+if (( MAX_FUTURE_DRIFT >= MAX_STALENESS )); then
+    echo "error: APHELION_MAX_FUTURE_DRIFT ($MAX_FUTURE_DRIFT s) must be less" >&2
+    echo "than APHELION_MAX_STALENESS ($MAX_STALENESS s). Otherwise a node can" >&2
+    echo "submit a price that is not yet stale and never has been current." >&2
+    exit 64
+fi
+
+if (( ABSENCE_THRESHOLD <= ROUND_TIMEOUT )); then
+    echo "error: APHELION_ABSENCE_THRESHOLD ($ABSENCE_THRESHOLD s) must be" >&2
+    echo "greater than APHELION_ROUND_TIMEOUT ($ROUND_TIMEOUT s). A node" >&2
+    echo "chargeable as absent sooner than a round can close is a node charged" >&2
+    echo "for being on time." >&2
+    exit 64
+fi
+
+if (( MIN_STAKE < 1 || MIN_STAKE > 100000000000000 )); then
+    echo "error: APHELION_MIN_STAKE ($MIN_STAKE stroops) must be between 1 and" >&2
+    echo "10 million XLM (100000000000000). A bond above that closes" >&2
+    echo "registration to newcomers without any proposal having to say so," >&2
+    echo "and leaves every already-bonded node untouched." >&2
+    exit 64
+fi
+
 # The guardian authorises `initialize`, and the stellar CLI signs with exactly
 # one account. If the guardian is somebody else -- which is the arrangement
 # worth having -- their secret has to be here too, and the account has to be

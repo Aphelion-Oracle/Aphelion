@@ -142,3 +142,107 @@ pub enum DataKey {
 /// days of expiry.
 pub const TTL_THRESHOLD: u32 = 120_960;
 pub const TTL_EXTEND: u32 = 518_400;
+
+// ---------------------------------------------------------------------------
+// Governable parameter bounds
+// ---------------------------------------------------------------------------
+//
+// Every parameter above is reachable by a timelocked proposal, and until these
+// existed the only check on the value in that proposal was that somebody read
+// it. `validate_config` rejected a quorum of zero and a negative fee — values
+// that could never work — and accepted every value that merely destroys the
+// guarantees the network is for: a quorum of one, a deviation band wider than
+// any price could fall outside, a staleness window measured in years.
+//
+// The delay is not a substitute for this. It gives operators time to notice and
+// unbond, which protects them individually and does nothing for a consumer
+// reading the feed. A bound the contract enforces cannot be executed past.
+//
+// The bounds are deliberately wide. They are not an opinion about how the
+// network should be tuned — that is what governance is for — they rule out the
+// values at which a parameter stops meaning what its name says. The same
+// pattern the governance contract already uses for `MIN_DELAY`/`MAX_DELAY`.
+
+/// Two, not three. Three is the smallest quorum with a median that is somebody
+/// else's number, and would be the better operating floor — but the floor a
+/// contract enforces and the floor a network should choose are different
+/// questions, and only one of them belongs here. What this rules out is one:
+/// a quorum of one makes the aggregator a relay for a single key, which is the
+/// exact failure the whole design exists to remove.
+pub const MIN_QUORUM: u32 = 2;
+/// Every submission in a round is iterated to close it, so the ceiling is a
+/// bound on the work one transaction can do, not a view about network size.
+pub const MAX_QUORUM: u32 = 100;
+
+pub const MIN_WEIGHT_BPS_FLOOR: u32 = 1;
+/// A hundred nodes at full weight. Above this no achievable set of submissions
+/// could close a round, so the feed would be silently disabled by a number
+/// that reads like a safety margin.
+pub const MAX_WEIGHT_BPS_FLOOR: u32 = 1_000_000;
+
+pub const MIN_DEVIATION_BPS: u32 = 1;
+/// 100%. A band wider than this cannot be fallen out of — a price would have
+/// to be more than double the median to be penalised — so the outlier penalty
+/// becomes unreachable and dishonest submissions stop costing anything.
+pub const MAX_DEVIATION_BPS: u32 = 10_000;
+
+pub const MIN_STALENESS: u64 = 1;
+/// A day. Past this, "the current price" is not a description of anything.
+pub const MAX_STALENESS: u64 = 24 * 3600;
+
+/// An hour of tolerance for a clock running fast is already generous; beyond
+/// it the check is not a tolerance, it is an invitation to timestamp forward.
+pub const MAX_FUTURE_DRIFT_LIMIT: u64 = 3600;
+
+/// A day. A feed that may publish at most once a day is a feed nothing can
+/// safely borrow against, and the heartbeat advertised to consumers would be
+/// a promise the contract refuses to let nodes keep.
+pub const MAX_ROUND_INTERVAL: u64 = 24 * 3600;
+
+pub const MIN_ROUND_TIMEOUT: u64 = 1;
+pub const MAX_ROUND_TIMEOUT: u64 = 24 * 3600;
+
+pub const MIN_ABSENCE_THRESHOLD: u64 = 1;
+/// Thirty days. An absence nobody may charge for a month is an absence the
+/// network is carrying for a month.
+pub const MAX_ABSENCE_THRESHOLD: u64 = 30 * 24 * 3600;
+
+pub const MIN_HISTORY_LEN: u32 = 1;
+/// The ring is read in full to compute a TWAP, so this bounds that read.
+pub const MAX_HISTORY_LEN: u32 = 1_000;
+
+/// The registry's whole reputation scale. A penalty of more than the maximum
+/// reputation is a penalty that jails on the first mistake whatever the node's
+/// standing, which is a decision for the jail threshold rather than a side
+/// effect of an outlier band.
+pub const MAX_OUTLIER_REP_PENALTY: u32 = 10_000;
+
+/// The bounds, readable from the chain.
+///
+/// Governance proposals are a target, a function and a `Vec<Val>`, and the
+/// delay is spent with a reviewer looking at that blob. Publishing the limits
+/// means the check can be made before the proposal is queued rather than
+/// discovered when it executes — and means the node's tooling can show an
+/// operator what range a number is allowed to move in without that range being
+/// duplicated off chain, where it would go stale.
+#[contracttype]
+#[derive(Clone)]
+pub struct ParamBounds {
+    pub min_quorum: u32,
+    pub max_quorum: u32,
+    pub min_weight_bps_floor: u32,
+    pub max_weight_bps_floor: u32,
+    pub min_deviation_bps: u32,
+    pub max_deviation_bps: u32,
+    pub min_staleness: u64,
+    pub max_staleness: u64,
+    pub max_future_drift_limit: u64,
+    pub max_round_interval: u64,
+    pub min_round_timeout: u64,
+    pub max_round_timeout: u64,
+    pub min_absence_threshold: u64,
+    pub max_absence_threshold: u64,
+    pub min_history_len: u32,
+    pub max_history_len: u32,
+    pub max_outlier_rep_penalty: u32,
+}

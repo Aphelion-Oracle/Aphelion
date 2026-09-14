@@ -710,3 +710,33 @@ fn a_zero_jail_term_is_refused_at_deployment() {
         &0,
     );
 }
+
+// -- governable parameter bounds --------------------------------------------
+
+use crate::types::{MAX_MIN_STAKE, MIN_MIN_STAKE};
+
+#[test]
+fn the_minimum_stake_cannot_be_raised_until_nobody_can_join() {
+    // A proposal that served its delay and was not vetoed, and still must not
+    // land. Raising the bond past any reachable balance closes registration to
+    // newcomers while leaving every bonded node untouched, so the operators
+    // who would object are the ones who never see it.
+    let h = setup();
+    assert!(h.registry.try_set_min_stake(&(MAX_MIN_STAKE + 1)).is_err());
+    assert!(h.registry.try_set_min_stake(&MAX_MIN_STAKE).is_ok());
+}
+
+#[test]
+fn the_minimum_stake_must_stay_a_stake() {
+    let h = setup();
+    assert!(h.registry.try_set_min_stake(&0).is_err());
+    assert!(h.registry.try_set_min_stake(&-1).is_err());
+    assert!(h.registry.try_set_min_stake(&MIN_MIN_STAKE).is_ok());
+}
+
+#[test]
+fn the_shipped_minimum_stake_sits_inside_its_bounds() {
+    let h = setup();
+    let configured = h.registry.get_config().min_stake;
+    assert!((MIN_MIN_STAKE..=MAX_MIN_STAKE).contains(&configured));
+}

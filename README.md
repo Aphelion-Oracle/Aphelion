@@ -319,8 +319,8 @@ repository, not the target architecture.
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
 | `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 148 |
-| `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 35 |
-| `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps | ✅ Implemented | 52 |
+| `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 38 |
+| `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
@@ -336,11 +336,11 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-453 tests in total: 219 off-chain (`cargo test --workspace`), 200 against the
+466 tests in total: 219 off-chain (`cargo test --workspace`), 213 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 34 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network). The
 Byzantine simulation's 6 tests live inside the aggregator crate, so its 52 and
-their 6 are reported as one figure of 58 by `cargo test`. The absence sweep's 11
+their 6 are reported as one figure of 68 by `cargo test`. The absence sweep's 11
 are its own integration suite; the decision it makes has a further 13 unit tests
 counted inside the node's 118. Committee participation is the same shape: its 9
 cover assembling a snapshot off the chain, and the rules applied to that
@@ -526,6 +526,43 @@ become executable and expire, then asks before submitting. `execute` is
 permissionless — the call was fixed when it was queued and the delay is a fact
 about the clock, so there is nothing left for the sender to decide. The
 guardian, and only the guardian, can `cancel` somebody else's.
+
+#### What governance may not do
+
+The timelock decides **when** a parameter changes. It has nothing to say about
+**what to**: a proposal is a target, a function name and a `Vec<Val>`, and the
+delay is worth exactly as much as the review that blob gets. That leaves a
+whole class of change which is legitimate on its face, serves its delay, is not
+vetoed, and destroys the thing the parameter was named after:
+
+| Change | Individually plausible | What it actually does |
+| --- | --- | --- |
+| `quorum = 1` | "we have few operators right now" | The aggregator becomes a relay for one key |
+| `max_deviation_bps = 50000` | "widen the band, we get false positives" | No price can fall outside it; lying stops costing anything |
+| `max_staleness = 31536000` | "tolerate slow ledgers" | A year-old observation is accepted as current |
+| `min_stake = 10¹⁸` | "raise the bond" | Registration closes to newcomers; bonded nodes never notice |
+| `absence_threshold = 60`, `round_timeout = 300` | both look fine | Nodes are charged for absence while still on time |
+
+So each contract bounds its own parameters, and publishes the bounds:
+
+```bash
+stellar contract invoke --id <aggregator> -- param_bounds
+```
+
+A value outside them is refused by the contract — `ParameterOutOfRange` (#6),
+or `InconsistentConfig` (#7) for a pair that is each in range and cannot both
+hold. Governance may tune these numbers; it may not tune them past the point
+where they are guarantees. The bounds are deliberately wide: they are not an
+opinion about how the network should be run, they rule out the values at which
+a parameter stops meaning what its name says.
+
+Publishing the bounds rather than only enforcing them is what lets a proposal
+be checked *before* it is queued. A reviewer with `param_bounds` in front of
+them can check the blob against something that cannot have gone stale — which a
+copy of these numbers in a script or a node's config would.
+[`scripts/deploy.sh`](scripts/deploy.sh) mirrors them anyway, for the same
+reason it mirrors the timelock's: a sentence at deploy time beats decoding an
+error code out of a transaction that has already been paid for.
 
 ### Running a node
 
@@ -1405,7 +1442,7 @@ refusal repeats it.
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
 | **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
-| **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance |
+| **5 — Expansion** | Additional feeds · verifiable randomness · non-price data · parameter governance ✅ |
 
 Phase boundaries are gated on the work being done, not on a date.
 

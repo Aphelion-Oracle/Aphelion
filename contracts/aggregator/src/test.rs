@@ -882,8 +882,10 @@ fn an_unconfigured_feed_accepts_nothing() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")] // InvalidConfig
+#[should_panic(expected = "Error(Contract, #6)")] // ParameterOutOfRange
 fn a_quorum_of_zero_is_refused_at_the_point_it_is_set() {
+    // Refused since the beginning; it reports as out of range rather than as
+    // invalid now that the floor is two rather than one.
     let h = setup();
     let mut config = h.aggregator.get_config();
     config.quorum = 0;
@@ -1165,5 +1167,240 @@ mod byzantine {
         for node in 0..3 {
             assert!(h.registry.get_node(&h.pubkey(node)).unwrap().reputation > STARTING_REPUTATION);
         }
+    }
+}
+
+// -- governable parameter bounds --------------------------------------------
+//
+// Everything here is reachable only by the admin, which in a real deployment
+// is the timelock. So each of these is a proposal that served its delay, was
+// not vetoed, and still must not land.
+
+#[cfg(test)]
+mod bounds {
+    use super::*;
+    use crate::types::*;
+
+    /// A config that is valid, to be broken one field at a time.
+    fn config_of(h: &Harness) -> Config {
+        h.aggregator.get_config()
+    }
+
+    #[test]
+    fn the_published_bounds_are_the_bounds_that_are_enforced() {
+        // The point of publishing them is that a proposal can be checked
+        // before it is queued. That is only true while the two agree, and the
+        // failure mode if they drift is a review that passes and an execution
+        // that reverts after the delay has already been served.
+        let h = setup();
+        let b = h.aggregator.param_bounds();
+
+        let edges: std::vec::Vec<(&str, Config, Config)> = std::vec![
+            (
+                "quorum",
+                {
+                    let mut c = config_of(&h);
+                    c.quorum = b.min_quorum;
+                    c
+                },
+                {
+                    let mut c = config_of(&h);
+                    c.quorum = b.min_quorum - 1;
+                    c
+                }
+            ),
+            (
+                "quorum ceiling",
+                {
+                    let mut c = config_of(&h);
+                    c.quorum = b.max_quorum;
+                    c
+                },
+                {
+                    let mut c = config_of(&h);
+                    c.quorum = b.max_quorum + 1;
+                    c
+                }
+            ),
+            (
+                "deviation band",
+                {
+                    let mut c = config_of(&h);
+                    c.max_deviation_bps = b.max_deviation_bps;
+                    c
+                },
+                {
+                    let mut c = config_of(&h);
+                    c.max_deviation_bps = b.max_deviation_bps + 1;
+                    c
+                }
+            ),
+            (
+                "staleness",
+                {
+                    let mut c = config_of(&h);
+                    c.max_staleness = b.max_staleness;
+                    c
+                },
+                {
+                    let mut c = config_of(&h);
+                    c.max_staleness = b.max_staleness + 1;
+                    c
+                }
+            ),
+            (
+                "history ring",
+                {
+                    let mut c = config_of(&h);
+                    c.history_len = b.max_history_len;
+                    c
+                },
+                {
+                    let mut c = config_of(&h);
+                    c.history_len = b.max_history_len + 1;
+                    c
+                }
+            ),
+            (
+                "absence threshold",
+                {
+                    let mut c = config_of(&h);
+                    c.absence_threshold = b.max_absence_threshold;
+                    c
+                },
+                {
+                    let mut c = config_of(&h);
+                    c.absence_threshold = b.max_absence_threshold + 1;
+                    c
+                }
+            ),
+        ];
+
+        for (name, inside, outside) in edges {
+            assert!(
+                h.aggregator.try_set_config(&inside).is_ok(),
+                "{name}: the published bound must itself be allowed"
+            );
+            assert!(
+                h.aggregator.try_set_config(&outside).is_err(),
+                "{name}: one past the published bound must be refused"
+            );
+            // Put it back, so the next edge starts from a valid config.
+            h.aggregator.set_config(&base_config(
+                &config_of(&h).admin,
+                &config_of(&h).registry,
+                &config_of(&h).token,
+            ));
+        }
+    }
+
+    #[test]
+    fn a_quorum_of_one_is_refused() {
+        // The single value that turns the aggregator into a relay for one key,
+        // which is the failure the entire network exists to remove. A timelock
+        // cannot stop this on its own: it is one number in a `Vec<Val>` and
+        // the delay is worth exactly as much as the review it gets.
+        let h = setup();
+        let mut c = config_of(&h);
+        c.quorum = 1;
+        assert!(h.aggregator.try_set_config(&c).is_err());
+    }
+
+    #[test]
+    fn a_deviation_band_no_price_could_fall_outside_is_refused() {
+        // Above 100% a submission would have to be more than double the median
+        // to be penalised, so the outlier penalty stops existing and lying
+        // stops costing anything -- while the parameter still reads like a
+        // safety limit.
+        let h = setup();
+        let mut c = config_of(&h);
+        c.max_deviation_bps = 50_000;
+        assert!(h.aggregator.try_set_config(&c).is_err());
+    }
+
+    #[test]
+    fn a_staleness_window_of_a_year_is_refused() {
+        let h = setup();
+        let mut c = config_of(&h);
+        c.max_staleness = 365 * 24 * 3600;
+        assert!(h.aggregator.try_set_config(&c).is_err());
+    }
+
+    #[test]
+    fn a_drift_tolerance_wider_than_the_staleness_window_is_refused() {
+        // Each number is plainly reasonable on its own. Together they let a
+        // node submit a price that is not yet stale and never has been
+        // current, which no single-parameter bound could express.
+        let h = setup();
+        let mut c = config_of(&h);
+        c.max_staleness = 300;
+        c.max_future_drift = 300;
+        assert!(
+            h.aggregator.try_set_config(&c).is_err(),
+            "equal is already too far"
+        );
+
+        c.max_future_drift = 299;
+        assert!(h.aggregator.try_set_config(&c).is_ok());
+    }
+
+    #[test]
+    fn an_absence_threshold_inside_the_round_timeout_is_refused() {
+        // A node chargeable as absent sooner than a round can close is a node
+        // charged for being on time, by anyone willing to pay the fee.
+        let h = setup();
+        let mut c = config_of(&h);
+        c.round_timeout = 600;
+        c.absence_threshold = 600;
+        assert!(
+            h.aggregator.try_set_config(&c).is_err(),
+            "equal is not enough room"
+        );
+
+        c.absence_threshold = 601;
+        assert!(h.aggregator.try_set_config(&c).is_ok());
+    }
+
+    #[test]
+    fn a_history_ring_of_zero_is_refused() {
+        let h = setup();
+        let mut c = config_of(&h);
+        c.history_len = 0;
+        assert!(h.aggregator.try_set_config(&c).is_err());
+    }
+
+    #[test]
+    fn an_outlier_penalty_larger_than_the_whole_reputation_scale_is_refused() {
+        let h = setup();
+        let mut c = config_of(&h);
+        c.outlier_rep_penalty = 10_001;
+        assert!(h.aggregator.try_set_config(&c).is_err());
+    }
+
+    #[test]
+    fn a_negative_fee_is_still_refused_as_invalid_rather_than_out_of_range() {
+        // The two errors mean different things and an operator reading a
+        // reverted proposal should be able to tell which they hit.
+        let h = setup();
+        let mut c = config_of(&h);
+        c.read_fee = -1;
+        assert!(h.aggregator.try_set_config(&c).is_err());
+    }
+
+    #[test]
+    fn the_shipped_defaults_sit_inside_every_bound() {
+        // The deployment script's defaults and these bounds are written in
+        // different files by different hands; this is the test that notices
+        // when one of them moves.
+        let h = setup();
+        let c = config_of(&h);
+        let b = h.aggregator.param_bounds();
+
+        assert!(c.quorum >= b.min_quorum && c.quorum <= b.max_quorum);
+        assert!(c.max_deviation_bps <= b.max_deviation_bps);
+        assert!(c.max_staleness <= b.max_staleness);
+        assert!(c.max_future_drift < c.max_staleness);
+        assert!(c.absence_threshold > c.round_timeout);
+        assert!(c.history_len <= b.max_history_len);
     }
 }

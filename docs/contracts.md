@@ -71,9 +71,15 @@ transaction fee carries no authority at all.
 | `initialize(admin, aggregator, slasher, token, min_stake, unbonding_period, jail_period)` | Admin, once | Traps if already initialised, if `min_stake <= 0`, or if either period is zero |
 | `set_aggregator(aggregator)` | Admin | Repoint after deployment |
 | `set_slasher(slasher)` | Admin | Repoint after deployment |
-| `set_min_stake(min_stake)` | Admin | Does not retroactively jail nodes below the new floor |
+| `set_min_stake(min_stake)` | Admin | 1 stroop – 10 million XLM; does not retroactively jail nodes below the new floor |
 | `set_admin(new_admin)` | Admin | |
 | `get_config()` | Anyone | |
+
+`min_stake` is bounded above as well as below, which is less obvious than it
+looks: the bond is a door as much as a deposit. Set high enough it closes the
+network to newcomers without any proposal having to say so, and every
+already-bonded node is unaffected — so the change is invisible to exactly the
+people who would object to it.
 
 `unbonding_period` and `jail_period` have no setters. Both are promises made to
 operators who bonded stake under them, and a key able to lengthen a jail term
@@ -233,6 +239,35 @@ cost more than the read it charges for.
 | `set_config(config)` | Admin | Validated as a whole, because the parameters constrain each other |
 | `set_feed(feed, enabled, heartbeat, min_nodes)` | Admin | Adds or reconfigures; `min_nodes: 0` means "use the network quorum" |
 | `get_config()` | Anyone | |
+| `param_bounds()` | Anyone | The range every governable parameter must stay inside |
+
+#### Parameter bounds
+
+`set_config` is reachable only by the admin, which in a deployed network is the
+timelock. The timelock decides *when* a change lands and has nothing to say
+about *what to*, so the contract bounds the values themselves:
+
+| Parameter | Range | Why the edge is there |
+| --- | --- | --- |
+| `quorum` | 2 – 100 | One makes the aggregator a relay for a single key |
+| `min_weight_bps` | 1 – 1 000 000 | Above it no achievable set of submissions closes a round |
+| `max_deviation_bps` | 1 – 10 000 | Above 100% nothing can fall outside the band, so lying costs nothing |
+| `max_staleness` | 1 s – 1 day | Past a day, "the current price" describes nothing |
+| `max_future_drift` | 0 – 1 hour, and `< max_staleness` | Otherwise a price can be not-yet-stale and never current |
+| `min_round_interval` | 0 – 1 day | A feed publishing once a day is one nothing can borrow against |
+| `round_timeout` | 1 s – 1 day | |
+| `absence_threshold` | 1 s – 30 days, and `> round_timeout` | Otherwise nodes are charged for absence while still on time |
+| `history_len` | 1 – 1 000 | Read in full to compute a TWAP |
+| `outlier_rep_penalty` | 0 – 10 000 | The registry's whole reputation scale |
+
+A value outside a range traps with `ParameterOutOfRange` (#6); a pair that is
+each in range and cannot both hold traps with `InconsistentConfig` (#7). The
+non-negative fee checks remain `InvalidConfig` (#4) — those are values that
+could never work at all, rather than values that work and mean nothing.
+
+The bounds are wide on purpose. They are not a view about how the network
+should be tuned, which is what governance is for; they rule out the values at
+which a parameter stops being the guarantee its name claims.
 
 ---
 

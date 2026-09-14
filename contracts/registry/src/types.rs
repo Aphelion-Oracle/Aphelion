@@ -28,6 +28,25 @@ pub const REPUTATION_PENALTY: u32 = 500;
 /// Reputation lost for missing a round the node should have participated in.
 pub const REPUTATION_MISS: u32 = 25;
 
+// ---------------------------------------------------------------------------
+// Governable parameter bounds
+// ---------------------------------------------------------------------------
+
+/// The minimum stake is the one number here a proposal can move, and it is a
+/// door as much as a deposit: set it high enough and no new operator can pass
+/// through it, which closes the network to newcomers without any proposal ever
+/// having to say so. Existing nodes are unaffected — their stake is already
+/// bonded — so the change is invisible to exactly the people who would object.
+///
+/// Ten million XLM. Far above anything a network would choose and far below
+/// the value that quietly makes registration impossible, which is all a bound
+/// of this kind should try to be.
+pub const MAX_MIN_STAKE: i128 = 10_000_000 * 10_000_000;
+
+/// One stroop. The floor exists only to keep the stake a stake; how much is a
+/// matter for governance.
+pub const MIN_MIN_STAKE: i128 = 1;
+
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum NodeStatus {

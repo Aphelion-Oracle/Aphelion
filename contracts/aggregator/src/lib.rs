@@ -127,6 +127,35 @@ impl Aggregator {
         Self::load_config(&env)
     }
 
+    /// The range every governable parameter must stay inside.
+    ///
+    /// Published rather than merely enforced so that a proposal can be checked
+    /// before it is queued instead of when it executes. A timelock's delay is
+    /// only worth the review it gets, and a reviewer reading a `Vec<Val>` needs
+    /// something to check it against that cannot have gone stale — which a copy
+    /// of these numbers in a script or a node's config would.
+    pub fn param_bounds(_env: Env) -> ParamBounds {
+        ParamBounds {
+            min_quorum: MIN_QUORUM,
+            max_quorum: MAX_QUORUM,
+            min_weight_bps_floor: MIN_WEIGHT_BPS_FLOOR,
+            max_weight_bps_floor: MAX_WEIGHT_BPS_FLOOR,
+            min_deviation_bps: MIN_DEVIATION_BPS,
+            max_deviation_bps: MAX_DEVIATION_BPS,
+            min_staleness: MIN_STALENESS,
+            max_staleness: MAX_STALENESS,
+            max_future_drift_limit: MAX_FUTURE_DRIFT_LIMIT,
+            max_round_interval: MAX_ROUND_INTERVAL,
+            min_round_timeout: MIN_ROUND_TIMEOUT,
+            max_round_timeout: MAX_ROUND_TIMEOUT,
+            min_absence_threshold: MIN_ABSENCE_THRESHOLD,
+            max_absence_threshold: MAX_ABSENCE_THRESHOLD,
+            min_history_len: MIN_HISTORY_LEN,
+            max_history_len: MAX_HISTORY_LEN,
+            max_outlier_rep_penalty: MAX_OUTLIER_REP_PENALTY,
+        }
+    }
+
     /// Add a feed, or reconfigure an existing one. Admin only.
     pub fn set_feed(env: Env, feed: Symbol, enabled: bool, heartbeat: u64, min_nodes: u32) {
         let config = Self::load_config(&env);
@@ -608,19 +637,54 @@ impl Aggregator {
             .unwrap_or_else(|| panic_with_error!(env, AggregatorError::UnknownFeed))
     }
 
+    /// Every parameter a proposal can reach, checked against the bounds the
+    /// contract publishes in [`Contract::param_bounds`].
+    ///
+    /// Three kinds of check, in order of how much they are worth.
+    ///
+    /// The non-negative fees are the old check, and the weakest: they rule out
+    /// values that could never work at all.
+    ///
+    /// The ranges rule out values that work perfectly and mean nothing — a
+    /// quorum of one, a deviation band no price can fall outside. These are
+    /// the ones the timelock alone could not stop, because a proposal is a
+    /// blob of `Val` and the delay is only as good as the review it gets.
+    ///
+    /// The relational checks are the ones no single-parameter bound could
+    /// express: two numbers that are each plainly reasonable and together
+    /// describe a network that cannot operate.
     fn validate_config(env: &Env, config: &Config) {
-        let sane = config.quorum > 0
-            && config.min_weight_bps > 0
-            && config.max_deviation_bps > 0
-            && config.max_staleness > 0
-            && config.history_len > 0
-            && config.reward_per_submission >= 0
-            && config.outlier_slash >= 0
-            && config.read_fee >= 0
-            && config.round_timeout > 0
-            && config.absence_threshold > 0;
+        let sane =
+            config.reward_per_submission >= 0 && config.outlier_slash >= 0 && config.read_fee >= 0;
         if !sane {
             panic_with_error!(env, AggregatorError::InvalidConfig);
+        }
+
+        let in_range = (MIN_QUORUM..=MAX_QUORUM).contains(&config.quorum)
+            && (MIN_WEIGHT_BPS_FLOOR..=MAX_WEIGHT_BPS_FLOOR).contains(&config.min_weight_bps)
+            && (MIN_DEVIATION_BPS..=MAX_DEVIATION_BPS).contains(&config.max_deviation_bps)
+            && (MIN_STALENESS..=MAX_STALENESS).contains(&config.max_staleness)
+            && config.max_future_drift <= MAX_FUTURE_DRIFT_LIMIT
+            && config.min_round_interval <= MAX_ROUND_INTERVAL
+            && (MIN_ROUND_TIMEOUT..=MAX_ROUND_TIMEOUT).contains(&config.round_timeout)
+            && (MIN_ABSENCE_THRESHOLD..=MAX_ABSENCE_THRESHOLD).contains(&config.absence_threshold)
+            && (MIN_HISTORY_LEN..=MAX_HISTORY_LEN).contains(&config.history_len)
+            && config.outlier_rep_penalty <= MAX_OUTLIER_REP_PENALTY;
+        if !in_range {
+            panic_with_error!(env, AggregatorError::ParameterOutOfRange);
+        }
+
+        // A node may timestamp further ahead than the whole window in which an
+        // observation is valid: it could submit a price that is not yet stale
+        // and never has been current.
+        if config.max_future_drift >= config.max_staleness {
+            panic_with_error!(env, AggregatorError::InconsistentConfig);
+        }
+
+        // A node chargeable as absent sooner than a round can close is a node
+        // charged for being on time.
+        if config.absence_threshold <= config.round_timeout {
+            panic_with_error!(env, AggregatorError::InconsistentConfig);
         }
         // The registry is called cross-contract on every submission; an
         // account address there would fail at the first round rather than at

@@ -132,8 +132,13 @@ impl Registry {
         env.storage().instance().set(&DataKey::Config, &config);
     }
 
+    /// Change the bond required to join. Admin only, which in a deployed
+    /// network is the timelock.
+    ///
+    /// Bounded rather than merely positive: see [`MAX_MIN_STAKE`] for why a
+    /// ceiling on this particular number is a ceiling on who may join.
     pub fn set_min_stake(env: Env, min_stake: i128) {
-        if min_stake <= 0 {
+        if !(MIN_MIN_STAKE..=MAX_MIN_STAKE).contains(&min_stake) {
             panic_with_error!(&env, RegistryError::InvalidAmount);
         }
         let mut config = Self::config(&env);
