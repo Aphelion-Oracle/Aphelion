@@ -19,6 +19,7 @@ use aphelion_node::{api, db, sources, telemetry};
 use clap::{Parser, Subcommand};
 
 mod cmd;
+use cmd::beacon::BeaconCmd;
 use cmd::committee::{DisputeCmd, ElectionCmd};
 
 #[derive(Parser)]
@@ -110,6 +111,15 @@ enum Command {
     Election {
         #[command(subcommand)]
         cmd: ElectionCmd,
+    },
+
+    /// The randomness beacon: commit, reveal, and what this node owes it.
+    ///
+    /// Needs a database: the secret behind a commitment lives there, and a
+    /// node that cannot produce it is penalised.
+    Beacon {
+        #[command(subcommand)]
+        cmd: BeaconCmd,
     },
 
     /// Disputes: file, answer, vote, appeal, settle.
@@ -335,6 +345,11 @@ async fn run() -> Result<()> {
             cmd::committee::election(&config, cmd).await
         }
 
+        Command::Beacon { cmd } => {
+            let config = Config::load(&cli.config)?;
+            cmd::beacon::run(&config, cmd).await
+        }
+
         Command::Dispute { cmd } => {
             let config = Config::load(&cli.config)?;
             cmd::committee::dispute(&config, cmd).await
@@ -491,6 +506,33 @@ async fn serve(config_path: PathBuf, dry_run: bool) -> Result<()> {
     tasks.spawn(sweeper.run(shutdown_rx.clone()));
     if let Some(watch) = watch {
         tasks.spawn(watch.run(config.committee.watch_interval, shutdown_rx.clone()));
+    }
+    // The beacon loop runs whenever a randomness contract is configured, not
+    // only when `participate` is on. Participation gates entering new rounds;
+    // it does not release this node from a commitment already on the ledger,
+    // and the loop is what sends that reveal. An operator who switches
+    // participation off mid-round must still not be slashed for it.
+    if config.network.randomness_contract.is_some() {
+        let config = Arc::clone(&config);
+        let mut rx = shutdown_rx.clone();
+        tasks.spawn(async move {
+            let mut ticker = tokio::time::interval(config.beacon.interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {
+                        // Never fatal. A beacon round is worth a log line and
+                        // the next tick; it is not worth taking the price feed
+                        // down for, and the price feed is what this node is
+                        // staked to run.
+                        if let Err(e) = cmd::beacon::tick(&config).await {
+                            tracing::warn!(error = %e, "beacon tick failed");
+                        }
+                    }
+                    _ = rx.changed() => break,
+                }
+            }
+        });
     }
     {
         let repo = repo.clone();

@@ -317,14 +317,14 @@ repository, not the target architecture.
 
 | Component | Status | Tests |
 | --- | --- | --- |
-| `aphelion-core` — fixed-point prices, aggregation math, signing payload | ✅ Implemented | 26 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 148 |
+| `aphelion-core` — fixed-point prices, aggregation math, signing payloads | ✅ Implemented | 30 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 177 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 41 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
 | `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
 | `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 36 |
-| Randomness participation from the node — commit/reveal loop and CLI | 📋 Planned | — |
+| Randomness participation from the node — commit/reveal loop and CLI | ✅ Implemented | 33 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
@@ -338,13 +338,13 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-516 tests in total: 224 off-chain (`cargo test --workspace`), 252 against the
+549 tests in total: 257 off-chain (`cargo test --workspace`), 252 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 224 are: 26 in `aphelion-core`, 148 in the node's library, 5 in
+The off-chain 257 are: 30 in `aphelion-core`, 177 in the node's library, 5 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 148 — 15 in the harness, and 30 across the
+target, so they are *not* inside the 177 — 15 in the harness, and 30 across the
 three integration suites (duties 9, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
@@ -352,15 +352,15 @@ because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 148. Committee participation is the same shape: its 9 cover assembling a
+node's 177. Committee participation is the same shape: its 9 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 25 more
-unit tests with 12 on decoding what the contract returns, all inside the 148 —
+unit tests with 12 on decoding what the contract returns, all inside the 177 —
 with the 5 command tests in the binary target beside it. The harness's 15 are
 12 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 212 tests and reported 224. The skip prints a `SKIP`
+with no Postgres has run 245 tests and reported 257. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -636,6 +636,7 @@ docker compose logs -f node
 | `status [--json] [--no-probe]` | Identity, chain, standing, feeds, sources and duties in one page, with a verdict and an exit code |
 | `sweep [--commit]` | Show which registered nodes have gone silent; charge them with `--commit` |
 | `duties [--json]` | What the slashing contract is waiting on from this operator, and by when |
+| `beacon status \| tick \| open \| commit \| reveal \| finalize` | The randomness beacon, and what this node owes it |
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
 | `dispute list \| show \| open \| vote \| resolve \| appeal \| settle` | Disputes |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
@@ -1149,12 +1150,40 @@ Set `APHELION_SKIP_RANDOMNESS=1` to leave it undeployed. A network that only
 wants prices is complete without one, and the verifier reports its absence as a
 fact about the deployment rather than a fault in it.
 
-> [!NOTE]
-> The contract is deployed and verified; **the node does not take part in it
-> yet**. The commit/reveal loop and its CLI are the next step, in the shape the
-> committee commands took: nothing automatic that spends an operator's money
-> without them asking. Until then a round needs participants driving the
-> contract themselves.
+### Taking part from a node
+
+```bash
+aphelion-node beacon status      # the round, this node's part in it, what it would do next
+aphelion-node beacon tick        # do that one thing, and stop
+aphelion-node beacon reveal      # open the oldest commitment this node has not
+```
+
+Set `[beacon] participate = true` and a running node does it on a loop. It is
+off by default, like absence sweeps and for the same reason: it spends
+transaction fees on work nobody is obliged to do.
+
+**Participation does not gate revealing.** Once a commitment is on the ledger
+the reveal is owed, and the node sends it whether or not `participate` is still
+true — switching it off stops the node entering new rounds, it does not release
+it from one it is already in. The loop therefore runs whenever a
+`randomness_contract` is configured, not only when participation is on.
+
+> [!IMPORTANT]
+> **The secret is written to Postgres before the commitment is submitted.**
+> Between the two transactions the node holds the only copy of something
+> nothing on chain can reconstruct — the commitment is a hash — and a node that
+> cannot reveal is slashed. Committing the row first means a crash in the gap
+> costs a round instead of stake. It also means **a database restored from a
+> backup older than a commitment cannot open it**: `beacon status` reports that
+> as `SECRET LOST` rather than as nothing to do, because the two look identical
+> from outside and only one of them should wake somebody.
+
+The decision — commit, reveal, finalize, open, or nothing, and which comes
+first — is a pure function in `engine::beacon`, tested against struct literals.
+Its priority rule is the interesting part: **an owed reveal outranks
+everything**, ahead of eligibility and ahead of participation. A node jailed
+since it committed still owes the reveal, and so does one whose operator
+switched the setting off.
 
 ---
 

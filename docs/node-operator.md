@@ -224,6 +224,42 @@ are the ones worth being woken for. Note what is deliberately *not* alerted:
 individual source fetch failures, which happen constantly as exchanges
 rate-limit, and which would train you to ignore the channel.
 
+### Taking part in the randomness beacon
+
+Optional, and only if the deployment runs one (`randomness_contract` in the
+`[network]` section).
+
+```bash
+./target/release/aphelion-node beacon status
+```
+
+Set `[beacon] participate = true` to have a running node commit to each round
+and open one when none is running. Off by default: it spends transaction fees
+on work nobody is obliged to do.
+
+The thing to understand before turning it on is what a commitment obliges you
+to. A round is two transactions — commit, then reveal — separated by a window
+of minutes, and **a node that commits and does not reveal is slashed**. Not for
+being wrong: for going quiet after everyone else has spoken, which the contract
+cannot tell apart from withholding on purpose.
+
+So three things follow, and the node is built around them:
+
+- The secret is written to Postgres **before** the commitment is submitted. A
+  crash between the two costs a round, not stake.
+- Revealing is not gated by `participate`. Switching it off stops the node
+  entering new rounds; it does not release it from one it has already entered,
+  and the loop keeps running to send that reveal.
+- `beacon.interval` must be comfortably shorter than the contract's reveal
+  window. A node that looks once per window can sleep through one. `beacon
+  status` compares the two and warns; the config refuses anything above 120s.
+
+**Back up your database.** This is the one part of the node where restoring
+from a backup older than your last commitment costs money: the commitment is a
+hash, the secret that opens it is only in `beacon_rounds`, and a round whose
+secret is gone is a penalty that cannot be avoided. `beacon status` reports it
+as `SECRET LOST` so that it is at least not a surprise.
+
 ### What governance is about to change
 
 The parameters you bonded under — the minimum stake, the dispute bonds, the

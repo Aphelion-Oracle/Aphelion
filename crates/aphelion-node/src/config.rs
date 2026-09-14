@@ -29,6 +29,8 @@ pub struct Config {
     #[serde(default)]
     pub committee: CommitteeConfig,
     #[serde(default)]
+    pub beacon: BeaconConfig,
+    #[serde(default)]
     pub sources: SourcesConfig,
     #[serde(default)]
     pub feeds: Vec<FeedConfig>,
@@ -63,6 +65,13 @@ pub struct NetworkConfig {
     /// by name when it is missing rather than failing inside the CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slashing_contract: Option<String>,
+    /// Contract id (C...) of the deployed randomness contract.
+    ///
+    /// Optional for the same reason as the slashing contract, and more so: a
+    /// deployment may not run a beacon at all. Without it the node never takes
+    /// part in one, and says so rather than reporting an empty round list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub randomness_contract: Option<String>,
     /// Name of the environment variable holding the Stellar secret seed (S...)
     /// used to pay for submission transactions. Never the seed itself.
     #[serde(default = "default_secret_env")]
@@ -228,6 +237,32 @@ pub struct UpkeepConfig {
     pub max_batch: usize,
 }
 
+/// Taking part in the randomness beacon.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BeaconConfig {
+    /// Commit a secret to each round, and open a round when none is running.
+    ///
+    /// Off by default, like absence sweeps and for the same reason: it spends
+    /// transaction fees on work nobody is obliged to do.
+    ///
+    /// What it does **not** gate is revealing. Once a commitment is on the
+    /// ledger the reveal is owed, and the node will send it whether or not
+    /// this has since been switched off — turning it off stops the node
+    /// entering new rounds, it does not abandon one it is already in. See
+    /// [`crate::engine::beacon`].
+    #[serde(default)]
+    pub participate: bool,
+    /// How often to look at the beacon.
+    ///
+    /// Faster than the upkeep loop and slower than the round loop. It has to
+    /// be comfortably shorter than the contract's reveal window, because a
+    /// node that wakes once per window can miss one entirely — and missing a
+    /// reveal costs stake. `validate` refuses a value that is obviously too
+    /// slow to be safe.
+    #[serde(with = "humantime_serde", default = "default_beacon_interval")]
+    pub interval: Duration,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SourcesConfig {
     #[serde(default = "default_true")]
@@ -328,6 +363,29 @@ impl Config {
                 }
             }
         }
+        // A node polling the beacon slower than this can sleep through a whole
+        // reveal window, and missing a reveal costs stake rather than a round.
+        // The contract's window is not known here -- it is a chain read -- so
+        // this is a ceiling against the shortest one the contract permits
+        // (30s) with room to spare, not a substitute for looking. `beacon
+        // status` compares the two for real.
+        if self.beacon.participate && self.beacon.interval > Duration::from_secs(120) {
+            return Err(NodeError::Config(format!(
+                "beacon.interval is {:?}, which is slow enough to sleep through a reveal \
+                 window; a missed reveal is slashed, so this must be well under the \
+                 randomness contract's reveal_window (120s is the ceiling enforced here)",
+                self.beacon.interval
+            )));
+        }
+        if self.beacon.participate && self.network.randomness_contract.is_none() {
+            return Err(NodeError::Config(
+                "beacon.participate is on but there is no `randomness_contract` in the \
+                 [network] section; copy the `randomness` id out of the deployment record \
+                 written by scripts/deploy.sh"
+                    .into(),
+            ));
+        }
+
         if self.engine.round_interval < self.engine.poll_interval {
             return Err(NodeError::Config(
                 "engine.round_interval must not be shorter than engine.poll_interval".into(),
@@ -440,6 +498,15 @@ impl Default for SourcesConfig {
     }
 }
 
+impl Default for BeaconConfig {
+    fn default() -> Self {
+        Self {
+            participate: false,
+            interval: default_beacon_interval(),
+        }
+    }
+}
+
 impl Default for UpkeepConfig {
     fn default() -> Self {
         Self {
@@ -510,6 +577,14 @@ fn default_max_source_deviation_bps() -> u32 {
 fn default_submit_deviation_bps() -> u32 {
     25
 }
+/// Thirty seconds. The shipped contract default gives a five-minute reveal
+/// window, so this is ten looks at it — enough that losing a few to a slow
+/// ledger or a restart is not the difference between revealing and being
+/// slashed.
+fn default_beacon_interval() -> Duration {
+    Duration::from_secs(30)
+}
+
 fn default_heartbeat() -> Duration {
     Duration::from_secs(300)
 }
@@ -588,6 +663,35 @@ sources = { binance = "BTCUSDT", kraken = "XBTUSD" }
                 );
             }
         }
+    }
+
+    #[test]
+    fn taking_part_in_a_beacon_needs_a_beacon_to_take_part_in() {
+        let bad =
+            minimal_toml().replace("[database]", "[database]\n\n[beacon]\nparticipate = true");
+        let err = parse(&bad).unwrap_err().to_string();
+        assert!(err.contains("randomness_contract"), "{err}");
+    }
+
+    #[test]
+    fn a_beacon_poll_slow_enough_to_miss_a_reveal_is_refused() {
+        // The failure this prevents is not a skipped round. It is a commitment
+        // on the ledger that the node sleeps through opening, which is charged.
+        let bad = minimal_toml().replace(
+            "[database]",
+            "[database]\n\n[beacon]\nparticipate = true\ninterval = \"10m\"\n\n             [network.unused]",
+        );
+        let err = parse(&bad).unwrap_err().to_string();
+        assert!(
+            err.contains("reveal window") || err.contains("randomness_contract"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_beacon_is_off_unless_it_is_asked_for() {
+        let cfg = parse(minimal_toml()).expect("should parse");
+        assert!(!cfg.beacon.participate);
     }
 
     #[test]

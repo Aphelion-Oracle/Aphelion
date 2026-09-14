@@ -5,6 +5,7 @@
 //! on. See [`duty`] for why that line is where it is.
 
 pub mod aggregate;
+pub mod beacon;
 pub mod collector;
 pub mod duty;
 pub mod round;
@@ -12,6 +13,7 @@ pub mod status;
 pub mod upkeep;
 
 pub use aggregate::{aggregate, confidence_bps, Aggregated, AggregationParams};
+pub use beacon::{decide as decide_beacon, Action as BeaconAction, OurPart, OwedReveal};
 pub use collector::{run_retention, Collector};
 pub use duty::{derive as derive_duties, Consequence, Duty, DutyKind, Snapshot, Standing, Watch};
 pub use round::{RoundOutcome, RoundRunner};

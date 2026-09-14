@@ -8,5 +8,6 @@
 //! lives in [`aphelion_node::engine::duty`] where it can be tested without a
 //! chain.
 
+pub mod beacon;
 pub mod committee;
 pub mod status;

@@ -171,6 +171,86 @@ impl Repo {
         Ok(())
     }
 
+    // -- beacon ---------------------------------------------------------------
+
+    /// Store a secret for a beacon round, before anything is submitted.
+    ///
+    /// The ordering is the point, and it is why this is a separate call from
+    /// [`Self::mark_committed`] rather than one write afterwards. Between the
+    /// commitment landing and the reveal, this row is the only copy of a
+    /// secret nothing on chain can reconstruct, and a node that cannot reveal
+    /// is slashed. So the row is committed first and the transaction is sent
+    /// second; a crash in between leaves a secret with no commitment, which
+    /// costs nothing.
+    ///
+    /// Idempotent on `round_id`, so a retry after a failed submission reuses
+    /// the secret it already stored rather than generating a second one the
+    /// first commitment would not open.
+    pub async fn store_beacon_secret(
+        &self,
+        round_id: u64,
+        secret_hex: &str,
+        commitment: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO beacon_rounds (round_id, secret_hex, commitment)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (round_id) DO NOTHING",
+        )
+        .bind(round_id as i64)
+        .bind(secret_hex)
+        .bind(commitment)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// What this node stored for a round, if anything.
+    pub async fn beacon_round(&self, round_id: u64) -> Result<Option<BeaconRow>> {
+        let row = sqlx::query_as::<_, BeaconRow>(
+            "SELECT round_id, secret_hex, commitment, committed_at, revealed_at
+             FROM beacon_rounds WHERE round_id = $1",
+        )
+        .bind(round_id as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Record that the commitment reached the ledger. From here the reveal is
+    /// owed.
+    pub async fn mark_committed(&self, round_id: u64) -> Result<()> {
+        sqlx::query("UPDATE beacon_rounds SET committed_at = now() WHERE round_id = $1")
+            .bind(round_id as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_revealed(&self, round_id: u64) -> Result<()> {
+        sqlx::query("UPDATE beacon_rounds SET revealed_at = now() WHERE round_id = $1")
+            .bind(round_id as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Rounds this node committed to and has not opened, oldest first.
+    ///
+    /// Oldest first because its deadline is the nearest, and the node can only
+    /// send one reveal per tick.
+    pub async fn beacon_reveals_owed(&self) -> Result<Vec<BeaconRow>> {
+        let rows = sqlx::query_as::<_, BeaconRow>(
+            "SELECT round_id, secret_hex, commitment, committed_at, revealed_at
+             FROM beacon_rounds
+             WHERE committed_at IS NOT NULL AND revealed_at IS NULL
+             ORDER BY round_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     // -- rounds -------------------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]

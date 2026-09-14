@@ -780,6 +780,8 @@ submitter.
 | Slashing | `current_election()`, `next_election()`, `get_election(id)`, `candidates(id)`, `ballot_of(id, node)` | The election half of `duties` |
 | Slashing | `open_dispute`, `vote`, `resolve`, `appeal`, `settle` | `aphelion-node dispute ...` |
 | Slashing | `open_election`, `nominate`, `cast_ballot`, `finalize_election` | `aphelion-node election ...` |
+| Randomness | `get_config()`, `round_count()`, `get_round(id)`, `latest()` | `aphelion-node beacon status` |
+| Randomness | `open_round`, `commit`, `reveal`, `finalize` | `aphelion-node beacon ...` |
 
 One decoding rule spans all of them, and it is the one most likely to bite a
 future contract change: a status or phase the node does not recognise is an

@@ -13,6 +13,7 @@
 pub mod cli;
 pub mod committee;
 pub mod mock;
+pub mod randomness;
 pub mod readonly;
 pub mod rpc;
 pub mod stellar;
@@ -30,6 +31,7 @@ pub use committee::{
     ElectionRecord, Receipt, SlashingParams,
 };
 pub use mock::MockChain;
+pub use randomness::{BeaconClient, BeaconParams, ChainRound, CliBeacon};
 pub use readonly::ReadOnlyChain;
 pub use rpc::RpcClient;
 pub use stellar::StellarCli;

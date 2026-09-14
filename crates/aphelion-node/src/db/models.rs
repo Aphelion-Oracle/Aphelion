@@ -150,3 +150,49 @@ pub struct SourceHealthRow {
 fn ser_price<S: serde::Serializer>(p: &Price, s: S) -> std::result::Result<S::Ok, S::Error> {
     s.serialize_str(&p.to_string())
 }
+
+/// One beacon round this node took part in.
+///
+/// `secret_hex` is the only copy: the commitment on the ledger is a hash, and
+/// the contract charges a no-show penalty to anybody who cannot open theirs.
+/// A row missing where a commitment exists is stake already forfeit — see
+/// [`crate::engine::beacon`].
+#[derive(Debug, Clone, FromRow)]
+pub struct BeaconRow {
+    pub round_id: i64,
+    pub secret_hex: String,
+    pub commitment: String,
+    pub committed_at: Option<DateTime<Utc>>,
+    pub revealed_at: Option<DateTime<Utc>>,
+}
+
+impl BeaconRow {
+    pub fn round_id(&self) -> u64 {
+        self.round_id as u64
+    }
+
+    /// The commitment reached the ledger and the secret has not been opened.
+    pub fn reveal_owed(&self) -> bool {
+        self.committed_at.is_some() && self.revealed_at.is_none()
+    }
+
+    /// The stored secret as 32 bytes.
+    ///
+    /// The column is constrained to 64 lowercase hex characters, so a row that
+    /// fails to decode means the table has been edited by hand — which is
+    /// worth an error rather than a zero-filled secret that opens nothing.
+    pub fn secret(&self) -> Result<[u8; 32], crate::error::NodeError> {
+        let bytes = hex::decode(&self.secret_hex).map_err(|e| {
+            crate::error::NodeError::Other(anyhow::anyhow!(
+                "beacon round {}: stored secret is not hex ({e})",
+                self.round_id
+            ))
+        })?;
+        bytes.try_into().map_err(|_| {
+            crate::error::NodeError::Other(anyhow::anyhow!(
+                "beacon round {}: stored secret is not 32 bytes",
+                self.round_id
+            ))
+        })
+    }
+}

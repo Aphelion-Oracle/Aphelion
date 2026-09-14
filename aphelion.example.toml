@@ -28,6 +28,9 @@ aggregator_contract = "C..."
 # a dispute has been filed against it, or that an election is taking ballots.
 # The round loop never touches it.
 slashing_contract   = "C..."
+# Optional. A deployment may not run a randomness beacon at all; leave this
+# unset if yours does not, and the node simply never takes part in one.
+# randomness_contract = "C..."
 
 # Stellar account that pays for submission transactions. Deliberately separate
 # from the signing key above: it can be rotated or shared with a relayer
@@ -119,6 +122,28 @@ max_batch = 25
 # See what a sweep would do, without submitting anything:
 #   aphelion-node sweep
 #   curl -s localhost:8080/v1/upkeep | jq
+
+
+# ---------------------------------------------------------------------------
+# The randomness beacon. Off by default.
+# ---------------------------------------------------------------------------
+
+[beacon]
+# Commit a secret to each round, and open a round when none is running. Like
+# absence sweeps, this spends transaction fees on work nobody is obliged to do,
+# so it is opt-in.
+#
+# What it does NOT gate is revealing. Once a commitment is on the ledger the
+# reveal is owed, and the node sends it whether or not this is still true --
+# turning it off stops the node entering new rounds, it does not abandon one it
+# is already in. A commitment that goes unopened is slashed.
+participate = false
+
+# How often to look at the beacon. This must be comfortably shorter than the
+# contract's reveal window: a node that wakes once per window can sleep through
+# one, and a missed reveal costs stake rather than a round. `beacon status`
+# compares this against the contract's real number and warns.
+interval = "30s"
 
 
 [committee]

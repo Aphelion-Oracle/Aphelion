@@ -173,3 +173,141 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The beacon's two payloads
+// ---------------------------------------------------------------------------
+//
+// Same arrangement as the price message above: this is the reference
+// implementation and `contracts/randomness/src/message.rs` is the on-chain
+// mirror. Neither depends on the other, and a disagreement surfaces as a
+// commitment that will not open rather than as a difference of opinion.
+
+/// ASCII domain separator for a beacon commitment's preimage, 18 bytes.
+pub const COMMITMENT_DOMAIN: &[u8; 18] = b"APHELION_RANDOM_V1";
+
+/// ASCII domain separator for the signature over a commitment, 18 bytes.
+pub const COMMIT_SIGNATURE_DOMAIN: &[u8; 18] = b"APHELION_COMMIT_V1";
+
+pub const COMMITMENT_PREIMAGE_LEN: usize = 18 + 32 + 8 + 32 + 32; // 122
+pub const COMMIT_MESSAGE_LEN: usize = 18 + 32 + 8 + 32; // 90
+
+/// The bytes a beacon commitment is the SHA-256 of.
+///
+/// ```text
+/// offset  len  field
+///      0   18  domain separator, ASCII "APHELION_RANDOM_V1"
+///     18   32  randomness contract id
+///     50    8  round id, u64
+///     58   32  the committing node's public key
+///     90   32  the secret
+/// ```
+///
+/// The public key is the field worth naming. Without it a node can copy
+/// somebody else's published commitment and reveal the same secret once its
+/// owner does — and because the contract combines secrets by XOR, two copies
+/// of one secret cancel, so the copier could subtract another node's
+/// contribution from the beacon entirely.
+pub fn commitment_preimage(
+    randomness_contract: &[u8; 32],
+    round_id: u64,
+    pubkey: &[u8; 32],
+    secret: &[u8; 32],
+) -> [u8; COMMITMENT_PREIMAGE_LEN] {
+    let mut out = [0u8; COMMITMENT_PREIMAGE_LEN];
+    let mut at = 0;
+    let mut put = |bytes: &[u8]| {
+        out[at..at + bytes.len()].copy_from_slice(bytes);
+        at += bytes.len();
+    };
+    put(COMMITMENT_DOMAIN);
+    put(randomness_contract);
+    put(&round_id.to_be_bytes());
+    put(pubkey);
+    put(secret);
+    debug_assert_eq!(at, COMMITMENT_PREIMAGE_LEN);
+    out
+}
+
+/// The bytes a node signs when it submits a commitment.
+///
+/// ```text
+/// offset  len  field
+///      0   18  domain separator, ASCII "APHELION_COMMIT_V1"
+///     18   32  randomness contract id
+///     50    8  round id, u64
+///     58   32  the commitment
+/// ```
+pub fn commit_message(
+    randomness_contract: &[u8; 32],
+    round_id: u64,
+    commitment: &[u8; 32],
+) -> [u8; COMMIT_MESSAGE_LEN] {
+    let mut out = [0u8; COMMIT_MESSAGE_LEN];
+    let mut at = 0;
+    let mut put = |bytes: &[u8]| {
+        out[at..at + bytes.len()].copy_from_slice(bytes);
+        at += bytes.len();
+    };
+    put(COMMIT_SIGNATURE_DOMAIN);
+    put(randomness_contract);
+    put(&round_id.to_be_bytes());
+    put(commitment);
+    debug_assert_eq!(at, COMMIT_MESSAGE_LEN);
+    out
+}
+
+#[cfg(test)]
+mod beacon_message_tests {
+    use super::*;
+
+    #[test]
+    fn the_commitment_preimage_has_the_documented_layout() {
+        let preimage = commitment_preimage(&[0xAA; 32], 7, &[0xBB; 32], &[0xCC; 32]);
+        assert_eq!(preimage.len(), 122);
+        assert_eq!(&preimage[..18], b"APHELION_RANDOM_V1");
+        assert_eq!(&preimage[18..50], &[0xAA; 32]);
+        assert_eq!(&preimage[50..58], &7u64.to_be_bytes());
+        assert_eq!(&preimage[58..90], &[0xBB; 32]);
+        assert_eq!(&preimage[90..], &[0xCC; 32]);
+    }
+
+    #[test]
+    fn the_commit_message_has_the_documented_layout() {
+        let msg = commit_message(&[0xAA; 32], 7, &[0xDD; 32]);
+        assert_eq!(msg.len(), 90);
+        assert_eq!(&msg[..18], b"APHELION_COMMIT_V1");
+        assert_eq!(&msg[18..50], &[0xAA; 32]);
+        assert_eq!(&msg[50..58], &7u64.to_be_bytes());
+        assert_eq!(&msg[58..], &[0xDD; 32]);
+    }
+
+    #[test]
+    fn the_two_domains_cannot_be_confused_for_one_another() {
+        // Both are 18 bytes and both start "APHELION_". A signature over one
+        // must never verify as the other, which is only true while the bytes
+        // differ -- so this is asserted rather than assumed.
+        assert_ne!(COMMITMENT_DOMAIN, COMMIT_SIGNATURE_DOMAIN);
+    }
+
+    #[test]
+    fn changing_any_field_changes_the_preimage() {
+        let base = commitment_preimage(&[0xAA; 32], 7, &[0xBB; 32], &[0xCC; 32]);
+        assert_ne!(
+            base,
+            commitment_preimage(&[0xAB; 32], 7, &[0xBB; 32], &[0xCC; 32])
+        );
+        assert_ne!(
+            base,
+            commitment_preimage(&[0xAA; 32], 8, &[0xBB; 32], &[0xCC; 32])
+        );
+        assert_ne!(
+            base,
+            commitment_preimage(&[0xAA; 32], 7, &[0xBC; 32], &[0xCC; 32])
+        );
+        assert_ne!(
+            base,
+            commitment_preimage(&[0xAA; 32], 7, &[0xBB; 32], &[0xCD; 32])
+        );
+    }
+}

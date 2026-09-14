@@ -147,6 +147,25 @@ impl NodeSigner {
             signature: signature.to_bytes(),
         }
     }
+
+    /// Sign a beacon commitment for one round of one randomness contract.
+    ///
+    /// Deliberately narrow rather than a general "sign these bytes". This key
+    /// authorises prices; an entry point that signed anything handed to it
+    /// would be one refactor away from signing a payload somebody else chose,
+    /// and the domain separators in [`aphelion_core::message`] are only a
+    /// defence while nothing can be asked to sign across them.
+    pub fn sign_commitment(
+        &self,
+        randomness_contract: &[u8; 32],
+        round_id: u64,
+        commitment: &[u8; 32],
+    ) -> [u8; 64] {
+        let payload =
+            aphelion_core::message::commit_message(randomness_contract, round_id, commitment);
+        let signature: Signature = self.signing_key.sign(&payload);
+        signature.to_bytes()
+    }
 }
 
 /// A price observation plus the signature the aggregator will verify.
