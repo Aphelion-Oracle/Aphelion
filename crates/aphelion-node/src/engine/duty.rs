@@ -242,11 +242,11 @@ fn dispute_duties(s: &Snapshot, d: &DisputeRecord) -> Vec<Duty> {
                     subject: d.id,
                     deadline: Some(d.deadline),
                     detail: format!(
-                        "dispute {} against this node ({} round {}); {} for, {} against, \
+                        "dispute {} against this node ({} nonce {}); {} for, {} against, \
                          quorum {}. Evidence: {}",
                         d.id,
                         d.feed,
-                        d.round_id,
+                        d.nonce,
                         d.votes_for,
                         d.votes_against,
                         s.params.quorum,
@@ -256,7 +256,12 @@ fn dispute_duties(s: &Snapshot, d: &DisputeRecord) -> Vec<Duty> {
                             &d.evidence
                         }
                     ),
-                    command: format!("aphelion-node dispute show {}", d.id),
+                    // `replay`, not `dispute show`. The allegation names a
+                    // nonce, which is the argument that reproduces the round
+                    // from the observations behind it, so the duty can point at
+                    // the thing that answers it rather than at the thing that
+                    // restates it.
+                    command: format!("aphelion-node replay {} {}", d.feed, d.nonce),
                 });
             }
             // The contract refuses a vote on a dispute against a node the
@@ -269,9 +274,9 @@ fn dispute_duties(s: &Snapshot, d: &DisputeRecord) -> Vec<Duty> {
                     subject: d.id,
                     deadline: Some(d.deadline),
                     detail: format!(
-                        "committee vote outstanding on dispute {} ({} round {}); \
+                        "committee vote outstanding on dispute {} ({} nonce {}); \
                          {} for, {} against, quorum {}",
-                        d.id, d.feed, d.round_id, d.votes_for, d.votes_against, s.params.quorum
+                        d.id, d.feed, d.nonce, d.votes_for, d.votes_against, s.params.quorum
                     ),
                     command: format!("aphelion-node dispute vote {} --uphold|--dismiss", d.id),
                 });
@@ -702,7 +707,7 @@ mod tests {
             accused: accused.into(),
             reporter: "GREPORTER".into(),
             feed: "BTC_USD".into(),
-            round_id: 42,
+            nonce: 42,
             evidence: "ipfs://bafy".into(),
             bond: 1_000,
             opened_at: 1_000,

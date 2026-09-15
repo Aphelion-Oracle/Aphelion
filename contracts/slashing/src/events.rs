@@ -17,7 +17,8 @@ pub struct DisputeOpened {
     pub accused: BytesN<32>,
     pub reporter: Address,
     pub feed: Symbol,
-    pub round_id: u64,
+    /// The nonce the accused signed the disputed submission under.
+    pub nonce: u64,
     pub evidence: String,
     pub deadline: u64,
 }

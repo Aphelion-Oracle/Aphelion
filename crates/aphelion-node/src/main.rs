@@ -171,11 +171,34 @@ enum Command {
     /// verdict is ignored, and the price compared against the observations is
     /// the one inside the signed bytes, never the one the file says is there.
     ///
+    /// Give it the allegation as well. `dispute show` prints the accused, the
+    /// feed and the nonce; passed here they are checked against the signed
+    /// bytes, which is what stops a genuine bundle for a different round being
+    /// handed in as an answer. Without them the relevance of the file is left
+    /// to the reader, and the output says so.
+    ///
     /// Needs nothing — no configuration, no key, no database, no chain. Exits 0
-    /// sound, 1 unsupported by its own observations, 2 misdescribed or unsigned.
+    /// sound, 1 unsupported by its own observations, 2 unrelated, misdescribed
+    /// or unsigned — and 64 if the allegation above will not parse, which is
+    /// the caller's mistake and deliberately outside the range a script reads
+    /// as a judgement on the bundle.
     VerifyEvidence {
         /// The bundle, or `-` for stdin.
         path: PathBuf,
+        /// The accused, as the dispute names them: 32 bytes of hex.
+        #[arg(long)]
+        node: Option<String>,
+        /// The feed the allegation is about, e.g. BTC_USD.
+        #[arg(long)]
+        feed: Option<String>,
+        /// The nonce the allegation is about.
+        #[arg(long)]
+        nonce: Option<u64>,
+        /// The deployment the dispute was filed on: the aggregator's `C...`
+        /// address, or its 32 bytes in hex. A bundle signed for another
+        /// network is sound and irrelevant.
+        #[arg(long)]
+        aggregator: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -263,7 +286,23 @@ async fn run() -> Result<()> {
 
         // Deliberately does not load a configuration: a committee member
         // judging somebody else's node has none, and this must run for them.
-        Command::VerifyEvidence { path, json } => cmd::verify_evidence::run(&path, json),
+        Command::VerifyEvidence {
+            path,
+            node,
+            feed,
+            nonce,
+            aggregator,
+            json,
+        } => cmd::verify_evidence::run(
+            &path,
+            &cmd::verify_evidence::Against {
+                node,
+                feed,
+                nonce,
+                aggregator,
+            },
+            json,
+        ),
 
         Command::Migrate => {
             let config = Config::load(&cli.config)?;

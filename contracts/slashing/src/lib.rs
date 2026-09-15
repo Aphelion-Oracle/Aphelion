@@ -518,15 +518,23 @@ impl Slashing {
 
     /// File an allegation against a node, posting the dispute bond.
     ///
-    /// The allegation is identified by `(accused, feed, round_id)`, and each
-    /// one may be filed once. Otherwise the same claim could be re-filed after
+    /// The allegation is identified by `(accused, feed, nonce)`, and each one
+    /// may be filed once. Otherwise the same claim could be re-filed after
     /// settlement to seize stake repeatedly for a single offence.
+    ///
+    /// `nonce` names the accused's submission, and is the number the accused
+    /// signed rather than the round id this contract's sibling allocated. The
+    /// difference decides whether the evidence answering an allegation can be
+    /// checked against it: the nonce is inside the signed payload, so a
+    /// committee can confirm that the bundle in front of it is about the
+    /// submission on the ledger. A round id, being assigned after the fact and
+    /// covered by no signature, leaves that correspondence to be asserted.
     pub fn open_dispute(
         env: Env,
         reporter: Address,
         accused: BytesN<32>,
         feed: Symbol,
-        round_id: u64,
+        nonce: u64,
         evidence: String,
     ) -> u64 {
         reporter.require_auth();
@@ -539,7 +547,7 @@ impl Slashing {
             panic_with_error!(&env, SlashingError::UnknownNode);
         }
 
-        let filed_key = DataKey::Filed(accused.clone(), feed.clone(), round_id);
+        let filed_key = DataKey::Filed(accused.clone(), feed.clone(), nonce);
         if env.storage().persistent().has(&filed_key) {
             panic_with_error!(&env, SlashingError::DuplicateDispute);
         }
@@ -564,7 +572,7 @@ impl Slashing {
             accused: accused.clone(),
             reporter: reporter.clone(),
             feed: feed.clone(),
-            round_id,
+            nonce,
             evidence: evidence.clone(),
             bond: config.dispute_bond,
             opened_at: now,
@@ -590,7 +598,7 @@ impl Slashing {
             accused,
             reporter,
             feed,
-            round_id,
+            nonce,
             evidence,
             deadline: dispute.deadline,
         }
@@ -849,10 +857,10 @@ impl Slashing {
     }
 
     /// The dispute filed for an allegation, if one has been.
-    pub fn dispute_for(env: Env, accused: BytesN<32>, feed: Symbol, round_id: u64) -> Option<u64> {
+    pub fn dispute_for(env: Env, accused: BytesN<32>, feed: Symbol, nonce: u64) -> Option<u64> {
         env.storage()
             .persistent()
-            .get(&DataKey::Filed(accused, feed, round_id))
+            .get(&DataKey::Filed(accused, feed, nonce))
     }
 
     pub fn dispute_count(env: Env) -> u64 {

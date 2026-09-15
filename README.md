@@ -319,19 +319,20 @@ repository, not the target architecture.
 
 | Component | Status | Tests |
 | --- | --- | --- |
-| `aphelion-core` — fixed-point prices, aggregation math, signing payloads | ✅ Implemented | 30 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 177 |
+| `aphelion-core` — fixed-point prices, aggregation math, signing payloads | ✅ Implemented | 38 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 221 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 41 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
-| `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 60 |
+| `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 61 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
-| `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 36 |
+| `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 38 |
 | Randomness participation from the node — commit/reveal loop and CLI | ✅ Implemented | 33 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 9 |
+| Dispute evidence — replay a round, and check a replay somebody else produced | ✅ Implemented | 53 |
 | Operator status page — five reads, one verdict, an exit code | ✅ Implemented | 17 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
@@ -340,29 +341,33 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-549 tests in total: 257 off-chain (`cargo test --workspace`), 252 against the
+613 tests in total: 318 off-chain (`cargo test --workspace`), 255 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 257 are: 30 in `aphelion-core`, 177 in the node's library, 5 in
+The off-chain 318 are: 38 in `aphelion-core`, 221 in the node's library, 5 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 177 — 15 in the harness, and 30 across the
-three integration suites (duties 9, multi-node 10, sweep 11).
+target, so they are *not* inside the 221 — 15 in the harness, and 39 across the
+four integration suites (duties 9, evidence 9, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
 because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 177. Committee participation is the same shape: its 9 cover assembling a
+node's 221. Committee participation is the same shape: its 9 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 25 more
-unit tests with 12 on decoding what the contract returns, all inside the 177 —
-with the 5 command tests in the binary target beside it. The harness's 15 are
-12 process-level tests plus 3 covering the fake CLI's argument parsing.
+unit tests with 6 on decoding what the contract returns, all inside the 221 —
+with the 5 command tests in the binary target beside it. The dispute evidence
+pair is split the same way again: 9 integration tests run the real `replay`
+into the real `verify` through actual JSON, because that is the seam where the
+two could rot apart without either side's own tests noticing, and the judgement
+itself has 24 more unit tests inside the 221. The harness's 15 are 12
+process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 245 tests and reported 257. The skip prints a `SKIP`
+with no Postgres has run 306 tests and reported 318. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -642,7 +647,7 @@ docker compose logs -f node
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
 | `dispute list \| show \| open \| vote \| resolve \| appeal \| settle` | Disputes |
 | `replay <feed> <nonce> [--json]` | Rebuild a published round from the observations retained underneath it, and check the signature stored beside it |
-| `verify-evidence <path\|-> [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. Needs no configuration, key, database or chain |
+| `verify-evidence <path\|-> [--node --feed --nonce --aggregator] [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. The four flags are the allegation, read off `dispute show`, and bind the bundle to it. Needs no configuration, key, database or chain |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
 | `migrate` | Apply database migrations and exit |
 | `show-config` | Print the effective configuration after environment overrides |
@@ -1502,6 +1507,20 @@ It needs no configuration, no key, no database and no chain — a committee memb
 has none of those for the node they are judging, and a verifier only the accused
 could run would be worth nothing.
 
+What it does want, and `dispute show` prints ready to paste, is the allegation:
+
+```bash
+aphelion-node verify-evidence bundle.json \
+    --node 608dd653... --feed BTC_USD --nonce 91 --aggregator CDLZ...
+```
+
+Those four are typed by the person checking rather than read out of the file,
+which is the whole point of them — a bundle asked to supply the standard it is
+measured against will meet it. Each one given is compared against the *signed
+bytes*, where the key, the feed, the nonce and the aggregator's contract id all
+live. Give what you have; a committee member holding only the accused's key is
+not made to invent a nonce.
+
 It treats the file as hostile input, not as stale input. The bundle's own verdict
 and findings are ignored outright; there is no field to read them into. What
 cannot be forged is 117 bytes and a signature, because the aggregator's contract
@@ -1512,8 +1531,29 @@ chain. Everything else is checked against them:
 | --- | --- | --- |
 | `sound` | Signed, honestly described, and supported by the observations offered | 0 |
 | `unsupported` | Genuinely signed, but the observations offered do not produce that price | 1 |
+| `unrelated` | Genuine and honest, and about a different node, feed, nonce or deployment | 2 |
 | `misdescribed` | The signature is good and the bundle describes something else | 2 |
 | `unsigned` | The payload does not decode, or the signature does not verify | 2 |
+
+A mistyped flag exits `64`, not 1. The exit status of this command is read as a
+judgement on a bundle, so a mistake by the person running it lands outside the
+range the grades occupy — 1 would be read as `unsupported`, which is a finding
+against the accused and the opposite of what happened.
+
+`unrelated` is the grade that costs an attacker the least to earn, which is why
+it exists. An accused operator answering a dispute over nonce 91 forges nothing
+by replaying nonce 94 instead: a round they reported honestly, which reproduces,
+whose bundle is sound in every way a bundle can be sound on its own. A verifier
+with nothing to compare it against confirms every cryptographic step and reports
+`sound`. Only the dispute's own identifiers separate that from an answer — which
+is why the slashing contract records the nonce the accused **signed** rather than
+the round id the aggregator allocated afterwards. An allegation named by
+something outside the signed payload could not be bound to the evidence
+answering it by any amount of arithmetic.
+
+Not passing the flags is not a pass. An audit that was never asked the question
+says so, in the findings and in `bound_to_allegation`, rather than reading like
+one that asked and was satisfied.
 
 `misdescribed` is the grade that makes the rest more than ceremony. A bundle can
 carry a perfectly valid signature over a payload saying one thing and a
@@ -1527,9 +1567,10 @@ non-positive price rather than reading it as a price anyway.
 Two limits, printed on every audit rather than left in the source. It cannot
 detect an **omission**: four venues that agree look identical to four of six
 whose absent two would have moved the median, and only the operator holds the
-full table. And a sound bundle about somebody else's node is still a sound
-bundle — that the key it names is the key under dispute is a question for the
-registry, which is where the command says to go.
+full table. And `--node` binds the evidence to the allegation, not the allegation
+to a person: that the key the dispute names belongs to the operator it is against
+is `registry.owner_of`, and no bundle can settle it. The command prints whichever
+of the two is still outstanding rather than leaving it to be remembered.
 
 ### Who is on the committee
 
@@ -1591,10 +1632,10 @@ signing as : GOPERATOR...
 weight     : 7500 bps
 committee  : seated
 
-[COSTLY] dispute 2 against this node (BTC_USD round 91); 1 for, 0 against,
+[COSTLY] dispute 2 against this node (BTC_USD nonce 91); 1 for, 0 against,
          quorum 3. Evidence: ipfs://bafyevidence
     10h left
-    aphelion-node dispute show 2
+    aphelion-node replay BTC_USD 91
 [FORFEITED] election 4 is balloting for 5 seats until 1700090000; this node's
             7500 bps has not been cast
     24h left
@@ -1628,7 +1669,7 @@ Acting on one is always a separate command, run on purpose:
 | Command | What it does |
 | --- | --- |
 | `dispute list` / `dispute show <id>` | The allegation, the evidence link, the votes and the clock |
-| `dispute open <accused> <feed> <round> <evidence> --commit` | File, posting the bond |
+| `dispute open <accused> <feed> <nonce> <evidence> --commit` | File, posting the bond. The nonce the accused signed, which `SubmissionAccepted` carries alongside the round id |
 | `dispute vote <id> --uphold\|--dismiss` | A committee vote |
 | `dispute resolve <id>` | Record the outcome once voting has closed |
 | `dispute appeal <id> --commit` | Contest a resolved dispute, posting the larger bond |

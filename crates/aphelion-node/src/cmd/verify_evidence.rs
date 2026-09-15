@@ -5,17 +5,56 @@
 //! none of those for the node they are judging, and a verifier that required any
 //! of them would be a verifier only the accused could run.
 //!
+//! What it does take, optionally, is the allegation: `--node`, `--feed`,
+//! `--nonce` and `--aggregator`, as `dispute show` prints them. Those are typed
+//! by the person checking rather than read from the file, which is the whole
+//! point of them — a bundle asked to supply the standard it is measured against
+//! will meet it.
+//!
 //! The judgement is [`aphelion_node::engine::verify`]. What is here is reading a
-//! file and printing the result.
+//! file, turning four flags into [`Expectations`], and printing the result.
 
 use std::io::{Read, Write};
 use std::path::Path;
 
-use aphelion_node::engine::verify::{verify, Audit, Bundle, Verdict};
+use aphelion_node::engine::verify::{verify_against, Audit, Bundle, Expectations, Verdict};
 use aphelion_node::error::{NodeError, Result};
 
+/// The allegation, as the caller typed it off the dispute.
+#[derive(Debug, Clone, Default)]
+pub struct Against {
+    pub node: Option<String>,
+    pub feed: Option<String>,
+    pub nonce: Option<u64>,
+    pub aggregator: Option<String>,
+}
+
+/// `EX_USAGE`, as `sysexits.h` has meant it for forty years.
+///
+/// Not 1, and not any of [`Verdict::exit_code`]'s three. This command's exit
+/// status is read by scripts as a judgement on a bundle, so a mistake by the
+/// person running it has to land outside that range — 1 would be read as
+/// `unsupported`, which is a finding against the accused and the opposite of
+/// what happened.
+const EX_USAGE: i32 = 64;
+
 /// Read the bundle from a path or from stdin, audit it, print, exit.
-pub fn run(path: &Path, json: bool) -> Result<()> {
+pub fn run(path: &Path, against: &Against, json: bool) -> Result<()> {
+    // Parsed first, and separately from the audit. A mistyped key is the
+    // caller's mistake; reported as a verdict it would read as a finding
+    // against the accused. Reported through `main` it would exit 1, which is
+    // the same thing one layer down, so it exits here instead.
+    let expect = Expectations::parse(
+        against.node.as_deref(),
+        against.feed.as_deref(),
+        against.nonce,
+        against.aggregator.as_deref(),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(EX_USAGE);
+    });
+
     let raw = if path == Path::new("-") {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf).map_err(|e| {
@@ -39,7 +78,7 @@ pub fn run(path: &Path, json: bool) -> Result<()> {
         ))
     })?;
 
-    let audit = verify(&bundle);
+    let audit = verify_against(&bundle, &expect);
 
     if json {
         println!(
@@ -89,15 +128,23 @@ fn render(a: &Audit) {
 
     if a.signed.is_some() {
         println!();
-        println!(
-            "{}",
-            wrap(
-                "Still to establish elsewhere: that the key above is the key this dispute is \
-                 about. The registry answers that; a bundle cannot, because a sound bundle \
-                 about another node is still a sound bundle.",
-                0
-            )
-        );
+        // What remains outside this command's reach depends on what it was
+        // given. Without the allegation it is the whole question of relevance;
+        // with it, the narrower one the registry answers.
+        let remaining = match a.bound_to_allegation {
+            None => {
+                "Still to establish elsewhere: that this bundle is about the dispute at \
+                 all. Read the accused, feed and nonce off `dispute show` and pass them \
+                 as --node, --feed and --nonce, and they are checked against the signed \
+                 bytes here."
+            }
+            Some(_) => {
+                "Still to establish elsewhere: that the key the allegation names is the \
+                 key of the operator it is against. That is `registry.owner_of`, and no \
+                 bundle can settle it."
+            }
+        };
+        println!("{}", wrap(remaining, 0));
     }
 }
 
@@ -109,6 +156,7 @@ fn verdict_line(v: Verdict) -> &'static str {
         Verdict::Unsupported => {
             "unsupported — genuinely signed, but the observations offered do not produce it"
         }
+        Verdict::Unrelated => "unrelated — genuine, and about something other than this allegation",
         Verdict::Misdescribed => {
             "misdescribed — the signature is good and the bundle describes something else"
         }

@@ -69,10 +69,16 @@ pub struct Dispute {
     /// Who filed, and who gets the bond back if they are right.
     pub reporter: Address,
     pub feed: Symbol,
-    /// The round the allegation is about. Together with `feed` and `accused`
-    /// this is the identity of the allegation, so the same claim cannot be
-    /// filed twice.
-    pub round_id: u64,
+    /// The submission the allegation is about, by the nonce the accused signed
+    /// it under. Together with `feed` and `accused` this is the identity of the
+    /// allegation, so the same claim cannot be filed twice.
+    ///
+    /// The nonce rather than the aggregator's round id, because the nonce is
+    /// inside the bytes the accused signed and the round id is not. An
+    /// allegation named by something outside the signed payload cannot be
+    /// matched against the evidence answering it except by taking somebody's
+    /// word for the correspondence.
+    pub nonce: u64,
     /// Where the evidence lives — a URL or content hash. Deliberately not the
     /// evidence itself: ledger space is the wrong place for a data dump, and a
     /// hash is enough to prove nobody edited it afterwards.
@@ -188,7 +194,8 @@ pub enum DataKey {
     Dispute(u64),
     /// One vote per member per voting round.
     Vote(u64, u32, Address),
-    /// The identity of an allegation, so it cannot be filed twice.
+    /// The identity of an allegation — `(accused, feed, nonce)` — so it cannot
+    /// be filed twice.
     Filed(BytesN<32>, Symbol, u64),
 
     /// Monotonic election id allocator.

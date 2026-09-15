@@ -66,8 +66,11 @@ pub enum DisputeCmd {
         accused: String,
         /// The feed the allegation is about, e.g. `BTC_USD`.
         feed: String,
-        /// The round the allegation is about.
-        round_id: u64,
+        /// The nonce the accused signed the disputed submission under. Not the
+        /// aggregator's round id: the nonce is inside the signed payload, so
+        /// the evidence answering this allegation can be checked against it.
+        /// `SubmissionAccepted` carries both.
+        nonce: u64,
         /// Where the evidence lives: a URL or a content hash. Not the evidence
         /// itself — the ledger is the wrong place for a data dump, and a hash
         /// is enough to prove nobody edited it afterwards.
@@ -437,7 +440,7 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                     d.id,
                     d.feed,
                     describe_status(&d, now),
-                    d.round_id,
+                    d.nonce,
                     d.votes_for,
                     d.votes_against,
                     &d.accused[..16],
@@ -475,7 +478,7 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                 }
             );
             println!("reporter  : {}", d.reporter);
-            println!("allegation: {} round {}", d.feed, d.round_id);
+            println!("allegation: {} nonce {}", d.feed, d.nonce);
             println!(
                 "evidence  : {}",
                 if d.evidence.is_empty() {
@@ -506,20 +509,38 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             if let Some(a) = &d.appellant {
                 println!("appealed  : by {a}, bond {}", d.appeal_bond);
             }
+
+            // Both sides of the evidence, spelled out. The allegation names a
+            // feed and a nonce, which is exactly what one command takes to
+            // answer it and the other to check the answer -- and the flags are
+            // the point of printing them: a committee that retypes them from
+            // the bundle has checked the bundle against itself.
+            println!();
+            if d.accused == ctx.node {
+                println!(
+                    "answer it : aphelion-node replay {} {} --json",
+                    d.feed, d.nonce
+                );
+            }
+            println!("check it  : aphelion-node verify-evidence <bundle> \\");
+            println!(
+                "              --node {} --feed {} --nonce {} --aggregator {}",
+                d.accused, d.feed, d.nonce, config.network.aggregator_contract
+            );
             Ok(())
         }
 
         DisputeCmd::Open {
             accused,
             feed,
-            round_id,
+            nonce,
             evidence,
             commit,
         } => {
             let accused = normalise_key(&accused)?;
             let params = ctx.committee.params().await?;
             println!(
-                "file against {accused}\n  {feed} round {round_id}\n  evidence {evidence}\n  \
+                "file against {accused}\n  {feed} nonce {nonce}\n  evidence {evidence}\n  \
                  bond {} as {account}",
                 params.dispute_bond
             );
@@ -532,7 +553,7 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             }
             let r = ctx
                 .committee
-                .open_dispute(&accused, &feed, round_id, &evidence)
+                .open_dispute(&accused, &feed, nonce, &evidence)
                 .await
                 .map_err(|e| explain(e, &account))?;
             println!("\nfiled as dispute {}", r.value);
@@ -676,7 +697,7 @@ mod tests {
             accused: "aa".repeat(32),
             reporter: "G".into(),
             feed: "BTC_USD".into(),
-            round_id: 1,
+            nonce: 1,
             evidence: String::new(),
             bond: 0,
             opened_at: 0,

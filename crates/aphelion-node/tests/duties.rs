@@ -85,7 +85,7 @@ fn dispute(id: u64, accused: &str, status: DisputeStatus, deadline: u64) -> Disp
         accused: accused.into(),
         reporter: "GREPORTER".into(),
         feed: "BTC_USD".into(),
-        round_id: id,
+        nonce: id,
         evidence: "ipfs://bafy".into(),
         bond: 1_000,
         opened_at: 0,

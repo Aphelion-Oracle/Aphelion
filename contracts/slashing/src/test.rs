@@ -273,7 +273,20 @@ fn the_same_allegation_cannot_be_filed_twice() {
 }
 
 #[test]
-fn a_different_round_is_a_different_allegation() {
+fn an_allegation_names_the_submission_the_accused_signed() {
+    let h = setup();
+    let id = h.open();
+
+    // Not the aggregator's round id. The nonce is inside the payload the
+    // accused signed, which is what lets a committee holding an evidence
+    // bundle confirm that it answers *this* allegation rather than some other
+    // round the accused would rather talk about.
+    assert_eq!(h.dispute(id).nonce, 42);
+    assert_eq!(h.slashing.dispute_for(&h.accused, &h.feed(), &42), Some(id));
+}
+
+#[test]
+fn a_different_submission_is_a_different_allegation() {
     let h = setup();
     let first = h.open();
     let second = h.slashing.open_dispute(

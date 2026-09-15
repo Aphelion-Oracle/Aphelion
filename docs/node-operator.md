@@ -536,18 +536,20 @@ aphelion-node dispute show 7 # one allegation in full
 
 What happens, and what you should do:
 
-1. **A dispute is filed** against your public key for a specific `(feed, round)`,
-   with a bond the reporter forfeits to you if it is dismissed, and a link to
-   their evidence. `duties` reports it as `COSTLY` with the time left on the
-   voting period; `dispute show` prints the evidence link.
+1. **A dispute is filed** against your public key for a specific `(feed, nonce)`
+   — the nonce you signed the submission under, not the round id the aggregator
+   allocated afterwards — with a bond the reporter forfeits to you if it is
+   dismissed, and a link to their evidence. `duties` reports it as `COSTLY` with
+   the time left on the voting period; `dispute show` prints the evidence link,
+   and the two commands that answer it and check the answer, ready to paste.
 2. **The committee votes** for the configured voting period. If it does not reach
    quorum, or the vote ties, the dispute is **dismissed** — silence is not
    evidence against you.
 3. **Answer it.** There is nothing to file on chain: a dispute is answered by
    evidence and argument in front of the committee, wherever that conversation
    happens. Your case is your own records, and `replay` assembles it — it takes
-   the round the dispute names and rebuilds it from the observations retained
-   underneath it:
+   the feed and nonce the dispute names, which is why the dispute names a nonce,
+   and rebuilds that round from the observations retained underneath it:
 
    ```bash
    aphelion-node replay BTC_USD 4812          # the page, for you
@@ -596,11 +598,14 @@ What happens, and what you should do:
    themselves with no access to your node, your key or your database:
 
    ```bash
-   aphelion-node verify-evidence bundle.json
+   aphelion-node verify-evidence bundle.json \
+       --node <your key> --feed BTC_USD --nonce 4812 --aggregator C...
    ```
 
    That command ignores your node's verdict entirely and re-derives everything
-   from the signed bytes — which is the point. A bundle is worth something to a
+   from the signed bytes — which is the point. The four flags are the allegation
+   as the ledger states it, and they are what stops a bundle for the wrong round
+   being accepted as an answer; `dispute show` prints the whole line. A bundle is worth something to a
    committee precisely because they do not have to take your word for any part
    of it. If you are ever on the other side of one, this is also the command to
    run on somebody else's bundle before voting on it.
@@ -638,23 +643,32 @@ If you sit on the committee, a vote is a decision about another operator's
 stake, so check their evidence rather than the summary attached to it:
 
 ```bash
-aphelion-node verify-evidence their-bundle.json
+aphelion-node dispute show 7             # prints the line below, filled in
+aphelion-node verify-evidence their-bundle.json \
+    --node <accused> --feed BTC_USD --nonce 4812 --aggregator C...
 ```
 
-It needs nothing from you but the file — no configuration, no key, no database,
-no chain access. It ignores the bundle's own verdict and re-derives everything
-from the signed payload, and it grades `sound`, `unsupported`, `misdescribed` or
-`unsigned` with the exit code to match (0, 1, 2, 2).
+It needs nothing from you but the file and those four — no configuration, no
+key, no database, no chain access. It ignores the bundle's own verdict and
+re-derives everything from the signed payload, and it grades `sound`,
+`unsupported`, `unrelated`, `misdescribed` or `unsigned` with the exit code to
+match (0, 1, 2, 2, 2). A mistyped flag exits 64 rather than 1, so a slip of
+yours is never read back as a finding against them.
+
+**Type the four off the dispute, not off the bundle.** They are checked against
+the signed bytes, and a file asked to supply the standard it is measured against
+will meet it. Run without them and the audit says, in as many words, that nobody
+asked whether the file bears on this dispute at all — which is not the same as
+asking and being satisfied. The substitution they catch is the cheapest move
+available to an accused operator: replaying a round they reported honestly. It
+forges nothing, it reproduces, and on its own terms it is beyond reproach.
 
 Read what it says it cannot check as carefully as what it can. It cannot tell a
 bundle showing four venues from one showing four of six, where the two left out
-would have moved the median — only the operator holds the full table. And a
-sound bundle about a different node is still a sound bundle, so confirm the key
-it names is the key under dispute before the grade means anything:
-
-```bash
-aphelion-node dispute show 7   # whose key the allegation is against
-```
+would have moved the median — only the operator holds the full table. And
+`--node` ties the evidence to the allegation, not the allegation to a person:
+that the key the dispute names belongs to the operator it is against is
+`registry.owner_of`, and no bundle can settle it.
 
 ---
 

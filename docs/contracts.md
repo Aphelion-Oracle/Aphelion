@@ -283,14 +283,14 @@ venue manipulated on purpose.
 
 | Function | Caller | Notes |
 | --- | --- | --- |
-| `open_dispute(reporter, accused, feed, round_id, evidence) -> u64` | Anyone | Posts `dispute_bond`. `(accused, feed, round_id)` may be filed once |
+| `open_dispute(reporter, accused, feed, nonce, evidence) -> u64` | Anyone | Posts `dispute_bond`. `(accused, feed, nonce)` may be filed once. The nonce the accused *signed*, not the aggregator's round id: it is inside the signed payload, so evidence can be checked against the allegation |
 | `vote(member, dispute_id, uphold)` | A committee member | Once per voting round. Refused if the member owns the accused node |
 | `resolve(dispute_id) -> DisputeStatus` | Anyone, after the voting period | Upheld only on quorum *and* a majority. A tie favours the accused |
 | `appeal(appellant, dispute_id)` | Either side, once, in the appeal window | Posts `appeal_bond`, clears the votes, reopens voting |
 | `settle(dispute_id)` | Anyone, after the appeal window | Moves stake and bonds |
 | `remove_member(member)` | Admin | Cannot shrink the committee below its own quorum. There is no `add_member` — see [Electing the committee](#electing-the-committee) |
 | `initialize` / `set_config` / `get_config` / `committee` | Admin / anyone | |
-| `get_dispute(id)` / `vote_of(id, member)` / `dispute_for(accused, feed, round)` / `dispute_count()` | Anyone | |
+| `get_dispute(id)` / `vote_of(id, member)` / `dispute_for(accused, feed, nonce)` / `dispute_count()` | Anyone | |
 
 Where the money goes at settlement:
 

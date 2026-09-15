@@ -31,6 +31,32 @@
 //!    states it used.
 //! 5. The observations are internally consistent with the window they claim.
 //!
+//! ## Is it about the allegation?
+//!
+//! Everything above is a question about the bundle on its own. There is a
+//! sixth, and it is the one a committee actually has to answer: does this file
+//! bear on *the dispute in front of us*? A bundle can pass every check here and
+//! be about another node, another feed, another nonce, or another deployment
+//! entirely — and it is worth being plain that this is the cheapest possible
+//! attack on the whole scheme. The accused does not have to forge anything.
+//! They hand over a genuine, sound, reproducible bundle for a round they
+//! reported honestly, and a verifier with nothing to compare it against
+//! confirms every cryptographic step and reports `sound`.
+//!
+//! So [`Expectations`] carries what the ledger says the allegation is, and each
+//! field given is checked against the *signed bytes*: the accused's key, the
+//! feed, the nonce and the aggregator's contract id are all inside the 117
+//! bytes. A mismatch is [`Verdict::Unrelated`], which is its own grade because
+//! it is its own answer — not "the evidence is bad" but "this is not evidence
+//! in this case".
+//!
+//! The expectations are not read from the bundle, and cannot be: a file that
+//! supplied the standard it is measured against would pass by construction.
+//! They come from the dispute record, which is why [`crate::chain::committee::DisputeRecord`]
+//! names the nonce the accused signed rather than the round id the aggregator
+//! allocated. An allegation identified by something outside the signed payload
+//! could not be bound to the evidence answering it by any amount of arithmetic.
+//!
 //! ## The limit, stated rather than smoothed over
 //!
 //! This cannot detect an **omission**. A bundle showing four venues that agree
@@ -66,6 +92,16 @@ pub enum Verdict {
     /// that proves one price and asserts another is not a mistake to correct,
     /// it is the shape of an attempt.
     Misdescribed,
+    /// Genuine and honestly described, and about something other than the
+    /// allegation it was handed in to answer. Only reachable when the caller
+    /// said what the allegation is; see [`Expectations`].
+    ///
+    /// Ranked below `misdescribed` and above `unsupported` on purpose. It is
+    /// less damning than a file that lies about its own bytes — the wrong
+    /// bundle can be attached by accident — and more damning than one that
+    /// fails to add up, because an unsupported bundle is at least an attempt
+    /// to answer the question asked.
+    Unrelated,
     /// Honestly described and genuinely signed, but the observations offered do
     /// not produce the price that was signed.
     Unsupported,
@@ -78,6 +114,7 @@ impl Verdict {
         match self {
             Self::Unsigned => "unsigned",
             Self::Misdescribed => "misdescribed",
+            Self::Unrelated => "unrelated",
             Self::Unsupported => "unsupported",
             Self::Sound => "sound",
         }
@@ -85,12 +122,13 @@ impl Verdict {
 
     /// Zero only for a sound bundle. Two grades of failure, because they are
     /// different accusations: 1 is evidence that does not carry its claim, 2 is
-    /// a bundle that is not what it says it is.
+    /// a bundle that is not the evidence it was asked for — whether because it
+    /// misreports its own bytes, or because it is about another round.
     pub fn exit_code(self) -> i32 {
         match self {
             Self::Sound => 0,
             Self::Unsupported => 1,
-            Self::Misdescribed | Self::Unsigned => 2,
+            Self::Unrelated | Self::Misdescribed | Self::Unsigned => 2,
         }
     }
 }
@@ -114,6 +152,88 @@ impl Finding {
             detail: detail.into(),
         }
     }
+}
+
+// -- the allegation, as the ledger states it ---------------------------------
+
+/// What the dispute says, for the bundle to be measured against.
+///
+/// Every field is optional and each given one is checked, so a committee member
+/// who has only the accused's key is not forced to invent a nonce. Nothing here
+/// is ever read out of the bundle: a file that supplied its own standard would
+/// meet it by construction. These come from the dispute record — `dispute show`
+/// prints all four.
+///
+/// Parsed rather than strings, and parsed before the audit runs, because a
+/// mistyped key is a mistake by the person checking and must be reported as
+/// one. Graded as `unrelated` it would read as a finding against the accused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Expectations {
+    /// The accused, by signing key.
+    pub node: Option<[u8; 32]>,
+    pub feed: Option<FeedId>,
+    /// The nonce the allegation names — which is why it names one.
+    pub nonce: Option<u64>,
+    /// The deployment. A bundle from another network is sound and irrelevant.
+    pub aggregator: Option<[u8; 32]>,
+}
+
+impl Expectations {
+    /// Nothing to check against: the bundle is judged on its own terms, as it
+    /// was before any of this existed.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+
+    /// Accept the four as an operator would paste them off a dispute.
+    ///
+    /// The error is a usage error, not a verdict. A key that is not a key says
+    /// nothing whatsoever about the bundle.
+    pub fn parse(
+        node: Option<&str>,
+        feed: Option<&str>,
+        nonce: Option<u64>,
+        aggregator: Option<&str>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            node: node.map(|s| parse_key32(s, "--node")).transpose()?,
+            feed: feed
+                .map(|s| {
+                    FeedId::new(s.trim()).map_err(|e| format!("`--feed {s}` is not a feed id: {e}"))
+                })
+                .transpose()?,
+            nonce,
+            aggregator: aggregator.map(parse_contract_id).transpose()?,
+        })
+    }
+}
+
+/// 32 bytes of hex, however it was pasted.
+fn parse_key32(s: &str, flag: &str) -> Result<[u8; 32], String> {
+    let raw = s.trim().trim_start_matches("0x");
+    hex::decode(raw)
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .ok_or_else(|| {
+            format!("`{flag} {s}` is not a node key: expected 32 bytes of hex (64 characters)")
+        })
+}
+
+/// A contract id as either a `C...` address or the raw 32 bytes in hex, since
+/// the deployment file gives the first and the signed payload carries the
+/// second.
+fn parse_contract_id(s: &str) -> Result<[u8; 32], String> {
+    let t = s.trim();
+    if t.len() == 56 && t.starts_with('C') {
+        return crate::strkey::contract_id_bytes(t).map_err(|e| e.to_string());
+    }
+    parse_key32(t, "--aggregator").map_err(|_| {
+        format!("`--aggregator {s}` is neither a C... contract address nor 32 bytes of hex")
+    })
 }
 
 // -- the bundle, as untrusted input ------------------------------------------
@@ -201,17 +321,30 @@ pub struct Audit {
     /// stated parameters.
     pub recomputed: Option<String>,
     pub observation_count: usize,
+    /// Whether the signed bytes name the allegation the caller gave, or `None`
+    /// if they gave none. `None` is not a pass: it means nobody asked.
+    pub bound_to_allegation: Option<bool>,
 }
 
-/// Audit one bundle.
+/// Audit one bundle on its own terms, with no allegation to measure it against.
+///
+/// Leaves the question a committee most needs answered — whether this file is
+/// about the dispute at all — open and says so. Prefer [`verify_against`].
+pub fn verify(bundle: &Bundle) -> Audit {
+    verify_against(bundle, &Expectations::none())
+}
+
+/// Audit one bundle against what the ledger says the allegation is.
 ///
 /// Pure, and takes no key, no chain and no database: a committee member has
-/// none of those for the node they are judging. The one thing a verifier still
-/// has to establish elsewhere is that the key in [`Signed::public_key`] is the
-/// key the dispute is about — that is on the registry, and no bundle can settle
-/// it, because a bundle is free to be a perfectly sound bundle about somebody
-/// else's node.
-pub fn verify(bundle: &Bundle) -> Audit {
+/// none of those for the node they are judging. `expect` comes from the dispute
+/// record, never from the bundle.
+///
+/// One thing is still outside this function's reach, and it is on the registry
+/// rather than in any bundle: whether the key the dispute names belongs to the
+/// operator it is against. `--node` binds the evidence to the allegation; what
+/// binds the allegation to a person is `registry.owner_of`.
+pub fn verify_against(bundle: &Bundle, expect: &Expectations) -> Audit {
     let mut findings = Vec::new();
 
     let (signed, message) = match decode_and_check_signature(bundle, &mut findings) {
@@ -223,20 +356,28 @@ pub fn verify(bundle: &Bundle) -> Audit {
                 signed: None,
                 recomputed: None,
                 observation_count: bundle.window.observations.len(),
-            }
+                // Unanswerable rather than false: the bytes never decoded, so
+                // there is nothing to compare the allegation against.
+                bound_to_allegation: None,
+            };
         }
     };
 
     let described_honestly = check_description(bundle, &message, &mut findings);
+    let related = check_relevance(expect, &message, &signed, &mut findings);
     let observations = check_window(bundle, &message.feed, &mut findings);
     let recomputed = check_arithmetic(bundle, &message, &observations, &mut findings);
 
     // Ordered by what a failure means, not by how bad it sounds. A bundle whose
     // prose disagrees with its own signed bytes is judged on that before its
     // arithmetic is weighed, because the arithmetic is then arithmetic about a
-    // claim nobody made.
+    // claim nobody made. Relevance sits between the two for the same reason in
+    // the other direction: arithmetic about another round is arithmetic about a
+    // claim nobody is disputing.
     let verdict = if !described_honestly {
         Verdict::Misdescribed
+    } else if !related {
+        Verdict::Unrelated
     } else if recomputed.as_ref().is_some_and(|(_, ok)| *ok) {
         Verdict::Sound
     } else {
@@ -258,7 +399,104 @@ pub fn verify(bundle: &Bundle) -> Audit {
         signed: Some(signed),
         recomputed: recomputed.map(|(p, _)| p.to_string()),
         observation_count: observations.len(),
+        bound_to_allegation: (!expect.is_empty()).then_some(related),
     }
+}
+
+/// Is this bundle about the allegation, or about something else?
+///
+/// Every comparison is against the signed bytes. `signed` is the same thing
+/// re-rendered, used only for the key, which is checked as bytes rather than as
+/// the hex the bundle happens to have printed.
+fn check_relevance(
+    expect: &Expectations,
+    message: &PriceMessage,
+    signed: &Signed,
+    findings: &mut Vec<Finding>,
+) -> bool {
+    if expect.is_empty() {
+        findings.push(Finding::new(
+            Verdict::Sound,
+            "not checked, because nothing was given to check against: whether this bundle \
+             is about the allegation at all. A sound bundle about another node, feed, \
+             nonce or deployment is still a sound bundle, and handing one over is the \
+             cheapest move available to a dishonest operator — it forges nothing. Read \
+             the accused, feed and nonce off the dispute and pass them as --node, --feed \
+             and --nonce.",
+        ));
+        return true;
+    }
+
+    let mut wrong = Vec::new();
+    let mut checked = Vec::new();
+
+    if let Some(node) = expect.node {
+        let actual = hex::encode(node);
+        if actual == signed.public_key {
+            checked.push("node");
+        } else {
+            wrong.push(format!(
+                "the allegation is against {actual}, this was signed by {}",
+                signed.public_key
+            ));
+        }
+    }
+    if let Some(feed) = &expect.feed {
+        if feed == &message.feed {
+            checked.push("feed");
+        } else {
+            wrong.push(format!(
+                "the allegation is about {feed}, this signs {}",
+                message.feed
+            ));
+        }
+    }
+    if let Some(nonce) = expect.nonce {
+        if nonce == message.nonce {
+            checked.push("nonce");
+        } else {
+            wrong.push(format!(
+                "the allegation is about nonce {nonce}, this signs nonce {}",
+                message.nonce
+            ));
+        }
+    }
+    if let Some(aggregator) = expect.aggregator {
+        let actual = hex::encode(aggregator);
+        if actual == hex::encode(message.aggregator) {
+            checked.push("deployment");
+        } else {
+            wrong.push(format!(
+                "the allegation is on aggregator {actual}, this was signed for {}",
+                hex::encode(message.aggregator)
+            ));
+        }
+    }
+
+    if wrong.is_empty() {
+        findings.push(Finding::new(
+            Verdict::Sound,
+            format!(
+                "the signed payload names the allegation given ({}) — though only as it \
+                 was typed. These are worth nothing unless they were read off the dispute \
+                 on the ledger rather than off the bundle.",
+                checked.join(", ")
+            ),
+        ));
+        return true;
+    }
+
+    findings.push(Finding::new(
+        Verdict::Unrelated,
+        format!(
+            "this bundle is not about the allegation — {}. Everything else here may be \
+             perfectly sound and none of it bears on this dispute; a genuine bundle for \
+             the wrong round is the one answer an accused operator can give that requires \
+             forging nothing.",
+            wrong.join("; ")
+        ),
+    ));
+    false
 }
 
 /// Steps 1 and 2: the bytes decode, and the signature covers them.
@@ -826,5 +1064,204 @@ mod tests {
         let mut sorted = a.findings.clone();
         sorted.sort_by(|x, y| x.verdict.cmp(&y.verdict));
         assert_eq!(a.findings, sorted);
+    }
+
+    // -- is it about the allegation? -----------------------------------------
+
+    /// What the whole dispute record's identifiers exist for. The bundle is
+    /// genuine, reproduces, and answers a different question.
+    #[test]
+    fn a_genuine_bundle_for_another_round_does_not_answer_this_allegation() {
+        let b = sound_bundle();
+        // On its own terms it is beyond reproach.
+        assert_eq!(verify(&b).verdict, Verdict::Sound);
+
+        let expect = Expectations {
+            nonce: Some(5),
+            ..Expectations::none()
+        };
+        let a = verify_against(&b, &expect);
+
+        assert_eq!(a.verdict, Verdict::Unrelated);
+        assert_eq!(a.verdict.exit_code(), 2);
+        assert_eq!(a.bound_to_allegation, Some(false));
+        let detail = detail_for(&a, Verdict::Unrelated);
+        assert!(detail.contains("nonce 5"), "{detail}");
+        assert!(detail.contains("nonce 4"), "{detail}");
+    }
+
+    /// The same for each of the other three. A bundle can be the wrong node's,
+    /// the wrong feed's, or another deployment's, and nothing inside it says so.
+    #[test]
+    fn a_bundle_about_another_node_feed_or_deployment_is_unrelated() {
+        let other_key = SigningKey::from_bytes(&[43u8; 32])
+            .verifying_key()
+            .to_bytes();
+        for expect in [
+            Expectations {
+                node: Some(other_key),
+                ..Expectations::none()
+            },
+            Expectations {
+                feed: Some(FeedId::new("ETH_USD").unwrap()),
+                ..Expectations::none()
+            },
+            Expectations {
+                aggregator: Some([8u8; 32]),
+                ..Expectations::none()
+            },
+        ] {
+            let a = verify_against(&sound_bundle(), &expect);
+            assert_eq!(a.verdict, Verdict::Unrelated, "{expect:?}");
+            assert_eq!(a.bound_to_allegation, Some(false));
+        }
+    }
+
+    /// And the bundle that is what it was asked for passes, with every field
+    /// named in the finding so the committee can see what was compared.
+    #[test]
+    fn an_allegation_the_signed_bytes_match_leaves_the_bundle_sound() {
+        let expect = Expectations {
+            node: Some(key().verifying_key().to_bytes()),
+            feed: Some(FeedId::new("BTC_USD").unwrap()),
+            nonce: Some(4),
+            aggregator: Some(AGGREGATOR),
+        };
+        let a = verify_against(&sound_bundle(), &expect);
+
+        assert_eq!(a.verdict, Verdict::Sound);
+        assert_eq!(a.bound_to_allegation, Some(true));
+        assert!(
+            a.findings
+                .iter()
+                .any(|f| f.detail.contains("node, feed, nonce, deployment")),
+            "{:?}",
+            a.findings
+        );
+    }
+
+    /// A committee member who has only the accused's key is not made to invent
+    /// a nonce to get anything checked.
+    #[test]
+    fn an_allegation_given_in_part_checks_that_part() {
+        let expect = Expectations {
+            node: Some(key().verifying_key().to_bytes()),
+            ..Expectations::none()
+        };
+        let a = verify_against(&sound_bundle(), &expect);
+        assert_eq!(a.verdict, Verdict::Sound);
+        assert_eq!(a.bound_to_allegation, Some(true));
+    }
+
+    /// The comparison is against the signed bytes, like every other one here.
+    /// A bundle relabelled to look like the round under dispute is graded on
+    /// the lie, not congratulated for the label.
+    #[test]
+    fn relabelling_a_bundle_to_match_the_allegation_does_not_make_it_match() {
+        let mut b = sound_bundle();
+        b.recorded.nonce = 5;
+
+        let expect = Expectations {
+            nonce: Some(5),
+            ..Expectations::none()
+        };
+        let a = verify_against(&b, &expect);
+
+        // Misdescribed outranks unrelated: a file that disagrees with its own
+        // signed bytes is judged on that first.
+        assert_eq!(a.verdict, Verdict::Misdescribed);
+        assert_eq!(a.bound_to_allegation, Some(false));
+    }
+
+    /// Silence about relevance has to be visible. An audit that simply did not
+    /// ask the question must not read like one that asked and was satisfied.
+    #[test]
+    fn an_audit_with_no_allegation_says_the_question_was_not_asked() {
+        let a = verify(&sound_bundle());
+        assert_eq!(a.verdict, Verdict::Sound);
+        assert_eq!(a.bound_to_allegation, None);
+        assert!(
+            a.findings
+                .iter()
+                .any(|f| f.detail.contains("nothing was given to check against")
+                    && f.detail.contains("--nonce")),
+            "{:?}",
+            a.findings
+        );
+    }
+
+    /// A bundle whose bytes never decoded is unanswerable on relevance too,
+    /// rather than false: there was nothing to compare the allegation against.
+    #[test]
+    fn an_unsigned_bundle_is_not_reported_as_being_about_the_wrong_round() {
+        let mut b = sound_bundle();
+        b.recorded.signature = hex::encode([0u8; 64]);
+        let a = verify_against(
+            &b,
+            &Expectations {
+                nonce: Some(4),
+                ..Expectations::none()
+            },
+        );
+        assert_eq!(a.verdict, Verdict::Unsigned);
+        assert_eq!(a.bound_to_allegation, None);
+    }
+
+    /// The same separation, in the one place it reaches a script: the exit
+    /// status. `verify-evidence` answers a usage error with 64 rather than 1
+    /// precisely because 1 is taken, and every grade has to stay distinct from
+    /// it for that to be worth doing.
+    #[test]
+    fn no_grade_occupies_the_code_reserved_for_the_callers_own_mistake() {
+        for v in [
+            Verdict::Sound,
+            Verdict::Unsupported,
+            Verdict::Unrelated,
+            Verdict::Misdescribed,
+            Verdict::Unsigned,
+        ] {
+            assert!(
+                (0..=2).contains(&v.exit_code()),
+                "{v} exits {}, outside the range the command documents",
+                v.exit_code()
+            );
+        }
+    }
+
+    /// A typo in what the checker typed is the checker's mistake. Graded as a
+    /// verdict it would read as a finding against the accused.
+    #[test]
+    fn an_allegation_that_will_not_parse_is_a_usage_error_not_a_verdict() {
+        let e = Expectations::parse(Some("not-a-key"), None, None, None).unwrap_err();
+        assert!(e.contains("--node"), "{e}");
+        assert!(e.contains("32 bytes of hex"), "{e}");
+
+        let e = Expectations::parse(None, Some("BTC/USD"), None, None).unwrap_err();
+        assert!(e.contains("--feed"), "{e}");
+
+        let e = Expectations::parse(None, None, None, Some("CNOTACONTRACT")).unwrap_err();
+        assert!(e.contains("--aggregator"), "{e}");
+    }
+
+    /// Accepted however it was pasted, and the aggregator in either of the two
+    /// forms it is written in: the deployment file gives a `C...` address, the
+    /// signed payload carries the raw bytes.
+    #[test]
+    fn an_allegation_is_accepted_however_it_was_pasted() {
+        let k = "AB".repeat(32);
+        let e = Expectations::parse(Some(&format!("  0x{k}  ")), None, None, None).unwrap();
+        assert_eq!(e.node, Some([0xabu8; 32]));
+
+        let hex_form = Expectations::parse(None, None, None, Some(&"07".repeat(32))).unwrap();
+        assert_eq!(hex_form.aggregator, Some(AGGREGATOR));
+
+        // The `C...` address the harness's fixture deployment already pins.
+        let strkey = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+        assert_eq!(
+            Expectations::parse(None, None, None, Some(strkey))
+                .unwrap()
+                .aggregator,
+            Some(crate::strkey::contract_id_bytes(strkey).unwrap())
+        );
     }
 }

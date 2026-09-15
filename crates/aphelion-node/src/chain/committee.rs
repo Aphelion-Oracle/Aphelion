@@ -96,7 +96,10 @@ pub struct DisputeRecord {
     pub accused: String,
     pub reporter: String,
     pub feed: String,
-    pub round_id: u64,
+    /// The nonce the accused signed the disputed submission under. The same
+    /// number `replay <feed> <nonce>` takes, which is the point of it: an
+    /// allegation names something the signature covers.
+    pub nonce: u64,
     pub evidence: String,
     pub bond: i128,
     pub opened_at: u64,
@@ -225,7 +228,7 @@ pub trait CommitteeClient: Send + Sync {
         &self,
         accused: &str,
         feed: &str,
-        round_id: u64,
+        nonce: u64,
         evidence: &str,
     ) -> Result<Receipt<u64>>;
     async fn vote(&self, dispute_id: u64, uphold: bool) -> Result<Receipt<()>>;
@@ -314,7 +317,7 @@ pub(crate) fn decode_dispute(v: &serde_json::Value) -> Result<DisputeRecord> {
             .ok_or_else(|| NodeError::Chain(format!("{ctx}.accused is not a 32-byte key: {v}")))?,
         reporter: str_field(v, "reporter", ctx)?,
         feed: str_field(v, "feed", ctx)?,
-        round_id: u64_field(v, "round_id", ctx)?,
+        nonce: u64_field(v, "nonce", ctx)?,
         evidence: str_field(v, "evidence", ctx)?,
         bond: i128_field(v, "bond", ctx)?,
         opened_at: u64_field(v, "opened_at", ctx)?,
@@ -589,7 +592,7 @@ impl CommitteeClient for CliCommittee {
         &self,
         accused: &str,
         feed: &str,
-        round_id: u64,
+        nonce: u64,
         evidence: &str,
     ) -> Result<Receipt<u64>> {
         let (v, tx_hash) = self
@@ -601,7 +604,7 @@ impl CommitteeClient for CliCommittee {
                     ("reporter", self.account().to_string()),
                     ("accused", accused.to_string()),
                     ("feed", feed.to_string()),
-                    ("round_id", round_id.to_string()),
+                    ("nonce", nonce.to_string()),
                     ("evidence", evidence.to_string()),
                 ],
             )
@@ -684,7 +687,7 @@ mod tests {
             "accused": "AB".repeat(32),
             "reporter": "GREPORTER",
             "feed": "BTC_USD",
-            "round_id": 91,
+            "nonce": 91,
             "evidence": "ipfs://bafy",
             "bond": "1000000000",
             "opened_at": 1_700_000_000u64,
@@ -702,6 +705,8 @@ mod tests {
         // Normalised to lower case: the same key has to compare equal to the
         // one the node prints for itself.
         assert_eq!(d.accused, "ab".repeat(32));
+        // The allegation's identity, and the argument to `replay`.
+        assert_eq!(d.nonce, 91);
         assert_eq!(d.status, DisputeStatus::Voting);
         assert_eq!(d.bond, 1_000_000_000);
         assert!(d.appellant.is_none());
@@ -713,7 +718,7 @@ mod tests {
     fn a_resolved_dispute_knows_when_its_money_moves() {
         let mut v = serde_json::json!({
             "id": 1, "accused": "cd".repeat(32), "reporter": "G", "feed": "ETH_USD",
-            "round_id": 1, "evidence": "", "bond": 1, "opened_at": 10, "deadline": 20,
+            "nonce": 1, "evidence": "", "bond": 1, "opened_at": 10, "deadline": 20,
             "resolved_at": 25, "vote_round": 1, "votes_for": 3, "votes_against": 0,
             "status": { "Upheld": [] }, "appellant": "GAPPEAL", "appeal_bond": 5,
         });

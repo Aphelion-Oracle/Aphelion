@@ -288,3 +288,65 @@ fn the_bundle_parameter_shape_is_part_of_the_public_surface() {
     let json = serde_json::to_value(p).unwrap();
     assert_eq!(json["min_sources"], 3);
 }
+
+/// The substitution the allegation's identifiers exist to catch, run through
+/// the real pair rather than a hand-built bundle.
+///
+/// An operator accused over nonce 4 replays nonce 7 instead — a round they
+/// reported honestly, which reproduces, and whose bundle is sound in every way
+/// a bundle can be sound on its own. Nothing is forged. The committee is simply
+/// answered about a different round, and only the dispute's own identifiers
+/// separate that from an answer.
+#[test]
+fn an_honest_bundle_for_a_round_nobody_disputed_does_not_answer_the_dispute() {
+    let json = bundle_json(&round("100.00", 10, 950, 7), &honest_observations());
+    let bundle: verify::Bundle = serde_json::from_str(&json).unwrap();
+
+    // Read on its own terms, it is beyond reproach.
+    assert_eq!(verify::verify(&bundle).verdict, verify::Verdict::Sound);
+
+    // Measured against the allegation on the ledger, it is not evidence in
+    // this case at all.
+    let allegation = verify::Expectations {
+        node: Some(key().verifying_key().to_bytes()),
+        feed: Some(feed()),
+        nonce: Some(4),
+        aggregator: Some(AGGREGATOR),
+    };
+    let audit = verify::verify_against(&bundle, &allegation);
+    assert_eq!(audit.verdict, verify::Verdict::Unrelated);
+    assert_eq!(audit.bound_to_allegation, Some(false));
+    assert_eq!(audit.verdict.exit_code(), 2);
+
+    // And the bundle for the round actually disputed passes the same check,
+    // so the grade above is about the round and not about the flags.
+    let json = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let bundle: verify::Bundle = serde_json::from_str(&json).unwrap();
+    let audit = verify::verify_against(&bundle, &allegation);
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+    assert_eq!(audit.bound_to_allegation, Some(true));
+}
+
+/// The identifiers a committee types come off the dispute record, so the shape
+/// they arrive in has to be the shape `Expectations::parse` accepts. This is
+/// the same rot the rest of this file guards against, one step further out:
+/// `dispute show` prints a key as lower-case hex and a nonce as a number.
+#[test]
+fn what_a_dispute_record_prints_is_what_the_verifier_accepts() {
+    let json = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let bundle: verify::Bundle = serde_json::from_str(&json).unwrap();
+
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let allegation =
+        verify::Expectations::parse(Some(&accused), Some("BTC_USD"), Some(4), None).unwrap();
+
+    assert_eq!(
+        verify::verify_against(&bundle, &allegation).verdict,
+        verify::Verdict::Sound
+    );
+}
