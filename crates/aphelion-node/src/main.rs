@@ -199,6 +199,12 @@ enum Command {
         /// network is sound and irrelevant.
         #[arg(long)]
         aggregator: Option<String>,
+        /// SHA-256 of the document the accused put on the record, as
+        /// `dispute show` prints it. Checked against this file's bytes rather
+        /// than against the signed payload: it answers whether this is the
+        /// answer they committed to while the vote was open.
+        #[arg(long)]
+        digest: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -292,6 +298,7 @@ async fn run() -> Result<()> {
             feed,
             nonce,
             aggregator,
+            digest,
             json,
         } => cmd::verify_evidence::run(
             &path,
@@ -300,6 +307,7 @@ async fn run() -> Result<()> {
                 feed,
                 nonce,
                 aggregator,
+                digest,
             },
             json,
         ),

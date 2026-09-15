@@ -279,11 +279,14 @@ venue manipulated on purpose.
 
 ```
   open_dispute ──▶ vote ──▶ resolve ──▶ [appeal ──▶ vote ──▶ resolve] ──▶ settle
+        │
+        └──▶ respond          (the accused, while the vote is open)
 ```
 
 | Function | Caller | Notes |
 | --- | --- | --- |
 | `open_dispute(reporter, accused, feed, nonce, evidence) -> u64` | Anyone | Posts `dispute_bond`. `(accused, feed, nonce)` may be filed once. The nonce the accused *signed*, not the aggregator's round id: it is inside the signed payload, so evidence can be checked against the allegation |
+| `respond(responder, dispute_id, digest, uri)` | The accused node's owner, while voting is open | Publishes the SHA-256 of the answer, not the answer. Up to `MAX_RESPONSES` (3) per voting round: an answer may be corrected and can never be withdrawn |
 | `vote(member, dispute_id, uphold)` | A committee member | Once per voting round. Refused if the member owns the accused node |
 | `resolve(dispute_id) -> DisputeStatus` | Anyone, after the voting period | Upheld only on quorum *and* a majority. A tie favours the accused |
 | `appeal(appellant, dispute_id)` | Either side, once, in the appeal window | Posts `appeal_bond`, clears the votes, reopens voting |
@@ -291,6 +294,26 @@ venue manipulated on purpose.
 | `remove_member(member)` | Admin | Cannot shrink the committee below its own quorum. There is no `add_member` — see [Electing the committee](#electing-the-committee) |
 | `initialize` / `set_config` / `get_config` / `committee` | Admin / anyone | |
 | `get_dispute(id)` / `vote_of(id, member)` / `dispute_for(accused, feed, nonce)` / `dispute_count()` | Anyone | |
+| `responses(dispute_id, vote_round)` | Anyone | The answers on the record for that round, oldest first. Empty for a round nobody answered, which is itself worth reading |
+
+### What `respond` is for, and what it is not
+
+The committee weighs a document. This contract cannot see one and does not try;
+what it holds is a digest, and the only thing a digest settles is *which*
+document. Before it, the accused's reply was a file in somebody's inbox, and
+three things could not be established afterwards: whether the committee had an
+answer at all, which answer it was, and whether the file produced later as "the
+evidence" was the one they read.
+
+The timing is half of the value. A digest posted while the vote is open was
+fixed before the accused could know how the vote was going; one posted after is
+a commentary. So `respond` is refused past the voting deadline, on the same
+boundary `vote` uses.
+
+It says nothing about whether the document is any good. That judgement is
+`aphelion-node verify-evidence`, off chain, by whoever holds the file —
+`--digest` is where the two meet, and it compares the digest against the bytes
+of the file rather than against anything the file says about itself.
 
 Where the money goes at settlement:
 
@@ -702,6 +725,8 @@ Soroban returns these as `Error(Contract, #n)`.
 | 29 | `AppealWindowClosed` | Appealing too late |
 | 30 | `AlreadyAppealed` | |
 | 31 | `AlreadySettled` | |
+| 32 | `NotAccused` | Answering an allegation against somebody else's node |
+| 33 | `AnswerLimit` | This voting round already holds `MAX_RESPONSES` answers |
 | 40 | `ElectionRunning` | One at a time |
 | 41 | `UnknownElection` | No election running, or no election with that id |
 | 42 | `TermNotServed` | Opening one before the sitting committee's term ends |
@@ -777,8 +802,9 @@ submitter.
 | Slashing | `get_config()` | Quorum, bonds, and the length of every window |
 | Slashing | `committee()` | Whether this operator holds a seat |
 | Slashing | `dispute_count()`, `get_dispute(id)`, `vote_of(id, member)` | The dispute scan behind `duties` |
+| Slashing | `responses(id, round)` | Whether this node has answered a dispute against it — read only for its own open disputes |
 | Slashing | `current_election()`, `next_election()`, `get_election(id)`, `candidates(id)`, `ballot_of(id, node)` | The election half of `duties` |
-| Slashing | `open_dispute`, `vote`, `resolve`, `appeal`, `settle` | `aphelion-node dispute ...` |
+| Slashing | `open_dispute`, `respond`, `vote`, `resolve`, `appeal`, `settle` | `aphelion-node dispute ...` |
 | Slashing | `open_election`, `nominate`, `cast_ballot`, `finalize_election` | `aphelion-node election ...` |
 | Randomness | `get_config()`, `round_count()`, `get_round(id)`, `latest()` | `aphelion-node beacon status` |
 | Randomness | `open_round`, `commit`, `reveal`, `finalize` | `aphelion-node beacon ...` |

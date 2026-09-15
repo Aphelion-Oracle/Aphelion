@@ -323,7 +323,7 @@ repository, not the target architecture.
 | `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 221 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 41 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
-| `aphelion-slashing` contract — disputes, committee voting, appeals, elections | ✅ Implemented | 61 |
+| `aphelion-slashing` contract — disputes, answers, committee voting, appeals, elections | ✅ Implemented | 68 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
 | `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 38 |
 | Randomness participation from the node — commit/reveal loop and CLI | ✅ Implemented | 33 |
@@ -331,8 +331,8 @@ repository, not the target architecture.
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
-| Committee participation — disputes and elections, from the node | ✅ Implemented | 9 |
-| Dispute evidence — replay a round, and check a replay somebody else produced | ✅ Implemented | 53 |
+| Committee participation — disputes and elections, from the node | ✅ Implemented | 12 |
+| Dispute evidence — replay a round, put the answer on the record, and check a replay somebody else produced | ✅ Implemented | 59 |
 | Operator status page — five reads, one verdict, an exit code | ✅ Implemented | 17 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
@@ -341,33 +341,33 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-613 tests in total: 318 off-chain (`cargo test --workspace`), 255 against the
+631 tests in total: 329 off-chain (`cargo test --workspace`), 262 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 318 are: 38 in `aphelion-core`, 221 in the node's library, 5 in
+The off-chain 329 are: 38 in `aphelion-core`, 227 in the node's library, 5 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 221 — 15 in the harness, and 39 across the
-four integration suites (duties 9, evidence 9, multi-node 10, sweep 11).
+target, so they are *not* inside the 227 — 15 in the harness, and 44 across the
+four integration suites (duties 12, evidence 11, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
 because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 221. Committee participation is the same shape: its 9 cover assembling a
-snapshot off the chain, and the rules applied to that snapshot have 25 more
-unit tests with 6 on decoding what the contract returns, all inside the 221 —
+node's 227. Committee participation is the same shape: its 12 cover assembling a
+snapshot off the chain, and the rules applied to that snapshot have 26 more
+unit tests with 7 on decoding what the contract returns, all inside the 227 —
 with the 5 command tests in the binary target beside it. The dispute evidence
-pair is split the same way again: 9 integration tests run the real `replay`
+pair is split the same way again: 11 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 24 more unit tests inside the 221. The harness's 15 are 12
+itself has 28 more unit tests inside the 227. The harness's 15 are 12
 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 306 tests and reported 318. The skip prints a `SKIP`
+with no Postgres has run 317 tests and reported 329. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -645,9 +645,9 @@ docker compose logs -f node
 | `duties [--json]` | What the slashing contract is waiting on from this operator, and by when |
 | `beacon status \| tick \| open \| commit \| reveal \| finalize` | The randomness beacon, and what this node owes it |
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
-| `dispute list \| show \| open \| vote \| resolve \| appeal \| settle` | Disputes |
+| `dispute list \| show \| open \| respond \| vote \| resolve \| appeal \| settle` | Disputes |
 | `replay <feed> <nonce> [--json]` | Rebuild a published round from the observations retained underneath it, and check the signature stored beside it |
-| `verify-evidence <path\|-> [--node --feed --nonce --aggregator] [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. The four flags are the allegation, read off `dispute show`, and bind the bundle to it. Needs no configuration, key, database or chain |
+| `verify-evidence <path\|-> [--node --feed --nonce --aggregator --digest] [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. The flags are the allegation, read off `dispute show`, and bind the bundle to it; `--digest` binds it to the answer the accused put on the ledger. Needs no configuration, key, database or chain |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
 | `migrate` | Apply database migrations and exit |
 | `show-config` | Print the effective configuration after environment overrides |
@@ -1415,13 +1415,17 @@ money at stake on both sides.
 
 ```
   open_dispute ──▶ vote (committee) ──▶ resolve ──▶ [appeal] ──▶ settle
-     bond posted      one vote each      majority     larger      stake moves
-                      voting period      or dismissed  bond        or bond does
+     bond posted   │  one vote each      majority     larger      stake moves
+                   │  voting period      or dismissed  bond        or bond does
+                   │
+              respond
+       the accused, while the vote is open
 ```
 
 | Step | Who | Cost of being wrong |
 | --- | --- | --- |
 | `open_dispute` | Anyone | Bond forfeited to the operator if dismissed |
+| `respond` | The accused, while voting is open | The answer nobody can prove was given |
 | `vote` | A committee member | — |
 | `resolve` | Anyone, after the voting period | — |
 | `appeal` | Either side, once | Bond forfeited unless the outcome changes |
@@ -1493,6 +1497,46 @@ not as anything worse — an absence of evidence is not evidence. Which is the
 reason to check that `retention.raw_prices` outlasts the dispute and appeal
 windows combined before it matters.
 
+### Putting the answer on the record
+
+A bundle in an inbox is not an answer the ledger knows about, and three things
+cannot be established afterwards from one: whether the committee had an answer
+at all, which answer it was, and whether the file produced later as "the
+evidence" was the file they read. `respond` closes that, and it holds a digest
+rather than a document:
+
+```bash
+aphelion-node replay BTC_USD 4812 --json > evidence.json
+aphelion-node dispute respond 7 --file evidence.json --commit
+```
+
+The timing is half of what it is worth. A digest published while the vote is
+open was fixed before the accused could know how the vote was going; the same
+digest published afterwards would be worth nothing, because a file assembled
+after a result can be assembled to suit it. So the contract refuses `respond`
+past the voting deadline, on the same boundary `vote` uses.
+
+It says nothing about whether the document is any good, and is not meant to. A
+digest over a worthless bundle is a perfectly good digest. What it settles is
+*which* document — `verify-evidence --digest` is where the two meet, and the
+grading is unchanged.
+
+An answer may be **corrected and never withdrawn**: up to three per voting
+round, kept in the order they were given, so an operator who published the
+digest of the wrong file can say so and a committee sees the substitution as a
+substitution. An appeal opens a second round and asks again; the first round's
+answer stays on the record and is not carried into the second, since an appeal
+is precisely the claim that the first hearing got it wrong.
+
+The dry run — `respond` without `--commit` — audits the bundle against the
+allegation first and refuses to publish one that grades `unsigned`,
+`misdescribed` or `unrelated`. Those are not weak evidence; they are not
+evidence, and an operator should not spend their answer on a file that
+establishes nothing about the allegation when they can still replay the round it
+actually names. Any file that is not a bundle at all is accepted and its digest
+published unjudged, with the audit line saying so: a written account or a log
+archive is a legitimate answer that nothing here can grade.
+
 ### Checking one
 
 A bundle produced by the accused, carrying the accused's software's verdict on
@@ -1511,15 +1555,23 @@ What it does want, and `dispute show` prints ready to paste, is the allegation:
 
 ```bash
 aphelion-node verify-evidence bundle.json \
-    --node 608dd653... --feed BTC_USD --nonce 91 --aggregator CDLZ...
+    --node 608dd653... --feed BTC_USD --nonce 91 --aggregator CDLZ... \
+    --digest 9f2a...
 ```
 
-Those four are typed by the person checking rather than read out of the file,
-which is the whole point of them — a bundle asked to supply the standard it is
-measured against will meet it. Each one given is compared against the *signed
-bytes*, where the key, the feed, the nonce and the aggregator's contract id all
-live. Give what you have; a committee member holding only the accused's key is
-not made to invent a nonce.
+Those are typed by the person checking rather than read out of the file, which is
+the whole point of them — a bundle asked to supply the standard it is measured
+against will meet it. The first four are compared against the *signed bytes*,
+where the key, the feed, the nonce and the aggregator's contract id all live.
+Give what you have; a committee member holding only the accused's key is not
+made to invent a nonce.
+
+`--digest` is the odd one out, and it is about the file rather than about what
+the file says: it is the SHA-256 the accused published with `respond`, compared
+against the bytes in front of the verifier. That is a comparison of documents,
+not of meanings, so a re-serialised copy that asserts every last thing the
+original asserted is a different document and is reported as one. Forgiving the
+difference would forgive exactly the edit a substitution needs.
 
 It treats the file as hostile input, not as stale input. The bundle's own verdict
 and findings are ignored outright; there is no field to read them into. What
@@ -1550,6 +1602,14 @@ is why the slashing contract records the nonce the accused **signed** rather tha
 the round id the aggregator allocated afterwards. An allegation named by
 something outside the signed payload could not be bound to the evidence
 answering it by any amount of arithmetic.
+
+`--digest` catches the substitution the other four cannot. The same node, the
+same feed, the same nonce, the same deployment, the same signed bytes — and a
+window with a venue added that was not in the file the committee was handed. It
+is sound, it is about the allegation, and it is not what was answered with. A
+`sound` verdict with a digest given is a narrower claim than a `sound` verdict
+without one, and the passing finding names every field it actually compared so
+the difference is readable rather than assumed.
 
 Not passing the flags is not a pass. An audit that was never asked the question
 says so, in the findings and in `bound_to_allegation`, rather than reading like
@@ -1632,10 +1692,10 @@ signing as : GOPERATOR...
 weight     : 7500 bps
 committee  : seated
 
-[COSTLY] dispute 2 against this node (BTC_USD nonce 91); 1 for, 0 against,
-         quorum 3. Evidence: ipfs://bafyevidence
+[COSTLY] dispute 2 against this node (BTC_USD nonce 91), unanswered; 1 for,
+         0 against, quorum 3. Evidence: ipfs://bafyevidence
     10h left
-    aphelion-node replay BTC_USD 91
+    aphelion-node replay BTC_USD 91 --json > evidence.json && aphelion-node dispute respond 2 --file evidence.json --commit
 [FORFEITED] election 4 is balloting for 5 seats until 1700090000; this node's
             7500 bps has not been cast
     24h left
@@ -1668,8 +1728,9 @@ Acting on one is always a separate command, run on purpose:
 
 | Command | What it does |
 | --- | --- |
-| `dispute list` / `dispute show <id>` | The allegation, the evidence link, the votes and the clock |
+| `dispute list` / `dispute show <id>` | The allegation, the evidence link, the answers on the record, the votes and the clock |
 | `dispute open <accused> <feed> <nonce> <evidence> --commit` | File, posting the bond. The nonce the accused signed, which `SubmissionAccepted` carries alongside the round id |
+| `dispute respond <id> --file <path> --commit` | Answer an allegation against this node: publish the digest of the evidence while the vote is open |
 | `dispute vote <id> --uphold\|--dismiss` | A committee vote |
 | `dispute resolve <id>` | Record the outcome once voting has closed |
 | `dispute appeal <id> --commit` | Contest a resolved dispute, posting the larger bond |
@@ -1705,7 +1766,7 @@ refusal repeats it.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · a disputed round replayable from its inputs, and the bundle checkable by the other side ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · a disputed round replayable from its inputs, the answer on the ledger rather than in the post, and the bundle checkable by the other side ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · a randomness beacon ✅ (contract and node-side participation) · non-price data · parameter governance ✅ |
 
@@ -1762,9 +1823,11 @@ decisions rather than the plumbing:
 - `aphelion-slashing` — that a dispute nobody voted on is dismissed rather than
   upheld, that a failed appeal pays the side it dragged back, that a ballot is
   worth what the node was worth when it was cast, that a candidate jailed
-  during the ballot does not take the seat they were winning, and that an
+  during the ballot does not take the seat they were winning, that an
   election too thin to fill its quorum leaves the sitting committee in place
-  rather than vacating it
+  rather than vacating it, and that an answer can be corrected but never
+  withdrawn, never filed by anybody but the accused, and never accepted after
+  the committee could have read it
 - `aphelion-governance` — that changing the delay takes the delay, that the
   window a proposal was queued under cannot be widened underneath it, that the
   guardian can stop a proposal and start nothing, and that the last proposer
@@ -1776,10 +1839,14 @@ decisions rather than the plumbing:
   the longest silence goes first when a batch has to be truncated
 - `aphelion-node::engine::verify` — that a bundle carrying a valid signature
   over one price and prose asserting another is caught, that a bundle signed by
-  the wrong key establishes nothing at all, and that every audit states the one
-  thing it cannot check
+  the wrong key establishes nothing at all, that the same bundle in different
+  bytes is a different document from the one answered with, and that every audit
+  states the one thing it cannot check
 - `aphelion-node` integration `evidence` — that the bundle `replay` writes is the
-  bundle `verify` reads, field for field, since the two share no types by design
+  bundle `verify` reads, field for field, since the two share no types by design;
+  that the digest `respond` publishes is the digest a committee computes; and
+  that a second sound bundle for the same round is still not the one answered
+  with
 - `aphelion-node::engine::replay` — that an edited row reads as tampered even
   when the observations beside it agree, that an observation which arrived after
   a round is not evidence against it, that a pruned window is unanswerable

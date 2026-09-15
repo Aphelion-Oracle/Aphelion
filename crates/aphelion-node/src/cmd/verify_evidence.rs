@@ -6,18 +6,24 @@
 //! of them would be a verifier only the accused could run.
 //!
 //! What it does take, optionally, is the allegation: `--node`, `--feed`,
-//! `--nonce` and `--aggregator`, as `dispute show` prints them. Those are typed
-//! by the person checking rather than read from the file, which is the whole
-//! point of them — a bundle asked to supply the standard it is measured against
-//! will meet it.
+//! `--nonce`, `--aggregator` and `--digest`, as `dispute show` prints them.
+//! Those are typed by the person checking rather than read from the file, which
+//! is the whole point of them — a bundle asked to supply the standard it is
+//! measured against will meet it.
+//!
+//! `--digest` is the odd one and the one a committee should reach for first. The
+//! other four are compared against the signed payload; this one is compared
+//! against the file's own bytes, and it answers a question the payload cannot:
+//! whether this is the document the accused committed to on the ledger while
+//! the vote was open, or one that arrived afterwards.
 //!
 //! The judgement is [`aphelion_node::engine::verify`]. What is here is reading a
-//! file, turning four flags into [`Expectations`], and printing the result.
+//! file, turning five flags into [`Expectations`], and printing the result.
 
 use std::io::{Read, Write};
 use std::path::Path;
 
-use aphelion_node::engine::verify::{verify_against, Audit, Bundle, Expectations, Verdict};
+use aphelion_node::engine::verify::{verify_document, Audit, Expectations, Verdict};
 use aphelion_node::error::{NodeError, Result};
 
 /// The allegation, as the caller typed it off the dispute.
@@ -27,6 +33,9 @@ pub struct Against {
     pub feed: Option<String>,
     pub nonce: Option<u64>,
     pub aggregator: Option<String>,
+    /// SHA-256 of the answer the accused put on the record, from
+    /// `slashing.responses` — `dispute show` prints it.
+    pub digest: Option<String>,
 }
 
 /// `EX_USAGE`, as `sysexits.h` has meant it for forty years.
@@ -49,20 +58,25 @@ pub fn run(path: &Path, against: &Against, json: bool) -> Result<()> {
         against.feed.as_deref(),
         against.nonce,
         against.aggregator.as_deref(),
+        against.digest.as_deref(),
     )
     .unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(EX_USAGE);
     });
 
+    // Bytes, not a string, and never re-serialised on the way through. The
+    // digest the accused published is over the file exactly as it is, so
+    // anything that normalised it here — trailing newlines, re-encoding — would
+    // be quietly answering a different question from the one `--digest` asks.
     let raw = if path == Path::new("-") {
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf).map_err(|e| {
             NodeError::Other(anyhow::anyhow!("cannot read the bundle from stdin: {e}"))
         })?;
         buf
     } else {
-        std::fs::read_to_string(path).map_err(|e| {
+        std::fs::read(path).map_err(|e| {
             NodeError::Other(anyhow::anyhow!("cannot read `{}`: {e}", path.display()))
         })?
     };
@@ -71,14 +85,12 @@ pub fn run(path: &Path, against: &Against, json: bool) -> Result<()> {
     // distinction matters: a verdict of any kind implies something was judged.
     // Deliberately not a `Config` error: nothing about this operator's setup is
     // wrong, and `main` appends a pointer to the setup guide for that variant.
-    let bundle: Bundle = serde_json::from_str(&raw).map_err(|e| {
+    let audit = verify_document(&raw, &expect).map_err(|e| {
         NodeError::Other(anyhow::anyhow!(
             "this is not an Aphelion evidence bundle: {e}. A bundle is the output of \
              `aphelion-node replay <feed> <nonce> --json`."
         ))
     })?;
-
-    let audit = verify_against(&bundle, &expect);
 
     if json {
         println!(
@@ -114,6 +126,14 @@ fn render(a: &Audit) {
         }
     }
     println!();
+
+    if let Some(d) = &a.document_digest {
+        // Printed on every audit, not only when one was given. This is the
+        // number the accused publishes with `dispute respond`, and the number a
+        // committee compares against `slashing.responses`.
+        println!("Document SHA-256: {d}");
+        println!();
+    }
 
     println!("Observations offered: {}", a.observation_count);
     if let Some(p) = &a.recomputed {

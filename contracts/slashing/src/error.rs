@@ -45,6 +45,13 @@ pub enum SlashingError {
     AlreadyAppealed = 30,
     /// The dispute has already been settled.
     AlreadySettled = 31,
+    /// Only the operator of the accused node may answer an allegation against
+    /// it. An answer from anybody else would be a stranger's document with the
+    /// accused's name on it.
+    NotAccused = 32,
+    /// This voting round already holds as many answers as it will hold. See
+    /// `MAX_RESPONSES`.
+    AnswerLimit = 33,
 
     /// An election is already running. There is only ever one.
     ElectionRunning = 40,

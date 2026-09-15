@@ -312,6 +312,7 @@ fn an_honest_bundle_for_a_round_nobody_disputed_does_not_answer_the_dispute() {
         feed: Some(feed()),
         nonce: Some(4),
         aggregator: Some(AGGREGATOR),
+        digest: None,
     };
     let audit = verify::verify_against(&bundle, &allegation);
     assert_eq!(audit.verdict, verify::Verdict::Unrelated);
@@ -332,6 +333,98 @@ fn an_honest_bundle_for_a_round_nobody_disputed_does_not_answer_the_dispute() {
     assert_eq!(audit.bound_to_allegation, Some(true));
 }
 
+/// The digest the accused publishes and the digest the committee computes are
+/// the same number, over the same bytes, or the whole scheme is decoration.
+///
+/// `dispute respond` hashes the file `replay` wrote; `verify-evidence --digest`
+/// hashes the file it was handed. Nothing forces those two to be the same
+/// operation except this test: a normalisation on either side — a re-serialise,
+/// a trailing newline, a parse-and-print — would leave both commands working,
+/// both outputs looking right, and every honest answer reading as a
+/// substitution.
+#[test]
+fn the_digest_answered_with_is_the_digest_a_committee_computes() {
+    let json = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let published = verify::sha256(json.as_bytes());
+
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let allegation = verify::Expectations::parse(
+        Some(&accused),
+        Some("BTC_USD"),
+        Some(4),
+        None,
+        Some(&hex::encode(published)),
+    )
+    .unwrap();
+
+    let audit = verify::verify_document(json.as_bytes(), &allegation).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+    assert_eq!(audit.bound_to_allegation, Some(true));
+    assert_eq!(audit.document_digest, Some(hex::encode(published)));
+}
+
+/// The substitution the digest exists to catch, and the one the four
+/// identifiers cannot.
+///
+/// The accused answers, the vote goes against them, and they produce a second
+/// bundle for the same round: same node, same feed, same nonce, same
+/// deployment, same signed bytes — with an extra venue in the window that was
+/// not in the first. It is sound. It is about the allegation. It is not what
+/// they answered with, and only the digest says so.
+#[test]
+fn a_second_sound_bundle_for_the_same_round_is_still_not_the_one_answered_with() {
+    let disputed = round("100.00", 10, 950, 4);
+    let answered = bundle_json(&disputed, &honest_observations());
+    let published = verify::sha256(answered.as_bytes());
+
+    let mut later = honest_observations();
+    later.push(obs("okx", "100.00", 980));
+    let produced_afterwards = bundle_json(&disputed, &later);
+
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let four =
+        verify::Expectations::parse(Some(&accused), Some("BTC_USD"), Some(4), None, None).unwrap();
+    let five = verify::Expectations::parse(
+        Some(&accused),
+        Some("BTC_USD"),
+        Some(4),
+        None,
+        Some(&hex::encode(published)),
+    )
+    .unwrap();
+
+    // Everything the ledger's four identifiers can ask, it passes.
+    let audit = verify::verify_document(produced_afterwards.as_bytes(), &four).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+
+    // And it is not the document the accused committed to while the vote was
+    // open.
+    let audit = verify::verify_document(produced_afterwards.as_bytes(), &five).unwrap();
+    assert_eq!(audit.verdict, verify::Verdict::Unrelated);
+    assert_eq!(audit.bound_to_allegation, Some(false));
+    assert_eq!(audit.verdict.exit_code(), 2);
+
+    // The file that was answered with passes the same check, so the grade
+    // above is about the substitution and not about the flag.
+    let audit = verify::verify_document(answered.as_bytes(), &five).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+}
+
 /// The identifiers a committee types come off the dispute record, so the shape
 /// they arrive in has to be the shape `Expectations::parse` accepts. This is
 /// the same rot the rest of this file guards against, one step further out:
@@ -343,7 +436,7 @@ fn what_a_dispute_record_prints_is_what_the_verifier_accepts() {
 
     let accused = hex::encode(key().verifying_key().to_bytes());
     let allegation =
-        verify::Expectations::parse(Some(&accused), Some("BTC_USD"), Some(4), None).unwrap();
+        verify::Expectations::parse(Some(&accused), Some("BTC_USD"), Some(4), None, None).unwrap();
 
     assert_eq!(
         verify::verify_against(&bundle, &allegation).verdict,

@@ -107,6 +107,56 @@ pub struct Dispute {
     pub appealed_from: DisputeStatus,
 }
 
+/// The accused's answer to an allegation, as the ledger records it.
+///
+/// Not the answer itself. A digest of it, and somewhere to find it — the same
+/// division the reporter's `evidence` field makes, for the same reason: the
+/// ledger is the wrong place for a data dump, and a hash is the whole of what
+/// the ledger can usefully hold about a document it cannot read.
+///
+/// What the digest buys is narrow and is the reason this exists at all. Before
+/// it, the accused's reply was a file in somebody's inbox: nothing said the
+/// committee had one, nothing said which one, and nothing stopped a different
+/// file being produced afterwards as the one they were shown. A digest posted
+/// while the vote is open fixes the document at a moment when the accused
+/// cannot yet know how the vote goes.
+///
+/// It proves nothing about the contents. A digest over a worthless bundle is a
+/// perfectly good digest; whether the document behind it is worth anything is
+/// what `verify-evidence` is for, and no arithmetic here can stand in for it.
+#[contracttype]
+#[derive(Clone)]
+pub struct Response {
+    pub dispute: u64,
+    /// The voting round this answers. An appeal re-opens the question, and the
+    /// answer to a second hearing is a different document from the first.
+    pub vote_round: u32,
+    /// The account that filed it — the accused node's owner, checked against
+    /// the registry rather than taken on the caller's word.
+    pub by: Address,
+    /// SHA-256 of the document, over its bytes exactly as they are.
+    pub digest: BytesN<32>,
+    /// Where to get it: a URL, a content address, or nothing. Empty is allowed
+    /// on purpose. An operator who hands the file to the committee privately
+    /// has still fixed which file they handed over, and a locator this contract
+    /// cannot check is worth less than a digest it can.
+    pub uri: String,
+    pub at: u64,
+}
+
+/// How many answers one voting round will hold.
+///
+/// More than one, because an answer may be corrected: an operator who posts the
+/// digest of the wrong file would otherwise be unable to answer at all, and a
+/// record that punishes a typo that hard collects fewer honest answers. Not
+/// many more, because each one is ledger state and an accused who could append
+/// without limit could bury the committee in documents on the last afternoon of
+/// the vote.
+///
+/// Correcting is not withdrawing. Every answer stays where it is, in the order
+/// it was given, so a committee sees a substitution as a substitution.
+pub const MAX_RESPONSES: u32 = 3;
+
 /// What the ledger records about an election.
 ///
 /// As with a governance proposal, the phases that are facts about the clock —
@@ -197,6 +247,10 @@ pub enum DataKey {
     /// The identity of an allegation — `(accused, feed, nonce)` — so it cannot
     /// be filed twice.
     Filed(BytesN<32>, Symbol, u64),
+    /// The accused's answers to one voting round of one dispute, in the order
+    /// they were given. Keyed by the round rather than by the dispute, so an
+    /// appeal asks for a fresh answer and does not inherit the last one.
+    Responses(u64, u32),
 
     /// Monotonic election id allocator.
     ElectionCounter,

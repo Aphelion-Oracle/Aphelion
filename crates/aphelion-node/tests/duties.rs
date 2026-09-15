@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use aphelion_node::chain::committee::{
     CandidateRecord, CommitteeClient, DisputeRecord, DisputeStatus, ElectionRecord, Receipt,
-    SlashingParams,
+    ResponseRecord, SlashingParams,
 };
 use aphelion_node::chain::{ChainClient, MockChain, OnChainNode};
 use aphelion_node::engine::duty::{DutyKind, Watch};
@@ -33,6 +33,8 @@ struct Fixture {
     dispute_count: u64,
     committee: Vec<String>,
     votes: HashMap<(u64, String), bool>,
+    /// What the accused answered each voting round with, by (dispute, round).
+    responses: HashMap<(u64, u32), Vec<ResponseRecord>>,
     election: Option<ElectionRecord>,
     candidates: Vec<CandidateRecord>,
     ballots: HashMap<String, String>,
@@ -160,6 +162,16 @@ impl CommitteeClient for FakeCommittee {
             .copied())
     }
 
+    async fn responses(&self, dispute_id: u64, vote_round: u32) -> Result<Vec<ResponseRecord>> {
+        self.note(format!("responses {dispute_id} {vote_round}"));
+        Ok(self
+            .fixture
+            .responses
+            .get(&(dispute_id, vote_round))
+            .cloned()
+            .unwrap_or_default())
+    }
+
     async fn open_election(&self) -> Result<Receipt<u64>> {
         unimplemented!("Watch never writes")
     }
@@ -173,6 +185,9 @@ impl CommitteeClient for FakeCommittee {
         unimplemented!("Watch never writes")
     }
     async fn open_dispute(&self, _: &str, _: &str, _: u64, _: &str) -> Result<Receipt<u64>> {
+        unimplemented!("Watch never writes")
+    }
+    async fn respond(&self, _: u64, _: &str, _: &str) -> Result<Receipt<()>> {
         unimplemented!("Watch never writes")
     }
     async fn vote(&self, _: u64, _: bool) -> Result<Receipt<()>> {
@@ -392,6 +407,108 @@ async fn a_node_that_is_not_on_the_committee_is_never_asked_how_it_voted() {
     assert!(
         !fake.reads().iter().any(|r| r.starts_with("vote_of")),
         "asked for a vote it could not have cast: {:?}",
+        fake.reads()
+    );
+}
+
+fn answer(id: u64, round: u32, digest: &str) -> ResponseRecord {
+    ResponseRecord {
+        dispute: id,
+        vote_round: round,
+        by: OWNER.into(),
+        digest: digest.into(),
+        uri: String::new(),
+        at: 100,
+    }
+}
+
+#[tokio::test]
+async fn a_dispute_this_node_has_answered_is_off_the_list() {
+    // The duty is "answer this", not "a dispute exists". Left standing after
+    // the answer it would be indistinguishable from an answer that never
+    // landed -- which is the one thing an operator checking this list on the
+    // last afternoon of a voting period needs to be able to tell.
+    let mut f = Fixture {
+        dispute_count: 2,
+        next_election: u64::MAX,
+        owner: Some(OWNER.into()),
+        ..Default::default()
+    };
+    f.disputes
+        .insert(1, dispute(1, ME, DisputeStatus::Voting, 1_000));
+    f.disputes
+        .insert(2, dispute(2, ME, DisputeStatus::Voting, 1_000));
+    f.responses
+        .insert((2, 1), vec![answer(2, 1, &"ab".repeat(32))]);
+
+    let (w, _) = watch(500, 7_500, f);
+    let (snapshot, duties) = w.duties().await.unwrap();
+
+    assert_eq!(
+        snapshot.answered.iter().copied().collect::<Vec<_>>(),
+        vec![2]
+    );
+    let outstanding: Vec<_> = duties
+        .iter()
+        .filter(|d| d.kind == DutyKind::AnswerDispute)
+        .map(|d| d.subject)
+        .collect();
+    assert_eq!(outstanding, vec![1]);
+}
+
+#[tokio::test]
+async fn an_answer_to_an_earlier_round_does_not_answer_the_appeal() {
+    // An appeal re-opens the question and bumps the round. The answer to the
+    // first hearing is still on the ledger and is still not an answer to the
+    // second, so the duty comes back.
+    let mut f = Fixture {
+        dispute_count: 1,
+        next_election: u64::MAX,
+        owner: Some(OWNER.into()),
+        ..Default::default()
+    };
+    let mut d = dispute(1, ME, DisputeStatus::Voting, 1_000);
+    d.vote_round = 2;
+    f.disputes.insert(1, d);
+    f.responses
+        .insert((1, 1), vec![answer(1, 1, &"cd".repeat(32))]);
+
+    let (w, fake) = watch(500, 7_500, f);
+    let (snapshot, duties) = w.duties().await.unwrap();
+
+    assert!(fake.reads().contains(&"responses 1 2".to_string()));
+    assert!(snapshot.answered.is_empty());
+    assert_eq!(
+        duties.iter().map(|d| d.kind).collect::<Vec<_>>(),
+        vec![DutyKind::AnswerDispute]
+    );
+}
+
+#[tokio::test]
+async fn nobody_elses_answers_are_read() {
+    // One round trip per dispute, and the answer to somebody else's is not
+    // this operator's business: a committee member weighing one reads it with
+    // `dispute show`, where they asked for it.
+    let mut f = Fixture {
+        dispute_count: 2,
+        committee: vec![OWNER.into()],
+        next_election: u64::MAX,
+        owner: Some(OWNER.into()),
+        ..Default::default()
+    };
+    f.disputes
+        .insert(1, dispute(1, OTHER, DisputeStatus::Voting, 1_000));
+    f.disputes
+        .insert(2, dispute(2, ME, DisputeStatus::Settled, 1_000));
+
+    let (w, fake) = watch(500, 7_500, f);
+    w.snapshot().await.unwrap();
+
+    // Not for the other node's open dispute, and not for this node's closed
+    // one: neither can produce a duty to answer.
+    assert!(
+        !fake.reads().iter().any(|r| r.starts_with("responses")),
+        "read answers it had no use for: {:?}",
         fake.reads()
     );
 }

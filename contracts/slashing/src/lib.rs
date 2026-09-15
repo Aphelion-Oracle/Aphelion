@@ -105,8 +105,8 @@ use soroban_sdk::{
 };
 
 use events::{
-    BallotCast, CandidateNominated, CommitteeChanged, DisputeAppealed, DisputeOpened,
-    DisputeResolved, DisputeSettled, ElectionClosed, ElectionOpened, VoteCast,
+    BallotCast, CandidateNominated, CommitteeChanged, DisputeAnswered, DisputeAppealed,
+    DisputeOpened, DisputeResolved, DisputeSettled, ElectionClosed, ElectionOpened, VoteCast,
 };
 
 /// The slice of the registry this contract depends on.
@@ -607,6 +607,92 @@ impl Slashing {
         id
     }
 
+    /// Answer an allegation: put the digest of the evidence on the record.
+    ///
+    /// The committee's job is to weigh a document. Nothing in this contract
+    /// could see one, and nothing should try — but until this existed the
+    /// ledger could not even say that a document had been produced. The
+    /// accused's reply lived in somebody's inbox, which meant three things
+    /// nobody could establish afterwards: whether the committee had an answer
+    /// in front of it, which answer that was, and whether the file produced
+    /// later as "the evidence" was the file they read.
+    ///
+    /// A digest posted while the vote is open settles all three, and settles
+    /// them at a moment when the accused still does not know how the vote goes.
+    /// That is the whole of the timing argument: an answer that can be composed
+    /// after the result is not an answer, it is a commentary.
+    ///
+    /// It proves nothing about the document's contents. That is deliberate and
+    /// is not a gap to be closed here — `verify-evidence` is where a bundle is
+    /// judged, off chain, by whoever holds it. This function is the difference
+    /// between a judged document and a swapped one.
+    ///
+    /// Only the accused's owner may call it, checked against the registry. The
+    /// answer is the accused's own statement, and a record that let anyone
+    /// attach a document to somebody else's dispute would be worth nothing to
+    /// either side: an attacker could bury a good bundle under a bad one filed
+    /// in the operator's name.
+    ///
+    /// An answer may be corrected up to `MAX_RESPONSES` times in a round and
+    /// can never be withdrawn. Every digest stays in the order it was given, so
+    /// an operator who posted the wrong file can say so with a second one, and
+    /// a committee sees a substitution as a substitution.
+    pub fn respond(env: Env, responder: Address, dispute_id: u64, digest: BytesN<32>, uri: String) {
+        responder.require_auth();
+        let config = Self::load_config(&env);
+        let dispute = Self::load_dispute(&env, dispute_id);
+
+        if dispute.status != DisputeStatus::Voting {
+            panic_with_error!(&env, SlashingError::WrongPhase);
+        }
+        // The same bound the votes are under. An answer accepted after the
+        // deadline would be a document the committee could not have read and
+        // could still be pointed at afterwards as the one it ignored.
+        if env.ledger().timestamp() > dispute.deadline {
+            panic_with_error!(&env, SlashingError::VotingClosed);
+        }
+
+        if RegistryClient::new(&env, &config.registry).owner_of(&dispute.accused)
+            != Some(responder.clone())
+        {
+            panic_with_error!(&env, SlashingError::NotAccused);
+        }
+
+        let key = DataKey::Responses(dispute_id, dispute.vote_round);
+        let mut responses: Vec<Response> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+        if responses.len() >= MAX_RESPONSES {
+            panic_with_error!(&env, SlashingError::AnswerLimit);
+        }
+        let supersedes = responses.len();
+
+        responses.push_back(Response {
+            dispute: dispute_id,
+            vote_round: dispute.vote_round,
+            by: responder.clone(),
+            digest: digest.clone(),
+            uri: uri.clone(),
+            at: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&key, &responses);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND);
+
+        DisputeAnswered {
+            id: dispute_id,
+            by: responder,
+            vote_round: dispute.vote_round,
+            digest,
+            uri,
+            supersedes,
+        }
+        .publish(&env);
+    }
+
     /// Cast a committee vote.
     ///
     /// An operator may not vote on a dispute against their own node. This is
@@ -854,6 +940,24 @@ impl Slashing {
         env.storage()
             .persistent()
             .get(&DataKey::Vote(dispute_id, dispute.vote_round, member))
+    }
+
+    /// What the accused answered a voting round with, oldest first.
+    ///
+    /// Empty for a round nobody answered, which is a fact about the dispute
+    /// worth reading on its own: a committee may reasonably weigh silence, and
+    /// an operator whose answer never landed should be able to see that it did
+    /// not.
+    ///
+    /// Keyed by round rather than by dispute so that an appeal starts clean.
+    /// Inheriting the first hearing's answer would quietly assert that the
+    /// accused stands by it in the second, which is exactly what an appeal puts
+    /// back in question.
+    pub fn responses(env: Env, dispute_id: u64, vote_round: u32) -> Vec<Response> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Responses(dispute_id, vote_round))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// The dispute filed for an allegation, if one has been.

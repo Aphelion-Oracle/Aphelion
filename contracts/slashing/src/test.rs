@@ -301,6 +301,143 @@ fn a_different_submission_is_a_different_allegation() {
     assert_eq!(h.slashing.dispute_for(&h.accused, &h.feed(), &99), None);
 }
 
+// -- answering ---------------------------------------------------------------
+
+#[test]
+fn answering_fixes_which_document_the_committee_was_given() {
+    let h = setup();
+    let id = h.open();
+    assert!(h.slashing.responses(&id, &1).is_empty());
+
+    let digest = BytesN::from_array(&h.env, &[0xABu8; 32]);
+    h.slashing.respond(
+        &h.accused_owner,
+        &id,
+        &digest,
+        &String::from_str(&h.env, "ipfs://bafyanswer"),
+    );
+
+    let answers = h.slashing.responses(&id, &1);
+    assert_eq!(answers.len(), 1);
+    let a = answers.get(0).unwrap();
+    assert_eq!(a.digest, digest);
+    assert_eq!(a.by, h.accused_owner);
+    assert_eq!(a.vote_round, 1);
+    // The time is the point: the digest existed before the votes it answers.
+    assert_eq!(a.at, BASE_TIME);
+    assert!(a.at < h.dispute(id).deadline);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #32)")] // NotAccused
+fn nobody_else_may_answer_for_the_accused() {
+    let h = setup();
+    let id = h.open();
+    // The reporter, who has every reason to file a weak answer in the
+    // operator's name and let the committee weigh it as theirs.
+    h.slashing.respond(
+        &h.reporter,
+        &id,
+        &BytesN::from_array(&h.env, &[1u8; 32]),
+        &String::from_str(&h.env, ""),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")] // VotingClosed
+fn an_answer_the_committee_could_not_have_read_is_refused() {
+    let h = setup();
+    let id = h.open();
+    h.advance(VOTING_PERIOD + 1);
+    h.slashing.respond(
+        &h.accused_owner,
+        &id,
+        &BytesN::from_array(&h.env, &[2u8; 32]),
+        &String::from_str(&h.env, ""),
+    );
+}
+
+#[test]
+fn an_answer_can_be_corrected_and_cannot_be_withdrawn() {
+    let h = setup();
+    let id = h.open();
+    let wrong = BytesN::from_array(&h.env, &[3u8; 32]);
+    let right = BytesN::from_array(&h.env, &[4u8; 32]);
+    let empty = String::from_str(&h.env, "");
+
+    h.slashing.respond(&h.accused_owner, &id, &wrong, &empty);
+    h.advance(60);
+    h.slashing.respond(&h.accused_owner, &id, &right, &empty);
+
+    // Both, in the order they were given. Correcting an answer is not erasing
+    // one: a committee that cannot see the substitution cannot weigh it.
+    let answers = h.slashing.responses(&id, &1);
+    assert_eq!(answers.len(), 2);
+    assert_eq!(answers.get(0).unwrap().digest, wrong);
+    assert_eq!(answers.get(1).unwrap().digest, right);
+    assert_eq!(answers.get(1).unwrap().at, BASE_TIME + 60);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #33)")] // AnswerLimit
+fn the_committee_cannot_be_buried_in_answers() {
+    let h = setup();
+    let id = h.open();
+    let empty = String::from_str(&h.env, "");
+    for i in 0..=crate::MAX_RESPONSES as u8 {
+        h.slashing.respond(
+            &h.accused_owner,
+            &id,
+            &BytesN::from_array(&h.env, &[i; 32]),
+            &empty,
+        );
+    }
+}
+
+#[test]
+fn an_appeal_asks_for_the_answer_again() {
+    let h = setup();
+    let id = h.open();
+    let first = BytesN::from_array(&h.env, &[5u8; 32]);
+    let empty = String::from_str(&h.env, "");
+    h.slashing.respond(&h.accused_owner, &id, &first, &empty);
+
+    let id = {
+        h.vote(0, id, true);
+        h.vote(1, id, true);
+        h.vote(2, id, true);
+        h.advance(VOTING_PERIOD + 1);
+        h.slashing.resolve(&id);
+        h.slashing.appeal(&h.accused_owner, &id);
+        id
+    };
+
+    // The first hearing's answer stays where it was; the second starts with
+    // none. Carrying it forward would assert that the accused stands by it in
+    // a hearing they opened by saying the first was wrong.
+    assert_eq!(h.dispute(id).vote_round, 2);
+    assert_eq!(h.slashing.responses(&id, &1).len(), 1);
+    assert!(h.slashing.responses(&id, &2).is_empty());
+
+    let second = BytesN::from_array(&h.env, &[6u8; 32]);
+    h.slashing.respond(&h.accused_owner, &id, &second, &empty);
+    assert_eq!(h.slashing.responses(&id, &1).get(0).unwrap().digest, first);
+    assert_eq!(h.slashing.responses(&id, &2).get(0).unwrap().digest, second);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #23)")] // WrongPhase
+fn a_dispute_that_is_over_cannot_be_answered() {
+    let h = setup();
+    let id = h.resolved(3, 0);
+    h.slashing.respond(
+        &h.accused_owner,
+        &id,
+        &BytesN::from_array(&h.env, &[8u8; 32]),
+        &String::from_str(&h.env, ""),
+    );
+}
+
 // -- voting -----------------------------------------------------------------
 
 #[test]

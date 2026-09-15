@@ -125,6 +125,27 @@ impl DisputeRecord {
     }
 }
 
+/// An answer the accused put on the record.
+///
+/// The digest, not the document. What it establishes is narrow: that a file
+/// with these bytes existed at `at`, which was while the vote was open and
+/// before the accused could know how it was going. Whether the document behind
+/// it is worth anything is [`crate::engine::verify`]'s question, and this record
+/// cannot help with it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseRecord {
+    pub dispute: u64,
+    pub vote_round: u32,
+    /// The account that filed it: the accused node's owner.
+    pub by: String,
+    /// SHA-256 of the document, in hex — what `verify-evidence --digest` takes.
+    pub digest: String,
+    /// Where the accused said it can be found. Often empty, which is allowed:
+    /// a file handed over privately is still a file that was fixed.
+    pub uri: String,
+    pub at: u64,
+}
+
 /// Somebody standing for a seat, and the weight cast for them so far.
 #[derive(Debug, Clone, Serialize)]
 pub struct CandidateRecord {
@@ -217,6 +238,10 @@ pub trait CommitteeClient: Send + Sync {
     /// How a committee member voted in a dispute's current voting round.
     async fn vote_of(&self, dispute_id: u64, member: &str) -> Result<Option<bool>>;
 
+    /// What the accused answered a voting round with, oldest first. Empty for a
+    /// round nobody answered, which is itself worth reading.
+    async fn responses(&self, dispute_id: u64, vote_round: u32) -> Result<Vec<ResponseRecord>>;
+
     // -- writes -------------------------------------------------------------
 
     async fn open_election(&self) -> Result<Receipt<u64>>;
@@ -231,6 +256,9 @@ pub trait CommitteeClient: Send + Sync {
         nonce: u64,
         evidence: &str,
     ) -> Result<Receipt<u64>>;
+    /// Put the digest of an answer on the record. Only the accused's owner may,
+    /// which is the account this client signs as.
+    async fn respond(&self, dispute_id: u64, digest_hex: &str, uri: &str) -> Result<Receipt<()>>;
     async fn vote(&self, dispute_id: u64, uphold: bool) -> Result<Receipt<()>>;
     async fn resolve(&self, dispute_id: u64) -> Result<Receipt<DisputeStatus>>;
     async fn appeal(&self, dispute_id: u64) -> Result<Receipt<()>>;
@@ -334,6 +362,31 @@ pub(crate) fn decode_dispute(v: &serde_json::Value) -> Result<DisputeRecord> {
             .map(str::to_string),
         appeal_bond: i128_field(v, "appeal_bond", ctx)?,
     })
+}
+
+pub(crate) fn decode_responses(v: &serde_json::Value) -> Result<Vec<ResponseRecord>> {
+    if v.is_null() {
+        return Ok(Vec::new());
+    }
+    let items = v.as_array().ok_or_else(|| {
+        NodeError::Chain(format!("slashing.responses returned {v}, expected a list"))
+    })?;
+    let ctx = "slashing.responses";
+    items
+        .iter()
+        .map(|r| {
+            Ok(ResponseRecord {
+                dispute: u64_field(r, "dispute", ctx)?,
+                vote_round: u32_field(r, "vote_round", ctx)?,
+                by: str_field(r, "by", ctx)?,
+                digest: hex_key(field(r, "digest", ctx)?).ok_or_else(|| {
+                    NodeError::Chain(format!("{ctx}.digest is not a 32-byte hash: {r}"))
+                })?,
+                uri: str_field(r, "uri", ctx)?,
+                at: u64_field(r, "at", ctx)?,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn decode_election(v: &serde_json::Value) -> Result<ElectionRecord> {
@@ -535,6 +588,21 @@ impl CommitteeClient for CliCommittee {
         Ok(v.as_bool())
     }
 
+    async fn responses(&self, dispute_id: u64, vote_round: u32) -> Result<Vec<ResponseRecord>> {
+        let v = self
+            .cli
+            .view(
+                &self.slashing,
+                "responses",
+                &[
+                    ("dispute_id", dispute_id.to_string()),
+                    ("vote_round", vote_round.to_string()),
+                ],
+            )
+            .await?;
+        decode_responses(&v)
+    }
+
     async fn open_election(&self) -> Result<Receipt<u64>> {
         let (v, tx_hash) = self
             .cli
@@ -613,6 +681,23 @@ impl CommitteeClient for CliCommittee {
             value: as_u64(&v).unwrap_or(0),
             tx_hash,
         })
+    }
+
+    async fn respond(&self, dispute_id: u64, digest_hex: &str, uri: &str) -> Result<Receipt<()>> {
+        let (_, tx_hash) = self
+            .cli
+            .invoke(
+                &self.slashing,
+                "respond",
+                &[
+                    ("responder", self.account().to_string()),
+                    ("dispute_id", dispute_id.to_string()),
+                    ("digest", digest_hex.to_string()),
+                    ("uri", uri.to_string()),
+                ],
+            )
+            .await?;
+        Ok(Receipt { value: (), tx_hash })
     }
 
     async fn vote(&self, dispute_id: u64, uphold: bool) -> Result<Receipt<()>> {
@@ -746,6 +831,42 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("accused"), "unhelpful error: {e}");
+    }
+
+    #[test]
+    fn decodes_the_answers_on_a_disputes_record() {
+        let v = serde_json::json!([
+            {
+                "dispute": 3, "vote_round": 1, "by": "GOWNER",
+                "digest": "0x".to_string() + &"cd".repeat(32),
+                "uri": "ipfs://bafyanswer", "at": 1_700_000_100u64,
+            },
+            {
+                "dispute": 3, "vote_round": 1, "by": "GOWNER",
+                "digest": "ef".repeat(32), "uri": "", "at": 1_700_000_200u64,
+            },
+        ]);
+        let r = decode_responses(&v).unwrap();
+        // Oldest first, and both of them: a correction is on the record beside
+        // what it corrected, and a reader that showed only the last one would
+        // be hiding the substitution.
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].digest, "cd".repeat(32));
+        assert_eq!(r[1].digest, "ef".repeat(32));
+        assert!(r[1].uri.is_empty());
+
+        // A round nobody answered. Not an error: silence is a normal state of
+        // a dispute and a committee is entitled to weigh it.
+        assert!(decode_responses(&serde_json::json!(null))
+            .unwrap()
+            .is_empty());
+
+        // Anything that is not a 32-byte hash is refused rather than passed on
+        // to be compared against a file, where it could only ever mismatch.
+        let bad = serde_json::json!([
+            { "dispute": 1, "vote_round": 1, "by": "G", "digest": "ff", "uri": "", "at": 1 },
+        ]);
+        assert!(decode_responses(&bad).is_err());
     }
 
     fn election(status: &str, ballot_opens: u64, closes: u64) -> ElectionRecord {

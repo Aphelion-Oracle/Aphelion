@@ -50,6 +50,24 @@
 //! it is its own answer — not "the evidence is bad" but "this is not evidence
 //! in this case".
 //!
+//! ## Is it the document the accused stands behind?
+//!
+//! There is a seventh question, and it is about the file rather than about its
+//! contents. A bundle arrives from somewhere — an inbox, a link, a USB stick —
+//! and everything above is equally true of a copy somebody edited on the way.
+//! Not the signed bytes, which cannot be edited undetectably, but the rest: the
+//! observations, the parameters, the window. An operator who answers a dispute
+//! and then hands the committee a different file afterwards, once the votes are
+//! in, is making a claim nothing in the bundle can contradict.
+//!
+//! Which is what `slashing.respond` is for: the accused puts the SHA-256 of
+//! their answer on the ledger while the vote is open, and `--digest` is where a
+//! verifier checks that the file in front of it is that one. The digest is over
+//! the document's bytes exactly as they arrived, so this is a comparison of
+//! files and not of meanings — a re-serialised bundle that says the same thing
+//! is a different document, and a verifier that forgave the difference would be
+//! forgiving the only thing it was asked to check.
+//!
 //! The expectations are not read from the bundle, and cannot be: a file that
 //! supplied the standard it is measured against would pass by construction.
 //! They come from the dispute record, which is why [`crate::chain::committee::DisputeRecord`]
@@ -176,6 +194,11 @@ pub struct Expectations {
     pub nonce: Option<u64>,
     /// The deployment. A bundle from another network is sound and irrelevant.
     pub aggregator: Option<[u8; 32]>,
+    /// What the accused put on the record as their answer, from
+    /// `slashing.responses`. Unlike the four above this is a fact about the
+    /// document rather than about what it says, so it is checked against the
+    /// file's bytes rather than against the signed payload.
+    pub digest: Option<[u8; 32]>,
 }
 
 impl Expectations {
@@ -198,9 +221,12 @@ impl Expectations {
         feed: Option<&str>,
         nonce: Option<u64>,
         aggregator: Option<&str>,
+        digest: Option<&str>,
     ) -> Result<Self, String> {
         Ok(Self {
-            node: node.map(|s| parse_key32(s, "--node")).transpose()?,
+            node: node
+                .map(|s| parse_key32(s, "--node", "a node key"))
+                .transpose()?,
             feed: feed
                 .map(|s| {
                     FeedId::new(s.trim()).map_err(|e| format!("`--feed {s}` is not a feed id: {e}"))
@@ -208,18 +234,21 @@ impl Expectations {
                 .transpose()?,
             nonce,
             aggregator: aggregator.map(parse_contract_id).transpose()?,
+            digest: digest
+                .map(|s| parse_key32(s, "--digest", "a SHA-256 digest"))
+                .transpose()?,
         })
     }
 }
 
 /// 32 bytes of hex, however it was pasted.
-fn parse_key32(s: &str, flag: &str) -> Result<[u8; 32], String> {
+fn parse_key32(s: &str, flag: &str, what: &str) -> Result<[u8; 32], String> {
     let raw = s.trim().trim_start_matches("0x");
     hex::decode(raw)
         .ok()
         .and_then(|b| <[u8; 32]>::try_from(b).ok())
         .ok_or_else(|| {
-            format!("`{flag} {s}` is not a node key: expected 32 bytes of hex (64 characters)")
+            format!("`{flag} {s}` is not {what}: expected 32 bytes of hex (64 characters)")
         })
 }
 
@@ -231,7 +260,7 @@ fn parse_contract_id(s: &str) -> Result<[u8; 32], String> {
     if t.len() == 56 && t.starts_with('C') {
         return crate::strkey::contract_id_bytes(t).map_err(|e| e.to_string());
     }
-    parse_key32(t, "--aggregator").map_err(|_| {
+    parse_key32(t, "--aggregator", "a contract id").map_err(|_| {
         format!("`--aggregator {s}` is neither a C... contract address nor 32 bytes of hex")
     })
 }
@@ -324,6 +353,12 @@ pub struct Audit {
     /// Whether the signed bytes name the allegation the caller gave, or `None`
     /// if they gave none. `None` is not a pass: it means nobody asked.
     pub bound_to_allegation: Option<bool>,
+    /// What this document hashes to, when the bytes were available — which is
+    /// the number the accused publishes with `dispute respond`, and the number
+    /// a committee compares against `slashing.responses`. Printed whether or
+    /// not a `--digest` was given: an operator about to answer a dispute needs
+    /// to read it off something.
+    pub document_digest: Option<String>,
 }
 
 /// Audit one bundle on its own terms, with no allegation to measure it against.
@@ -332,6 +367,24 @@ pub struct Audit {
 /// about the dispute at all — open and says so. Prefer [`verify_against`].
 pub fn verify(bundle: &Bundle) -> Audit {
     verify_against(bundle, &Expectations::none())
+}
+
+/// Audit a document as it arrived, bytes and all.
+///
+/// The entry point to prefer, because it is the only one that can answer
+/// [`Expectations::digest`]: a parsed [`Bundle`] has already lost the thing an
+/// on-record digest is about. A file that does not parse is an error here
+/// rather than a verdict — a judgement of any kind implies something was
+/// judged, and this was not a bundle.
+pub fn verify_document(raw: &[u8], expect: &Expectations) -> Result<Audit, serde_json::Error> {
+    let bundle: Bundle = serde_json::from_slice(raw)?;
+    Ok(audit(&bundle, Some(sha256(raw)), expect))
+}
+
+/// SHA-256 of a document, as `dispute respond` publishes it.
+pub fn sha256(raw: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(raw).into()
 }
 
 /// Audit one bundle against what the ledger says the allegation is.
@@ -345,6 +398,13 @@ pub fn verify(bundle: &Bundle) -> Audit {
 /// operator it is against. `--node` binds the evidence to the allegation; what
 /// binds the allegation to a person is `registry.owner_of`.
 pub fn verify_against(bundle: &Bundle, expect: &Expectations) -> Audit {
+    audit(bundle, None, expect)
+}
+
+/// `document` is the SHA-256 of the file the bundle was parsed from, where the
+/// caller still had it. `None` is not a failure and not a pass: an expectation
+/// that could not be checked is reported as one.
+fn audit(bundle: &Bundle, document: Option<[u8; 32]>, expect: &Expectations) -> Audit {
     let mut findings = Vec::new();
 
     let (signed, message) = match decode_and_check_signature(bundle, &mut findings) {
@@ -359,12 +419,13 @@ pub fn verify_against(bundle: &Bundle, expect: &Expectations) -> Audit {
                 // Unanswerable rather than false: the bytes never decoded, so
                 // there is nothing to compare the allegation against.
                 bound_to_allegation: None,
+                document_digest: document.map(hex::encode),
             };
         }
     };
 
     let described_honestly = check_description(bundle, &message, &mut findings);
-    let related = check_relevance(expect, &message, &signed, &mut findings);
+    let related = check_relevance(expect, document, &message, &signed, &mut findings);
     let observations = check_window(bundle, &message.feed, &mut findings);
     let recomputed = check_arithmetic(bundle, &message, &observations, &mut findings);
 
@@ -400,6 +461,7 @@ pub fn verify_against(bundle: &Bundle, expect: &Expectations) -> Audit {
         recomputed: recomputed.map(|(p, _)| p.to_string()),
         observation_count: observations.len(),
         bound_to_allegation: (!expect.is_empty()).then_some(related),
+        document_digest: document.map(hex::encode),
     }
 }
 
@@ -410,6 +472,7 @@ pub fn verify_against(bundle: &Bundle, expect: &Expectations) -> Audit {
 /// the hex the bundle happens to have printed.
 fn check_relevance(
     expect: &Expectations,
+    document: Option<[u8; 32]>,
     message: &PriceMessage,
     signed: &Signed,
     findings: &mut Vec<Finding>,
@@ -473,13 +536,33 @@ fn check_relevance(
         }
     }
 
+    // The one expectation that is not about the signed payload. It is about
+    // the file: whether this is the document the accused committed to while the
+    // vote was open, or one produced afterwards.
+    if let Some(expected) = expect.digest {
+        match document {
+            Some(actual) if actual == expected => checked.push("document"),
+            Some(actual) => wrong.push(format!(
+                "the accused answered with document {}, this file is {}",
+                hex::encode(expected),
+                hex::encode(actual)
+            )),
+            None => findings.push(Finding::new(
+                Verdict::Sound,
+                "not checked: a digest was given, but this bundle was handed to the \
+                 verifier already parsed, and a digest is about the bytes of a file \
+                 rather than about what it says.",
+            )),
+        }
+    }
+
     if wrong.is_empty() {
         findings.push(Finding::new(
             Verdict::Sound,
             format!(
-                "the signed payload names the allegation given ({}) — though only as it \
-                 was typed. These are worth nothing unless they were read off the dispute \
-                 on the ledger rather than off the bundle.",
+                "this is the bundle the allegation asks about ({}) — though only as it was \
+                 typed. These are worth nothing unless they were read off the dispute on \
+                 the ledger rather than off the bundle.",
                 checked.join(", ")
             ),
         ));
@@ -489,10 +572,10 @@ fn check_relevance(
     findings.push(Finding::new(
         Verdict::Unrelated,
         format!(
-            "this bundle is not about the allegation — {}. Everything else here may be \
-             perfectly sound and none of it bears on this dispute; a genuine bundle for \
-             the wrong round is the one answer an accused operator can give that requires \
-             forging nothing.",
+            "this is not the bundle the allegation asks about — {}. Everything else here \
+             may be perfectly sound and none of it bears on this dispute; a genuine bundle \
+             for the wrong round, or a file that is not the one answered with, is the \
+             answer an accused operator can give that requires forging nothing.",
             wrong.join("; ")
         ),
     ));
@@ -841,6 +924,134 @@ mod tests {
         }
     }
 
+    /// The same bundle as a document: the bytes a committee is actually handed.
+    ///
+    /// Written out by hand rather than serialised from [`Bundle`], which has no
+    /// `Serialize` and should not grow one — the verifier's types exist to read
+    /// hostile input, not to produce it. `tests/evidence.rs` runs the real
+    /// `replay` output through the same path.
+    fn sound_document() -> String {
+        let b = sound_bundle();
+        serde_json::json!({
+            "recorded": {
+                "feed": b.recorded.feed,
+                "nonce": b.recorded.nonce,
+                "price": b.recorded.price,
+                "confidence_bps": b.recorded.confidence_bps,
+                "observed_at": b.recorded.observed_at,
+                "signature": b.recorded.signature,
+            },
+            "provenance": {
+                "public_key": b.provenance.public_key,
+                "aggregator": b.provenance.aggregator,
+                "message_hex": b.provenance.message_hex,
+            },
+            "params": {
+                "min_sources": b.params.min_sources,
+                "max_source_deviation_bps": b.params.max_source_deviation_bps,
+                "confidence_floor_bps": b.params.confidence_floor_bps,
+            },
+            "window": {
+                "cutoff": b.window.cutoff,
+                "as_of": b.window.as_of,
+                "observations": b.window.observations.iter().map(|o| serde_json::json!({
+                    "source": o.source,
+                    "price": o.price,
+                    "observed_at": o.observed_at,
+                    "received_at": o.received_at,
+                })).collect::<Vec<_>>(),
+            },
+        })
+        .to_string()
+    }
+
+    fn against_document(digest: Option<[u8; 32]>) -> Expectations {
+        Expectations {
+            node: Some(key().verifying_key().to_bytes()),
+            feed: Some(FeedId::new("BTC_USD").unwrap()),
+            nonce: Some(4),
+            aggregator: Some(AGGREGATOR),
+            digest,
+        }
+    }
+
+    #[test]
+    fn a_document_is_weighed_against_the_digest_the_accused_published() {
+        let doc = sound_document();
+        let published = sha256(doc.as_bytes());
+
+        let a = verify_document(doc.as_bytes(), &against_document(Some(published))).unwrap();
+        assert_eq!(a.verdict, Verdict::Sound, "{:?}", a.findings);
+        assert_eq!(a.bound_to_allegation, Some(true));
+        // Printed whether or not one was given: it is the number an operator
+        // about to answer a dispute has to put on the ledger.
+        assert_eq!(a.document_digest, Some(hex::encode(published)));
+        // The passing finding names every field it compared, the document
+        // among them, so a committee can see what was actually checked.
+        assert!(
+            a.findings
+                .iter()
+                .any(|f| f.detail.contains("node, feed, nonce, deployment, document")),
+            "{:?}",
+            a.findings
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_the_one_answered_with_is_not_evidence_here() {
+        let doc = sound_document();
+        let a = verify_document(doc.as_bytes(), &against_document(Some([0xEEu8; 32]))).unwrap();
+
+        // Sound on its own terms, and still not the document on the record.
+        // That is the substitution the digest exists to catch: a file produced
+        // after a vote, once the accused knows which parts of their case need
+        // to have been different.
+        assert_eq!(a.verdict, Verdict::Unrelated);
+        assert_eq!(a.bound_to_allegation, Some(false));
+        let detail = detail_for(&a, Verdict::Unrelated);
+        assert!(detail.contains(&"ee".repeat(32)), "{detail}");
+        assert!(
+            detail.contains(&hex::encode(sha256(doc.as_bytes()))),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn the_same_bundle_in_different_bytes_is_a_different_document() {
+        // A digest is over a file, not over a meaning. Re-serialising a bundle
+        // -- pretty-printing it, reordering its keys, adding a newline -- makes
+        // a document that says every last thing the original said and is not
+        // the one that was answered with. Forgiving that would forgive exactly
+        // the edit a substitution needs.
+        let doc = sound_document();
+        let published = sha256(doc.as_bytes());
+        let value: serde_json::Value = serde_json::from_str(&doc).unwrap();
+        let reprinted = serde_json::to_string_pretty(&value).unwrap();
+
+        let a = verify_document(reprinted.as_bytes(), &against_document(None)).unwrap();
+        assert_eq!(a.verdict, Verdict::Sound, "{:?}", a.findings);
+
+        let a = verify_document(reprinted.as_bytes(), &against_document(Some(published))).unwrap();
+        assert_eq!(a.verdict, Verdict::Unrelated);
+    }
+
+    #[test]
+    fn a_digest_is_unanswerable_about_a_bundle_that_arrived_already_parsed() {
+        // The library path, where the bytes are gone. Reported as not checked
+        // rather than passed: an expectation nobody could test must not read
+        // like one that was tested and met.
+        let a = verify_against(&sound_bundle(), &against_document(Some([0xEEu8; 32])));
+        assert_eq!(a.verdict, Verdict::Sound);
+        assert_eq!(a.document_digest, None);
+        assert!(
+            a.findings
+                .iter()
+                .any(|f| f.detail.contains("not checked") && f.detail.contains("digest")),
+            "{:?}",
+            a.findings
+        );
+    }
+
     fn detail_for(a: &Audit, v: Verdict) -> String {
         a.findings
             .iter()
@@ -1126,6 +1337,7 @@ mod tests {
             feed: Some(FeedId::new("BTC_USD").unwrap()),
             nonce: Some(4),
             aggregator: Some(AGGREGATOR),
+            digest: None,
         };
         let a = verify_against(&sound_bundle(), &expect);
 
@@ -1232,14 +1444,14 @@ mod tests {
     /// verdict it would read as a finding against the accused.
     #[test]
     fn an_allegation_that_will_not_parse_is_a_usage_error_not_a_verdict() {
-        let e = Expectations::parse(Some("not-a-key"), None, None, None).unwrap_err();
+        let e = Expectations::parse(Some("not-a-key"), None, None, None, None).unwrap_err();
         assert!(e.contains("--node"), "{e}");
         assert!(e.contains("32 bytes of hex"), "{e}");
 
-        let e = Expectations::parse(None, Some("BTC/USD"), None, None).unwrap_err();
+        let e = Expectations::parse(None, Some("BTC/USD"), None, None, None).unwrap_err();
         assert!(e.contains("--feed"), "{e}");
 
-        let e = Expectations::parse(None, None, None, Some("CNOTACONTRACT")).unwrap_err();
+        let e = Expectations::parse(None, None, None, Some("CNOTACONTRACT"), None).unwrap_err();
         assert!(e.contains("--aggregator"), "{e}");
     }
 
@@ -1249,16 +1461,16 @@ mod tests {
     #[test]
     fn an_allegation_is_accepted_however_it_was_pasted() {
         let k = "AB".repeat(32);
-        let e = Expectations::parse(Some(&format!("  0x{k}  ")), None, None, None).unwrap();
+        let e = Expectations::parse(Some(&format!("  0x{k}  ")), None, None, None, None).unwrap();
         assert_eq!(e.node, Some([0xabu8; 32]));
 
-        let hex_form = Expectations::parse(None, None, None, Some(&"07".repeat(32))).unwrap();
+        let hex_form = Expectations::parse(None, None, None, Some(&"07".repeat(32)), None).unwrap();
         assert_eq!(hex_form.aggregator, Some(AGGREGATOR));
 
         // The `C...` address the harness's fixture deployment already pins.
         let strkey = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
         assert_eq!(
-            Expectations::parse(None, None, None, Some(strkey))
+            Expectations::parse(None, None, None, Some(strkey), None)
                 .unwrap()
                 .aggregator,
             Some(crate::strkey::contract_id_bytes(strkey).unwrap())

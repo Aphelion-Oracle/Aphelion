@@ -34,6 +34,27 @@ pub struct VoteCast {
     pub vote_round: u32,
 }
 
+/// The accused answered, and this is the document they answered with.
+///
+/// Published rather than left to be read out of storage because the timing is
+/// half of what the answer is worth: an event carries the ledger time at which
+/// a digest existed, which is what says the document was fixed before the votes
+/// it was answering were in.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeAnswered {
+    #[topic]
+    pub id: u64,
+    #[topic]
+    pub by: Address,
+    pub vote_round: u32,
+    pub digest: BytesN<32>,
+    pub uri: String,
+    /// How many answers this round already held. Non-zero is a correction, and
+    /// the earlier digests are still on the record — see `MAX_RESPONSES`.
+    pub supersedes: u32,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DisputeResolved {

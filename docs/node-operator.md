@@ -545,11 +545,9 @@ What happens, and what you should do:
 2. **The committee votes** for the configured voting period. If it does not reach
    quorum, or the vote ties, the dispute is **dismissed** — silence is not
    evidence against you.
-3. **Answer it.** There is nothing to file on chain: a dispute is answered by
-   evidence and argument in front of the committee, wherever that conversation
-   happens. Your case is your own records, and `replay` assembles it — it takes
-   the feed and nonce the dispute names, which is why the dispute names a nonce,
-   and rebuilds that round from the observations retained underneath it:
+3. **Answer it.** Your case is your own records, and `replay` assembles it — it
+   takes the feed and nonce the dispute names, which is why the dispute names a
+   nonce, and rebuilds that round from the observations retained underneath it:
 
    ```bash
    aphelion-node replay BTC_USD 4812          # the page, for you
@@ -603,12 +601,42 @@ What happens, and what you should do:
    ```
 
    That command ignores your node's verdict entirely and re-derives everything
-   from the signed bytes — which is the point. The four flags are the allegation
-   as the ledger states it, and they are what stops a bundle for the wrong round
+   from the signed bytes — which is the point. The flags are the allegation as
+   the ledger states it, and they are what stops a bundle for the wrong round
    being accepted as an answer; `dispute show` prints the whole line. A bundle is worth something to a
    committee precisely because they do not have to take your word for any part
    of it. If you are ever on the other side of one, this is also the command to
    run on somebody else's bundle before voting on it.
+
+   **Then put it on the record, while the vote is still open.** The document
+   stays where it is; what goes on the ledger is its SHA-256.
+
+   ```bash
+   aphelion-node replay BTC_USD 4812 --json > evidence.json
+   aphelion-node dispute respond 7 --file evidence.json            # shows what it would publish
+   aphelion-node dispute respond 7 --file evidence.json --commit   # publishes it
+   ```
+
+   Do this even when you are handing the file over privately, and do it before
+   the voting deadline — after it the contract refuses, which is the whole
+   point. A digest published while the vote is open was fixed before you could
+   know how the vote was going; one published afterwards would be worth nothing,
+   because a file assembled after a result can be assembled to suit it. It also
+   answers, for good, a question you would otherwise have no way to answer: that
+   you replied at all, and that the file the committee read is the file you sent.
+
+   The dry run audits the bundle against the allegation before anything is sent
+   and refuses to publish one that is `unsigned`, `misdescribed` or `unrelated`
+   — those are not weak evidence, they are not evidence, and answering with one
+   spends your one clear shot at the committee's attention on a file that
+   establishes nothing. `--uri` is optional: a digest with no locator still
+   fixes which document you answered with.
+
+   An answer can be **corrected but never withdrawn** — up to three per voting
+   round, all of them on the record in the order you gave them, so a committee
+   sees a substitution as a substitution. An appeal opens a second round and
+   asks for the answer again; the first round's answer stays where it is and is
+   not carried forward.
 4. **Appeal, once**, within the appeal window, if the committee finds against you
    and you believe it is wrong. The appeal bond is larger than the dispute bond
    and is returned only if the second vote changes the outcome — so
@@ -645,17 +673,35 @@ stake, so check their evidence rather than the summary attached to it:
 ```bash
 aphelion-node dispute show 7             # prints the line below, filled in
 aphelion-node verify-evidence their-bundle.json \
-    --node <accused> --feed BTC_USD --nonce 4812 --aggregator C...
+    --node <accused> --feed BTC_USD --nonce 4812 --aggregator C... \
+    --digest <the answer on the record>
 ```
 
-It needs nothing from you but the file and those four — no configuration, no
+It needs nothing from you but the file and those five — no configuration, no
 key, no database, no chain access. It ignores the bundle's own verdict and
 re-derives everything from the signed payload, and it grades `sound`,
 `unsupported`, `unrelated`, `misdescribed` or `unsigned` with the exit code to
 match (0, 1, 2, 2, 2). A mistyped flag exits 64 rather than 1, so a slip of
 yours is never read back as a finding against them.
 
-**Type the four off the dispute, not off the bundle.** They are checked against
+**`--digest` is the one to reach for first**, and it is the one flag that is
+not about the signed bytes. It is the SHA-256 the accused published with
+`respond` while the voting period was open, and `dispute show` prints it under
+`answer` along with the time it landed. Compared against the *bytes of the file
+in front of you*, it answers a question the payload cannot: whether this is the
+document they committed to, or one that turned up afterwards. A bundle can be
+signed, honestly described, reproducible and about exactly the right round, and
+still not be the file that was answered with — say, the same round with a venue
+added that helps their case. A `sound` verdict with `--digest` given is a much
+narrower claim than a `sound` verdict without it.
+
+Watch for more than one answer on the record. Up to three are allowed in a
+voting round and they are listed oldest first; the last is the one being
+offered, and the earlier ones are there because an answer may be corrected but
+not erased. A dispute with no answer at all says so in as many words, and what
+to make of that is yours to weigh.
+
+**Type the rest off the dispute, not off the bundle.** They are checked against
 the signed bytes, and a file asked to supply the standard it is measured against
 will meet it. Run without them and the audit says, in as many words, that nobody
 asked whether the file bears on this dispute at all — which is not the same as

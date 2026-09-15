@@ -128,9 +128,15 @@ impl Consequence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DutyKind {
-    /// A dispute against this node is being voted on. Nothing is filed on
-    /// chain to answer it — the evidence link is off-chain and so is the
-    /// answer — but the committee is deciding now, not later.
+    /// A dispute against this node is being voted on and this node has not
+    /// answered it. The document stays off chain; what goes on chain is its
+    /// digest, which is what makes an answer something the operator can prove
+    /// they gave and cannot quietly change afterwards.
+    ///
+    /// Gone once the answer is on the record for this voting round. Not because
+    /// the dispute is over — it is still being voted on — but because a list
+    /// of things to do should empty as they are done, and an appeal that opens
+    /// a second round brings this back.
     AnswerDispute,
     /// A dispute against this node was upheld and the appeal window is open.
     Appeal,
@@ -194,6 +200,11 @@ pub struct Snapshot {
     /// Ids of disputes whose current voting round this member has already
     /// voted in. Empty for anyone not on the committee.
     pub voted: BTreeSet<u64>,
+    /// Ids of disputes against this node whose *current* voting round it has
+    /// already answered — see `slashing.respond`. By round rather than by
+    /// dispute, because an appeal asks the question again and an answer to the
+    /// first hearing is not an answer to the second.
+    pub answered: BTreeSet<u64>,
     /// The election that has not been finalised, if there is one.
     pub election: Option<ElectionRecord>,
     /// Whether this node has already cast a ballot in that election.
@@ -235,15 +246,15 @@ fn dispute_duties(s: &Snapshot, d: &DisputeRecord) -> Vec<Duty> {
 
     match d.status {
         DisputeStatus::Voting if s.now <= d.deadline => {
-            if mine {
+            if mine && !s.answered.contains(&d.id) {
                 out.push(Duty {
                     kind: DutyKind::AnswerDispute,
                     consequence: Consequence::Costly,
                     subject: d.id,
                     deadline: Some(d.deadline),
                     detail: format!(
-                        "dispute {} against this node ({} nonce {}); {} for, {} against, \
-                         quorum {}. Evidence: {}",
+                        "dispute {} against this node ({} nonce {}), unanswered; {} for, \
+                         {} against, quorum {}. Evidence: {}",
                         d.id,
                         d.feed,
                         d.nonce,
@@ -256,12 +267,18 @@ fn dispute_duties(s: &Snapshot, d: &DisputeRecord) -> Vec<Duty> {
                             &d.evidence
                         }
                     ),
-                    // `replay`, not `dispute show`. The allegation names a
-                    // nonce, which is the argument that reproduces the round
-                    // from the observations behind it, so the duty can point at
-                    // the thing that answers it rather than at the thing that
-                    // restates it.
-                    command: format!("aphelion-node replay {} {}", d.feed, d.nonce),
+                    // Both halves, because half of it is not an answer. The
+                    // allegation names a nonce, which is the argument that
+                    // reproduces the round from the observations behind it; the
+                    // second command is what puts that document's digest on the
+                    // ledger while the vote is still open, which is the only
+                    // window in which a committee can be shown it was fixed
+                    // before the votes came in.
+                    command: format!(
+                        "aphelion-node replay {} {} --json > evidence.json && \
+                         aphelion-node dispute respond {} --bundle evidence.json --commit",
+                        d.feed, d.nonce, d.id
+                    ),
                 });
             }
             // The contract refuses a vote on a dispute against a node the
@@ -499,6 +516,7 @@ impl Watch {
         let first = total.saturating_sub(self.scan_depth) + 1;
         let mut disputes = Vec::new();
         let mut voted = BTreeSet::new();
+        let mut answered = BTreeSet::new();
         for id in (first..=total).rev() {
             let Some(d) = self.committee.dispute(id).await? else {
                 continue;
@@ -512,6 +530,16 @@ impl Watch {
                     .is_some()
             {
                 voted.insert(id);
+            }
+            // Only for disputes against this node, and only while they are
+            // open: the read costs a round trip and the answer is nobody
+            // else's business. A committee member weighing somebody else's
+            // dispute reads the answers with `dispute show`.
+            if d.accused == self.node
+                && d.status == DisputeStatus::Voting
+                && !self.committee.responses(id, d.vote_round).await?.is_empty()
+            {
+                answered.insert(id);
             }
             disputes.push(d);
         }
@@ -537,6 +565,7 @@ impl Watch {
             standing,
             disputes,
             voted,
+            answered,
             election,
             balloted,
             nominated,
@@ -690,6 +719,7 @@ mod tests {
             standing: standing(),
             disputes: Vec::new(),
             voted: BTreeSet::new(),
+            answered: BTreeSet::new(),
             election: None,
             balloted: false,
             nominated: false,
@@ -763,6 +793,28 @@ mod tests {
         // The evidence link is the whole point of reporting it: an operator
         // who cannot see what they are accused of cannot answer it.
         assert!(d[0].detail.contains("ipfs://bafy"), "{}", d[0].detail);
+    }
+
+    #[test]
+    fn an_answer_on_the_record_discharges_the_duty_to_answer() {
+        let mut s = snapshot(1_500);
+        s.disputes = vec![dispute(1, ME, DisputeStatus::Voting)];
+        // The command is both halves, because half of it is not an answer: a
+        // bundle sitting in a directory is a file nobody can be shown was
+        // written before the votes came in.
+        let d = derive(&s);
+        assert!(d[0].command.contains("replay BTC_USD"), "{}", d[0].command);
+        assert!(
+            d[0].command.contains("dispute respond 1"),
+            "{}",
+            d[0].command
+        );
+        assert!(d[0].detail.contains("unanswered"), "{}", d[0].detail);
+
+        // Answered, and the dispute is still open and still being voted on --
+        // but there is nothing left here for the operator to do about it.
+        s.answered.insert(1);
+        assert!(derive(&s).is_empty());
     }
 
     #[test]

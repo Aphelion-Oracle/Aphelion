@@ -26,6 +26,7 @@ use aphelion_node::chain::committee::{
 use aphelion_node::chain::{ChainClient, CliChain};
 use aphelion_node::config::Config;
 use aphelion_node::engine::duty::{Consequence, Duty, Snapshot, Watch};
+use aphelion_node::engine::verify;
 use aphelion_node::error::{NodeError, Result};
 use aphelion_node::signer::NodeSigner;
 use clap::Subcommand;
@@ -77,6 +78,27 @@ pub enum DisputeCmd {
         evidence: String,
         /// Post the bond and file. Without this the bond is printed and
         /// nothing is sent.
+        #[arg(long)]
+        commit: bool,
+    },
+    /// Answer an allegation: publish the digest of the evidence.
+    ///
+    /// The document stays where it is. What goes on the ledger is its SHA-256,
+    /// which is the difference between an answer a committee can be shown was
+    /// fixed before the votes came in and a file produced afterwards.
+    Respond {
+        id: u64,
+        /// The answer. Usually the output of `replay --json`, in which case it
+        /// is audited against the allegation before anything is sent; any other
+        /// file is accepted and its digest published unchecked.
+        #[arg(long)]
+        file: std::path::PathBuf,
+        /// Where the committee can fetch it. Optional: a digest with no
+        /// locator still fixes which document was answered with, and some
+        /// operators will hand the file over privately.
+        #[arg(long)]
+        uri: Option<String>,
+        /// Publish it. Without this the digest is printed and nothing is sent.
         #[arg(long)]
         commit: bool,
     },
@@ -510,6 +532,37 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                 println!("appealed  : by {a}, bond {}", d.appeal_bond);
             }
 
+            // What the accused answered this round with, in the order they
+            // gave it. An empty list is printed rather than skipped: whether a
+            // dispute was answered at all is something a committee weighs, and
+            // a line that appears only when there is an answer would make
+            // silence look like a rendering accident.
+            let answers = ctx.committee.responses(id, d.vote_round).await?;
+            println!();
+            if answers.is_empty() {
+                println!("answers   : none on the record for round {}", d.vote_round);
+            }
+            for (i, a) in answers.iter().enumerate() {
+                println!(
+                    "answer {}  : {} at {} ({})",
+                    i + 1,
+                    a.digest,
+                    a.at,
+                    if a.uri.is_empty() {
+                        "no locator given"
+                    } else {
+                        &a.uri
+                    }
+                );
+            }
+            if answers.len() > 1 {
+                println!(
+                    "            {} earlier answers stand on the record; the last is the \
+                     one the accused is offering.",
+                    answers.len() - 1
+                );
+            }
+
             // Both sides of the evidence, spelled out. The allegation names a
             // feed and a nonce, which is exactly what one command takes to
             // answer it and the other to check the answer -- and the flags are
@@ -518,14 +571,28 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             println!();
             if d.accused == ctx.node {
                 println!(
-                    "answer it : aphelion-node replay {} {} --json",
+                    "answer it : aphelion-node replay {} {} --json > evidence.json",
                     d.feed, d.nonce
+                );
+                println!(
+                    "            aphelion-node dispute respond {id} --file evidence.json --commit"
                 );
             }
             println!("check it  : aphelion-node verify-evidence <bundle> \\");
             println!(
-                "              --node {} --feed {} --nonce {} --aggregator {}",
-                d.accused, d.feed, d.nonce, config.network.aggregator_contract
+                "              --node {} --feed {} --nonce {} --aggregator {}{}",
+                d.accused,
+                d.feed,
+                d.nonce,
+                config.network.aggregator_contract,
+                // The digest is the last thing printed because it is the last
+                // thing to exist: it is only there once the accused has
+                // answered, and a committee checking a file against the round
+                // it was answered with wants all five on one command line.
+                match answers.last() {
+                    Some(a) => format!(" \\\n              --digest {}", a.digest),
+                    None => String::new(),
+                }
             );
             Ok(())
         }
@@ -557,6 +624,90 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                 .await
                 .map_err(|e| explain(e, &account))?;
             println!("\nfiled as dispute {}", r.value);
+            landed(r.tx_hash);
+            Ok(())
+        }
+
+        DisputeCmd::Respond {
+            id,
+            file,
+            uri,
+            commit,
+        } => {
+            let Some(d) = ctx.committee.dispute(id).await? else {
+                return Err(NodeError::Config(format!("no dispute {id}")));
+            };
+            // Bytes, never a re-serialisation. The digest published here is the
+            // one a committee will compute over the file they are handed, so
+            // the two have to be over the same thing down to the last newline.
+            let raw = std::fs::read(&file)
+                .map_err(|e| NodeError::Config(format!("cannot read `{}`: {e}", file.display())))?;
+            let digest = hex::encode(verify::sha256(&raw));
+
+            println!("answer dispute {id} as {account}");
+            println!("  allegation  {} nonce {}", d.feed, d.nonce);
+            println!("  file        {}", file.display());
+            println!("  sha256      {digest}");
+            println!("  uri         {}", uri.as_deref().unwrap_or("(none)"));
+
+            // A courtesy audit, and a refusal where it matters. An operator
+            // about to commit to a document for the length of a voting period
+            // should not find out from the committee that they answered with
+            // the wrong round -- and they can still answer, once, with the
+            // right one.
+            let expect = verify::Expectations::parse(
+                Some(&d.accused),
+                Some(&d.feed),
+                Some(d.nonce),
+                Some(&config.network.aggregator_contract),
+                None,
+            )
+            .map_err(NodeError::Config)?;
+            match verify::verify_document(&raw, &expect) {
+                Ok(audit) => {
+                    println!("  audit       {}", audit.verdict);
+                    if audit.verdict < verify::Verdict::Unsupported {
+                        return Err(NodeError::Config(format!(
+                            "this file reads as `{}` against dispute {id}, so publishing it \
+                             would answer the allegation with something that establishes \
+                             nothing about it. Run `aphelion-node replay {} {} --json` for \
+                             the round the allegation names, and \
+                             `aphelion-node verify-evidence <file> --node {} --feed {} \
+                             --nonce {}` to see the findings in full.",
+                            audit.verdict, d.feed, d.nonce, d.accused, d.feed, d.nonce
+                        )));
+                    }
+                    if audit.verdict != verify::Verdict::Sound {
+                        println!(
+                            "\n  Warning: the observations in this bundle do not produce the \
+                             price it signs.\n  It is still an answer, and the committee \
+                             will read it as the one you chose to give."
+                        );
+                    }
+                }
+                // Anything that is not a bundle: a log, an archive, a written
+                // account. The digest is published unjudged, and saying so is
+                // the honest version of a check that did not happen.
+                Err(_) => println!("  audit       not an evidence bundle; nothing here checked it"),
+            }
+
+            if !commit {
+                println!(
+                    "\nNothing sent. A published digest can be corrected by a later answer \
+                     in the same voting round and can never be withdrawn.\nRe-run with \
+                     --commit to publish it."
+                );
+                return Ok(());
+            }
+            let r = ctx
+                .committee
+                .respond(id, &digest, uri.as_deref().unwrap_or(""))
+                .await
+                .map_err(|e| explain(e, &account))?;
+            println!(
+                "\nanswered; the digest is on the record for round {}",
+                d.vote_round
+            );
             landed(r.tx_hash);
             Ok(())
         }
