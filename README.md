@@ -75,8 +75,10 @@ people who built it.
   skewed clock, a stale observation — every one of these makes the node publish
   nothing instead of publishing something plausible.
 - **Everything reproducible.** Every raw observation is retained, so any
-  published price can be replayed from the inputs that produced it. That is what
-  makes a dispute answerable with evidence.
+  published price can be replayed from the inputs that produced it —
+  `aphelion-node replay <feed> <nonce>` does exactly that, and checks the
+  signature stored beside the round while it is there. That is what makes a
+  dispute answerable with evidence rather than with assurances.
 
 ---
 
@@ -639,6 +641,7 @@ docker compose logs -f node
 | `beacon status \| tick \| open \| commit \| reveal \| finalize` | The randomness beacon, and what this node owes it |
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
 | `dispute list \| show \| open \| vote \| resolve \| appeal \| settle` | Disputes |
+| `replay <feed> <nonce> [--json]` | Rebuild a published round from the observations retained underneath it, and check the signature stored beside it |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
 | `migrate` | Apply database migrations and exit |
 | `show-config` | Print the effective configuration after environment overrides |
@@ -786,7 +789,7 @@ for prices. What lives here is the evidence trail.
 
 | Table | Purpose |
 | --- | --- |
-| `raw_prices` | Every observation from every source, retained for the configured window |
+| `raw_prices` | Every observation from every source, retained for the configured window; what `replay` re-derives a round from |
 | `local_rounds` | Every round this node composed, signed or skipped, with its signature |
 | `feed_nonces` | Monotonic nonce allocator; must survive restarts or submissions read as replays |
 | `source_health` | Per-source success/failure history, behind `/health` and `/v1/sources` |
@@ -1441,6 +1444,49 @@ cannot be shrunk below the quorum it has to reach — which would dismiss every
 dispute against anybody and switch slashing off without anyone appearing to
 decide it.
 
+### Answering one
+
+A dispute is decided on evidence, and the evidence is the accused operator's own
+records. `replay` assembles them from the round the dispute names:
+
+```bash
+aphelion-node replay BTC_USD 4812          # the page, for the operator
+aphelion-node replay BTC_USD 4812 --json   # the bundle, for the committee
+```
+
+It answers two questions that are worth keeping apart, because a dispute turns
+on which one failed.
+
+**Is this row the one that was signed?** The signature stored beside a round is
+checked against the round as recorded, and the exact canonical payload the
+contract verified is printed. That payload plus the node's public key is
+checkable by anyone, with none of this software and no trust in the operator
+running it — which is what makes it evidence rather than an assertion. A
+signature that does not verify means either an edited column or a node now
+pointed at a different aggregator than the one that signed, and those are not
+the same thing.
+
+**Do the retained observations still produce the published price?** The
+aggregation is re-run over the window the round actually read: the freshest
+observation from each venue that had *arrived* by then, which is not the same
+set as everything dated before it. A venue reporting a 14:00 price at 14:03 was
+invisible to the 14:01 round, and admitting it to the replay would manufacture a
+discrepancy for an honest node to explain. Sources excluded as outliers are
+listed with the reason they were dropped.
+
+Two refusals are deliberate. A difference is never called close enough — the
+price comes back identical or it does not. And a divergence is never reported as
+an admission: `min_sources`, `max_source_deviation_bps` and the confidence floor
+are configuration, are not recorded beside a round, and a round composed before
+they were retuned was computed under numbers no replay can recover. The
+explanations are printed next to the divergence instead of being decided
+between.
+
+A round whose observations retention has already deleted grades as `incomplete`,
+not as anything worse — an absence of evidence is not evidence. Which is the
+reason to check that `retention.raw_prices` outlasts the dispute and appeal
+windows combined before it matters.
+
 ### Who is on the committee
 
 The committee is elected by the operators, weighted by the same `weight_of`
@@ -1643,6 +1689,11 @@ decisions rather than the plumbing:
 - `aphelion-node::engine::upkeep` — that a node never offers its own key to a
   sweep, that a key the aggregator would decline is not paid for twice, and that
   the longest silence goes first when a batch has to be truncated
+- `aphelion-node::engine::replay` — that an edited row reads as tampered even
+  when the observations beside it agree, that an observation which arrived after
+  a round is not evidence against it, that a pruned window is unanswerable
+  rather than damning, and that a divergence arrives with the innocent
+  explanations attached
 - `aphelion-node` integration `multi_node` — that the median a node predicts
   locally is the median the network publishes, and that one node's signature
   authorises nothing under another node's key

@@ -10,4 +10,5 @@
 
 pub mod beacon;
 pub mod committee;
+pub mod replay;
 pub mod status;

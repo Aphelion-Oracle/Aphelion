@@ -392,6 +392,87 @@ impl Repo {
         Ok(())
     }
 
+    // -- replay -------------------------------------------------------------
+
+    /// One round by the pair a dispute names it by.
+    ///
+    /// `(feed, nonce)` rather than the row id because that is the identifier
+    /// the aggregator knows and therefore the one that appears in a challenge;
+    /// the row id is local bookkeeping nobody else can see. The unique
+    /// constraint on the pair is what makes this a single row.
+    pub async fn round_by_nonce(&self, feed: &FeedId, nonce: u64) -> Result<Option<RecordedRound>> {
+        let row = sqlx::query_as::<_, RecordedRoundRow>(
+            "SELECT id, feed_id, nonce, price_raw::text AS price_text, confidence_bps,
+                    source_count, spread_bps, stddev_raw::text AS stddev_text, observed_at,
+                    signature, status, tx_hash, error, created_at
+             FROM local_rounds
+             WHERE feed_id = $1 AND nonce = $2",
+        )
+        .bind(feed.as_str())
+        .bind(nonce as i64)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(RecordedRoundRow::decode).transpose()
+    }
+
+    /// Every observation dated inside a past round's age window.
+    ///
+    /// Candidates, not the answer. Which of these the round could actually
+    /// *see* — and which one per source it would have picked — is
+    /// [`crate::engine::replay::visible_at`], deliberately not this query.
+    ///
+    /// [`Self::latest_per_source`] does the equivalent narrowing in SQL because
+    /// it runs every round for every feed and wants the index. This runs once,
+    /// by hand, over one round's window, and the rule it applies is the part of
+    /// the replay most likely to be got subtly wrong: a row the node had not
+    /// yet received was not there to be selected, and admitting one invents a
+    /// discrepancy for an honest node to explain. A rule that decides whether a
+    /// dispute is answerable belongs where a test can reach it, not in a `WHERE`
+    /// clause that no test in this repository can execute. So the SQL keeps only
+    /// the bound the index serves, and the judgement moves to a pure function.
+    ///
+    /// The two bounds here are the age filter, which the index serves, and
+    /// `received_at`, which keeps a long-lived node from dragging back every
+    /// observation recorded since the round. `visible_at` applies the
+    /// `received_at` rule again over what comes back. The duplication is
+    /// deliberate and it is not symmetrical: this predicate can only ever be
+    /// looser than the function's, so the worst a drift between them can do is
+    /// transfer rows that are then discarded — never admit one the round could
+    /// not see.
+    ///
+    /// Note what is *not* bounded: `observed_at` above. A venue with a fast
+    /// clock can date an observation slightly in the future, and the live round
+    /// query has no upper bound either, so it genuinely did see those.
+    ///
+    /// A window that comes back short is not evidence of anything: raw
+    /// observations are pruned on a retention interval, and a round older than
+    /// that has no inputs left to replay.
+    pub async fn observations_in_window(
+        &self,
+        feed: &FeedId,
+        max_age: std::time::Duration,
+        as_of: DateTime<Utc>,
+    ) -> Result<Vec<Observation>> {
+        let cutoff = as_of
+            - ChronoDuration::from_std(max_age)
+                .map_err(|e| NodeError::Other(anyhow::anyhow!("max_age out of range: {e}")))?;
+
+        let rows = sqlx::query_as::<_, RawPriceRow>(
+            "SELECT id, feed_id, source, price_raw::text AS price_text, observed_at, received_at
+             FROM raw_prices
+             WHERE feed_id = $1 AND observed_at >= $2 AND received_at <= $3
+             ORDER BY source, observed_at DESC",
+        )
+        .bind(feed.as_str())
+        .bind(cutoff)
+        .bind(as_of)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(RawPriceRow::decode).collect()
+    }
+
     /// Delete observations older than `retention`. Returns the row count.
     pub async fn prune(&self, retention: std::time::Duration) -> Result<i64> {
         let interval = format!("{} seconds", retention.as_secs());

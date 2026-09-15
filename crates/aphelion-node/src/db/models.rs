@@ -196,3 +196,72 @@ impl BeaconRow {
         })
     }
 }
+
+#[derive(Debug, Clone, FromRow)]
+pub struct RecordedRoundRow {
+    pub id: i64,
+    pub feed_id: String,
+    pub nonce: i64,
+    pub price_text: String,
+    pub confidence_bps: i32,
+    pub source_count: i32,
+    pub spread_bps: i32,
+    pub stddev_text: String,
+    pub observed_at: DateTime<Utc>,
+    pub signature: String,
+    pub status: String,
+    pub tx_hash: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One round with the evidence attached to it.
+///
+/// [`LocalRound`] is the listing shape: what `/v1/rounds` shows an operator
+/// scrolling their history. This is the shape a replay needs, and it differs in
+/// the two columns a listing has no use for and an argument cannot do without —
+/// the signature, which is the only proof the row is the one that was signed,
+/// and the standard deviation, which is published on chain and so is part of
+/// what can be disputed. Keeping them apart leaves the listing queries alone
+/// rather than widening every one of them for a command that reads a single
+/// row.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordedRound {
+    pub id: i64,
+    pub feed: FeedId,
+    pub nonce: u64,
+    #[serde(serialize_with = "ser_price")]
+    pub price: Price,
+    pub confidence_bps: u32,
+    pub source_count: u32,
+    pub spread_bps: u32,
+    #[serde(serialize_with = "ser_price")]
+    pub stddev: Price,
+    pub observed_at: DateTime<Utc>,
+    pub signature: String,
+    pub status: String,
+    pub tx_hash: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl RecordedRoundRow {
+    pub fn decode(self) -> Result<RecordedRound> {
+        Ok(RecordedRound {
+            id: self.id,
+            feed: FeedId::new(self.feed_id).map_err(|e| NodeError::Other(e.into()))?,
+            nonce: self.nonce as u64,
+            price: parse_raw_price(&self.price_text)?,
+            confidence_bps: self.confidence_bps as u32,
+            source_count: self.source_count as u32,
+            spread_bps: self.spread_bps as u32,
+            stddev: parse_raw_price(&self.stddev_text)?,
+            observed_at: self.observed_at,
+            signature: self.signature,
+            status: self.status,
+            tx_hash: self.tx_hash,
+            error: self.error,
+            created_at: self.created_at,
+        })
+    }
+}

@@ -545,11 +545,52 @@ What happens, and what you should do:
    evidence against you.
 3. **Answer it.** There is nothing to file on chain: a dispute is answered by
    evidence and argument in front of the committee, wherever that conversation
-   happens. Your case is your own records — `/v1/rounds` shows what you signed
-   and when, and `raw_prices` retains every observation that produced it. This
-   is the reason observations are retained at all, and the reason to check that
-   your retention window is longer than the dispute window *before* you need
-   it.
+   happens. Your case is your own records, and `replay` assembles it — it takes
+   the round the dispute names and rebuilds it from the observations retained
+   underneath it:
+
+   ```bash
+   aphelion-node replay BTC_USD 4812          # the page, for you
+   aphelion-node replay BTC_USD 4812 --json   # the bundle, for the committee
+   ```
+
+   It answers two separate questions, and it is worth knowing which is which
+   before you quote either at anybody.
+
+   **Does the stored signature cover the stored round?** If it does, the row in
+   your database is the one you signed, and the command prints the exact
+   canonical payload the contract verified. Anyone can check that against your
+   public key without running Aphelion or believing anything you say about it,
+   which is what makes it evidence rather than an assertion. If it does *not*,
+   stop and find out why before you say anything: either a column has been
+   edited since the round was signed, or the node is configured against a
+   different aggregator than the one that signed it. Check
+   `network.aggregator_contract` first — repointing a node at a new deployment
+   makes every older round read as unverifiable, and that is not tampering.
+
+   **Do the retained observations still produce the published price?** Re-run
+   over the window the round actually read — the freshest observation from each
+   venue that had *arrived* by then — and compare. Sources excluded as outliers
+   are listed with the reason they were dropped, which is usually the whole
+   answer to "why was your price different from everyone else's".
+
+   The exit code is the verdict: `0` reproduced, `1` too little retained to
+   answer, `2` diverged or unverifiable.
+
+   Two things it will not do. It will not call a difference close enough — the
+   price either comes back identical or it does not. And it will not read a
+   divergence as an admission: `min_sources`, `max_source_deviation_bps` and the
+   confidence floor are configuration and are not recorded beside a round, so a
+   round composed before you retuned them was computed under numbers the replay
+   cannot recover. It prints those explanations next to the divergence rather
+   than deciding between them for you.
+
+   A round whose observations have been pruned cannot be replayed at all, and
+   grades as `incomplete` rather than as anything worse. This is the reason
+   observations are retained at all, and the reason to check that
+   `retention.raw_prices` is longer than the dispute and appeal windows
+   combined *before* you need it — the command cannot recover what retention
+   has already deleted.
 4. **Appeal, once**, within the appeal window, if the committee finds against you
    and you believe it is wrong. The appeal bond is larger than the dispute bond
    and is returned only if the second vote changes the outcome — so

@@ -143,6 +143,27 @@ enum Command {
         no_probe: bool,
     },
 
+    /// Reproduce a published round from the observations that produced it.
+    ///
+    /// The command to run when a dispute is filed against this node. It checks
+    /// two separate things: that the stored signature really covers the stored
+    /// round, and that re-running the aggregation over the retained
+    /// observations produces the price that was published.
+    ///
+    /// Needs a database — the observations are the evidence. Exits 0
+    /// reproduced, 1 too little retained to answer, 2 diverged or tampered.
+    Replay {
+        /// Feed id, e.g. BTC_USD.
+        feed: String,
+        /// The nonce the round was published under. This is how a challenge
+        /// names it; `/v1/rounds` lists what this node has.
+        nonce: u64,
+        /// The evidence bundle: observations, arithmetic and the canonical
+        /// signed payload, for a counterparty rather than an operator.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Apply database migrations and exit.
     Migrate,
 
@@ -217,6 +238,11 @@ async fn run() -> Result<()> {
             println!("signature  : {}", submission.signature_hex());
             println!("verifies   : {}", submission.verify(&signer.public_key()));
             Ok(())
+        }
+
+        Command::Replay { feed, nonce, json } => {
+            let config = Config::load(&cli.config)?;
+            cmd::replay::run(&config, &feed, nonce, json).await
         }
 
         Command::Migrate => {
