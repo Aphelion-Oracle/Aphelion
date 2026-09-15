@@ -24,6 +24,8 @@ pub enum FeedIdError {
     TooLong(String),
     #[error("feed id `{0}` contains a character outside [A-Za-z0-9_]")]
     InvalidChar(String),
+    #[error("feed id has a zero byte before its last character; the padding must be a suffix")]
+    InteriorNul,
 }
 
 /// A canonical feed identifier, e.g. `BTC_USD`.
@@ -56,6 +58,40 @@ impl FeedId {
         let mut out = [0u8; FEED_ID_PADDED_LEN];
         out[..self.0.len()].copy_from_slice(self.0.as_bytes());
         out
+    }
+
+    /// The inverse of [`Self::to_padded_bytes`].
+    ///
+    /// Strict about the padding, and deliberately so. The padding must be a
+    /// suffix: `BTC\0USD` is rejected rather than read as `BTC`. Two distinct
+    /// byte strings that decode to one feed id would mean a signature over one
+    /// of them could be presented as a signature over the other, and the byte
+    /// string is what the signature actually covers. Every other rule
+    /// [`Self::new`] enforces applies here too, so nothing decodes to a feed id
+    /// that could not have been constructed.
+    pub fn from_padded_bytes(raw: &[u8; FEED_ID_PADDED_LEN]) -> Result<Self, FeedIdError> {
+        let end = raw
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(FEED_ID_PADDED_LEN);
+        if raw[end..].iter().any(|&b| b != 0) {
+            return Err(FeedIdError::InteriorNul);
+        }
+
+        let symbol = &raw[..end];
+        // Checked before the UTF-8 conversion so that a non-ASCII byte is
+        // reported as the character problem it is rather than as an encoding
+        // error, and so the conversion below cannot fail.
+        if !symbol
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        {
+            return Err(FeedIdError::InvalidChar(
+                String::from_utf8_lossy(symbol).into_owned(),
+            ));
+        }
+
+        FeedId::new(core::str::from_utf8(symbol).expect("checked ASCII above"))
     }
 }
 

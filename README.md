@@ -642,6 +642,7 @@ docker compose logs -f node
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
 | `dispute list \| show \| open \| vote \| resolve \| appeal \| settle` | Disputes |
 | `replay <feed> <nonce> [--json]` | Rebuild a published round from the observations retained underneath it, and check the signature stored beside it |
+| `verify-evidence <path\|-> [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. Needs no configuration, key, database or chain |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
 | `migrate` | Apply database migrations and exit |
 | `show-config` | Print the effective configuration after environment overrides |
@@ -1487,6 +1488,49 @@ not as anything worse — an absence of evidence is not evidence. Which is the
 reason to check that `retention.raw_prices` outlasts the dispute and appeal
 windows combined before it matters.
 
+### Checking one
+
+A bundle produced by the accused, carrying the accused's software's verdict on
+the accused's conduct, is not evidence until somebody else can check it.
+`verify-evidence` is that side:
+
+```bash
+aphelion-node verify-evidence bundle.json   # or `-` for stdin
+```
+
+It needs no configuration, no key, no database and no chain — a committee member
+has none of those for the node they are judging, and a verifier only the accused
+could run would be worth nothing.
+
+It treats the file as hostile input, not as stale input. The bundle's own verdict
+and findings are ignored outright; there is no field to read them into. What
+cannot be forged is 117 bytes and a signature, because the aggregator's contract
+id, the feed and the nonce are all inside the bytes and the key is registered on
+chain. Everything else is checked against them:
+
+| Grade | Meaning | Exit |
+| --- | --- | --- |
+| `sound` | Signed, honestly described, and supported by the observations offered | 0 |
+| `unsupported` | Genuinely signed, but the observations offered do not produce that price | 1 |
+| `misdescribed` | The signature is good and the bundle describes something else | 2 |
+| `unsigned` | The payload does not decode, or the signature does not verify | 2 |
+
+`misdescribed` is the grade that makes the rest more than ceremony. A bundle can
+carry a perfectly valid signature over a payload saying one thing and a
+`recorded` section saying another, and a verifier that checked the signature and
+then read the price out of the JSON beside it would accept exactly that. So the
+price compared against the observations is the price *inside the signed bytes*,
+never the one the file says is there — which is also why
+`PriceMessage::from_bytes` refuses a payload from another domain or with a
+non-positive price rather than reading it as a price anyway.
+
+Two limits, printed on every audit rather than left in the source. It cannot
+detect an **omission**: four venues that agree look identical to four of six
+whose absent two would have moved the median, and only the operator holds the
+full table. And a sound bundle about somebody else's node is still a sound
+bundle — that the key it names is the key under dispute is a question for the
+registry, which is where the command says to go.
+
 ### Who is on the committee
 
 The committee is elected by the operators, weighted by the same `weight_of`
@@ -1620,9 +1664,9 @@ refusal repeats it.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · a disputed round replayable from its inputs, and the bundle checkable by the other side ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
-| **5 — Expansion** | Additional feeds · a randomness beacon ✅ (contract; node-side participation next) · non-price data · parameter governance ✅ |
+| **5 — Expansion** | Additional feeds · a randomness beacon ✅ (contract and node-side participation) · non-price data · parameter governance ✅ |
 
 Phase boundaries are gated on the work being done, not on a date.
 
@@ -1689,6 +1733,12 @@ decisions rather than the plumbing:
 - `aphelion-node::engine::upkeep` — that a node never offers its own key to a
   sweep, that a key the aggregator would decline is not paid for twice, and that
   the longest silence goes first when a batch has to be truncated
+- `aphelion-node::engine::verify` — that a bundle carrying a valid signature
+  over one price and prose asserting another is caught, that a bundle signed by
+  the wrong key establishes nothing at all, and that every audit states the one
+  thing it cannot check
+- `aphelion-node` integration `evidence` — that the bundle `replay` writes is the
+  bundle `verify` reads, field for field, since the two share no types by design
 - `aphelion-node::engine::replay` — that an edited row reads as tampered even
   when the observations beside it agree, that an observation which arrived after
   a round is not evidence against it, that a pruned window is unanswerable

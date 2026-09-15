@@ -591,6 +591,19 @@ What happens, and what you should do:
    `retention.raw_prices` is longer than the dispute and appeal windows
    combined *before* you need it — the command cannot recover what retention
    has already deleted.
+
+   Hand over the `--json` bundle, not the page. The other side can check it
+   themselves with no access to your node, your key or your database:
+
+   ```bash
+   aphelion-node verify-evidence bundle.json
+   ```
+
+   That command ignores your node's verdict entirely and re-derives everything
+   from the signed bytes — which is the point. A bundle is worth something to a
+   committee precisely because they do not have to take your word for any part
+   of it. If you are ever on the other side of one, this is also the command to
+   run on somebody else's bundle before voting on it.
 4. **Appeal, once**, within the appeal window, if the committee finds against you
    and you believe it is wrong. The appeal bond is larger than the dispute bond
    and is returned only if the second vote changes the outcome — so
@@ -616,6 +629,32 @@ If a committee member is also the operator of the node under dispute, the
 contract refuses their vote. That is checked on chain rather than left to
 etiquette, and `duties` never offers you a vote on your own node — it would be
 a transaction fee spent on a guaranteed refusal.
+
+---
+
+### Voting on somebody else's dispute
+
+If you sit on the committee, a vote is a decision about another operator's
+stake, so check their evidence rather than the summary attached to it:
+
+```bash
+aphelion-node verify-evidence their-bundle.json
+```
+
+It needs nothing from you but the file — no configuration, no key, no database,
+no chain access. It ignores the bundle's own verdict and re-derives everything
+from the signed payload, and it grades `sound`, `unsupported`, `misdescribed` or
+`unsigned` with the exit code to match (0, 1, 2, 2).
+
+Read what it says it cannot check as carefully as what it can. It cannot tell a
+bundle showing four venues from one showing four of six, where the two left out
+would have moved the median — only the operator holds the full table. And a
+sound bundle about a different node is still a sound bundle, so confirm the key
+it names is the key under dispute before the grade means anything:
+
+```bash
+aphelion-node dispute show 7   # whose key the allegation is against
+```
 
 ---
 

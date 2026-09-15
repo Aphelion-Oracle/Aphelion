@@ -19,7 +19,7 @@ pub mod price;
 
 pub use feed::{FeedId, FeedIdError};
 pub use math::{deviation_bps, mean, stddev, weighted_median, WeightedSample};
-pub use message::{PriceMessage, DOMAIN_SEPARATOR, MESSAGE_LEN};
+pub use message::{MessageError, PriceMessage, DOMAIN_SEPARATOR, MESSAGE_LEN};
 pub use price::{Price, PriceError, PRICE_DECIMALS, PRICE_SCALE};
 
 /// Basis points denominator. 10_000 bps == 100%.

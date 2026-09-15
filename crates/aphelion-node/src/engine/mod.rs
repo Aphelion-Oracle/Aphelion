@@ -16,6 +16,7 @@ pub mod replay;
 pub mod round;
 pub mod status;
 pub mod upkeep;
+pub mod verify;
 
 pub use aggregate::{aggregate, confidence_bps, Aggregated, AggregationParams};
 pub use beacon::{decide as decide_beacon, Action as BeaconAction, OurPart, OwedReveal};
@@ -28,3 +29,4 @@ pub use status::{
     SourceStatus, Verdict,
 };
 pub use upkeep::{plan_sweep, Candidate, Excuse, SweepPlan, SweepReport, Sweeper};
+pub use verify::{verify, Audit, Bundle, Verdict as EvidenceVerdict};

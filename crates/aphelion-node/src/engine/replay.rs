@@ -236,6 +236,21 @@ pub struct Recomputed {
     pub deviation_from_recorded_bps: u32,
 }
 
+/// The parameters the recomputation ran under, recorded in the bundle.
+///
+/// Without these a bundle cannot be checked by anybody else: the same
+/// observations produce different medians under different filters, so a
+/// verifier handed only the numbers would have to guess at the arithmetic and
+/// would be entitled to reach any answer it liked. They are a *claim* — nothing
+/// binds them to the round, which is exactly why they are stated openly rather
+/// than left implicit for a verifier to assume.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ParamsUsed {
+    pub min_sources: usize,
+    pub max_source_deviation_bps: u32,
+    pub confidence_floor_bps: u32,
+}
+
 /// A round, re-derived.
 #[derive(Debug, Clone, Serialize)]
 pub struct Replay {
@@ -243,6 +258,7 @@ pub struct Replay {
     pub findings: Vec<Finding>,
     pub recorded: Recorded,
     pub provenance: Provenance,
+    pub params: ParamsUsed,
     pub window: Window,
     /// `None` when the surviving window could not be aggregated at all; the
     /// reason is in `findings`.
@@ -343,6 +359,11 @@ pub fn replay(
         findings,
         recorded,
         provenance,
+        params: ParamsUsed {
+            min_sources: params.aggregation.min_sources,
+            max_source_deviation_bps: params.aggregation.max_source_deviation_bps,
+            confidence_floor_bps: params.confidence_floor,
+        },
         window,
         recomputed,
     }

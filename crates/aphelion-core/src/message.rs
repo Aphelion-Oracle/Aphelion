@@ -84,6 +84,92 @@ impl PriceMessage {
     pub fn to_hex(&self) -> String {
         hex::encode(self.to_bytes())
     }
+
+    /// Recover the fields from a canonical payload.
+    ///
+    /// The inverse of [`Self::to_bytes`], and the reason it exists is not
+    /// symmetry. A signature covers *bytes*; everything anybody says those bytes
+    /// mean is a claim on top of them. Checking a signature and then reading the
+    /// price out of the JSON next to it verifies nothing — the two can disagree,
+    /// and a payload is 117 opaque bytes to anyone eyeballing it. Decoding is
+    /// what closes that gap: the fields a verifier compares are the fields the
+    /// signature was over.
+    ///
+    /// Strict, because a lenient decoder reopens it. A payload with the wrong
+    /// domain separator is refused rather than read as a price, a
+    /// non-positive price is refused rather than returned as one no node could
+    /// have published, and the feed id must be padded exactly as
+    /// [`FeedId::to_padded_bytes`] pads it.
+    pub fn from_bytes(raw: &[u8]) -> Result<Self, MessageError> {
+        if raw.len() != MESSAGE_LEN {
+            return Err(MessageError::WrongLength(raw.len()));
+        }
+        if &raw[OFF_DOMAIN..OFF_CONTRACT] != DOMAIN_SEPARATOR.as_slice() {
+            return Err(MessageError::WrongDomain);
+        }
+
+        let mut aggregator = [0u8; 32];
+        aggregator.copy_from_slice(&raw[OFF_CONTRACT..OFF_FEED]);
+
+        let mut feed_raw = [0u8; FEED_ID_PADDED_LEN];
+        feed_raw.copy_from_slice(&raw[OFF_FEED..OFF_PRICE]);
+        let feed = FeedId::from_padded_bytes(&feed_raw)?;
+
+        let price = i128::from_be_bytes(
+            raw[OFF_PRICE..OFF_TIMESTAMP]
+                .try_into()
+                .expect("16 bytes by construction"),
+        );
+        if price <= 0 {
+            return Err(MessageError::NonPositivePrice(price));
+        }
+
+        Ok(Self {
+            aggregator,
+            feed,
+            price: Price::from_raw(price),
+            timestamp: u64::from_be_bytes(
+                raw[OFF_TIMESTAMP..OFF_CONFIDENCE]
+                    .try_into()
+                    .expect("8 bytes by construction"),
+            ),
+            confidence_bps: u32::from_be_bytes(
+                raw[OFF_CONFIDENCE..OFF_NONCE]
+                    .try_into()
+                    .expect("4 bytes by construction"),
+            ),
+            nonce: u64::from_be_bytes(
+                raw[OFF_NONCE..MESSAGE_LEN]
+                    .try_into()
+                    .expect("8 bytes by construction"),
+            ),
+        })
+    }
+
+    /// [`Self::from_bytes`] over a hex string, which is how a payload travels
+    /// in an evidence bundle or a bug report.
+    pub fn from_hex(s: &str) -> Result<Self, MessageError> {
+        let raw = hex::decode(s.trim()).map_err(|e| MessageError::NotHex(e.to_string()))?;
+        Self::from_bytes(&raw)
+    }
+}
+
+/// Why a payload could not be read as an Aphelion price message.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum MessageError {
+    #[error("payload is not hex: {0}")]
+    NotHex(String),
+    #[error("payload is {0} bytes, expected {MESSAGE_LEN}")]
+    WrongLength(usize),
+    #[error(
+        "payload does not begin with the Aphelion price domain separator; it may be a \
+         signature over something else entirely"
+    )]
+    WrongDomain,
+    #[error("payload carries a non-positive price ({0}), which no node could have published")]
+    NonPositivePrice(i128),
+    #[error("payload carries an invalid feed id: {0}")]
+    Feed(#[from] crate::feed::FeedIdError),
 }
 
 #[cfg(test)]
@@ -171,6 +257,121 @@ mod tests {
                 case["name"]
             );
         }
+    }
+
+    /// Every vector decodes back to the fields it was built from. The vectors
+    /// are the shared specification, so this asserts the decoder against the
+    /// same file the encoder and the contract are asserted against, rather than
+    /// against the encoder alone — which would only prove the two agree.
+    #[test]
+    fn every_vector_decodes_back_to_its_fields() {
+        let raw = include_str!("../../../tests/vectors/price_message.json");
+        let vectors: Value = serde_json::from_str(raw).expect("vector file is valid JSON");
+
+        for case in vectors["cases"].as_array().expect("cases array") {
+            let name = case["name"].as_str().unwrap();
+            let decoded = PriceMessage::from_hex(case["message_hex"].as_str().unwrap())
+                .unwrap_or_else(|e| panic!("vector `{name}` did not decode: {e}"));
+
+            assert_eq!(
+                decoded.feed.as_str(),
+                case["feed"].as_str().unwrap(),
+                "vector `{name}` feed"
+            );
+            assert_eq!(
+                decoded.price.raw().to_string(),
+                case["price_raw"].as_str().unwrap(),
+                "vector `{name}` price"
+            );
+            assert_eq!(
+                decoded.timestamp,
+                case["timestamp"].as_u64().unwrap(),
+                "vector `{name}` timestamp"
+            );
+            assert_eq!(
+                decoded.nonce,
+                case["nonce"].as_u64().unwrap(),
+                "vector `{name}` nonce"
+            );
+            // And the round trip closes: re-encoding must give the same bytes.
+            assert_eq!(decoded.to_hex(), case["message_hex"].as_str().unwrap());
+        }
+    }
+
+    #[test]
+    fn decoding_round_trips_the_sample() {
+        let msg = sample();
+        assert_eq!(PriceMessage::from_bytes(&msg.to_bytes()).unwrap(), msg);
+    }
+
+    /// A signature over some *other* Aphelion payload must not be readable as a
+    /// price. This is the domain separator doing the job it exists for, checked
+    /// from the decoding side.
+    #[test]
+    fn a_payload_from_another_domain_is_refused_rather_than_reinterpreted() {
+        let mut raw = sample().to_bytes();
+        raw[..17].copy_from_slice(b"APHELION_OTHER_V1");
+        assert_eq!(
+            PriceMessage::from_bytes(&raw),
+            Err(MessageError::WrongDomain)
+        );
+    }
+
+    #[test]
+    fn a_truncated_payload_is_refused() {
+        let raw = sample().to_bytes();
+        assert_eq!(
+            PriceMessage::from_bytes(&raw[..MESSAGE_LEN - 1]),
+            Err(MessageError::WrongLength(MESSAGE_LEN - 1))
+        );
+    }
+
+    /// No node can publish a non-positive price -- the database refuses it and
+    /// so does the contract -- so a payload carrying one is a crafted payload,
+    /// and reading it back as a `Price` would launder it into something that
+    /// looks like evidence.
+    #[test]
+    fn a_non_positive_price_is_refused_rather_than_returned() {
+        let mut raw = sample().to_bytes();
+        raw[81..97].copy_from_slice(&0i128.to_be_bytes());
+        assert_eq!(
+            PriceMessage::from_bytes(&raw),
+            Err(MessageError::NonPositivePrice(0))
+        );
+
+        raw[81..97].copy_from_slice(&(-1i128).to_be_bytes());
+        assert_eq!(
+            PriceMessage::from_bytes(&raw),
+            Err(MessageError::NonPositivePrice(-1))
+        );
+    }
+
+    /// Padding must be a suffix. Two byte strings that decode to one feed id
+    /// would mean a signature over one could be presented as a signature over
+    /// the other.
+    #[test]
+    fn a_feed_id_with_interior_padding_is_refused() {
+        let mut raw = sample().to_bytes();
+        let mut feed = [0u8; 32];
+        feed[..3].copy_from_slice(b"BTC");
+        feed[4..7].copy_from_slice(b"USD");
+        raw[49..81].copy_from_slice(&feed);
+
+        assert!(matches!(
+            PriceMessage::from_bytes(&raw),
+            Err(MessageError::Feed(_))
+        ));
+    }
+
+    /// Nothing decodes to a feed id that `FeedId::new` would have rejected.
+    #[test]
+    fn a_feed_id_with_an_illegal_character_is_refused() {
+        let mut raw = sample().to_bytes();
+        raw[49] = b'-';
+        assert!(matches!(
+            PriceMessage::from_bytes(&raw),
+            Err(MessageError::Feed(_))
+        ));
     }
 }
 

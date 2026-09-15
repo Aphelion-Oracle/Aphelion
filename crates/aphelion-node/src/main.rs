@@ -164,6 +164,22 @@ enum Command {
         json: bool,
     },
 
+    /// Check an evidence bundle that somebody else produced.
+    ///
+    /// The counterpart to `replay --json`, for the side judging a dispute
+    /// rather than answering one. Treats the bundle as hostile input: its own
+    /// verdict is ignored, and the price compared against the observations is
+    /// the one inside the signed bytes, never the one the file says is there.
+    ///
+    /// Needs nothing — no configuration, no key, no database, no chain. Exits 0
+    /// sound, 1 unsupported by its own observations, 2 misdescribed or unsigned.
+    VerifyEvidence {
+        /// The bundle, or `-` for stdin.
+        path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Apply database migrations and exit.
     Migrate,
 
@@ -244,6 +260,10 @@ async fn run() -> Result<()> {
             let config = Config::load(&cli.config)?;
             cmd::replay::run(&config, &feed, nonce, json).await
         }
+
+        // Deliberately does not load a configuration: a committee member
+        // judging somebody else's node has none, and this must run for them.
+        Command::VerifyEvidence { path, json } => cmd::verify_evidence::run(&path, json),
 
         Command::Migrate => {
             let config = Config::load(&cli.config)?;
