@@ -89,6 +89,7 @@ fn dispute(id: u64, accused: &str, status: DisputeStatus, deadline: u64) -> Disp
         feed: "BTC_USD".into(),
         nonce: id,
         evidence: "ipfs://bafy".into(),
+        evidence_digest: "ab".repeat(32),
         bond: 1_000,
         opened_at: 0,
         deadline,
@@ -184,7 +185,14 @@ impl CommitteeClient for FakeCommittee {
     async fn finalize_election(&self) -> Result<Receipt<String>> {
         unimplemented!("Watch never writes")
     }
-    async fn open_dispute(&self, _: &str, _: &str, _: u64, _: &str) -> Result<Receipt<u64>> {
+    async fn open_dispute(
+        &self,
+        _: &str,
+        _: &str,
+        _: u64,
+        _: &str,
+        _: &str,
+    ) -> Result<Receipt<u64>> {
         unimplemented!("Watch never writes")
     }
     async fn respond(&self, _: u64, _: &str, _: &str) -> Result<Receipt<()>> {

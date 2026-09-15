@@ -539,7 +539,11 @@ What happens, and what you should do:
 1. **A dispute is filed** against your public key for a specific `(feed, nonce)`
    — the nonce you signed the submission under, not the round id the aggregator
    allocated afterwards — with a bond the reporter forfeits to you if it is
-   dismissed, and a link to their evidence. `duties` reports it as `COSTLY` with
+   dismissed, a link to their evidence and the SHA-256 of it. That digest was
+   fixed when they filed and cannot be changed afterwards, so `sha256sum`
+   whatever file you are sent and compare it against the `case` line in
+   `dispute show` before you spend any time answering it: a case that does not
+   match the one on the ledger is not the case against you. `duties` reports it as `COSTLY` with
    the time left on the voting period; `dispute show` prints the evidence link,
    and the two commands that answer it and check the answer, ready to paste.
 2. **The committee votes** for the configured voting period. If it does not reach
@@ -715,6 +719,43 @@ would have moved the median — only the operator holds the full table. And
 `--node` ties the evidence to the allegation, not the allegation to a person:
 that the key the dispute names belongs to the operator it is against is
 `registry.owner_of`, and no bundle can settle it.
+
+Check the reporter's document the same way. `dispute show` prints its digest
+under `case`, fixed when the dispute was filed; if the case you were handed does
+not hash to that, it is not the case on the ledger and the accused has been
+answering something else. Where it is itself a bundle, the same
+`verify-evidence` line reads it, with `--digest` set to the `case` digest rather
+than to the answer's.
+
+---
+
+### Filing one against somebody else
+
+A dispute costs a bond you lose if the committee dismisses it, and it needs
+three things: the accused's key, the feed, and **the nonce they signed** — which
+`SubmissionAccepted` carries alongside the round id, and which is what lets the
+committee match their answer to your allegation.
+
+```bash
+aphelion-node dispute open <accused> BTC_USD 4812 \
+    --file case.json --uri ipfs://bafycase            # prints the bond and the digest
+aphelion-node dispute open <accused> BTC_USD 4812 \
+    --file case.json --uri ipfs://bafycase --commit   # posts the bond and files
+```
+
+`--file` is your case, and only its SHA-256 goes on the ledger. Two things
+follow that are worth knowing before the first one runs.
+
+**It is fixed for the life of the dispute.** Unlike an answer, an allegation
+cannot be corrected: everything the accused says is a reply to the document you
+filed, so moving it afterwards would move the question they already answered. A
+wrong digest costs you the bond, the way a broken link would. The dry run prints
+exactly what will be published, and nothing is sent without `--commit`.
+
+**`--uri` is optional and worth giving.** A digest nobody can resolve to a
+document is a case nobody can read, and a committee that cannot read your case
+will dismiss it. If you are handing the file over privately, the digest is still
+what proves afterwards that what they read is what you filed.
 
 ---
 

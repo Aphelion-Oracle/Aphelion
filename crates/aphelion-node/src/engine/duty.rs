@@ -262,7 +262,11 @@ fn dispute_duties(s: &Snapshot, d: &DisputeRecord) -> Vec<Duty> {
                         d.votes_against,
                         s.params.quorum,
                         if d.evidence.is_empty() {
-                            "(none given)"
+                            // A digest with no locator. The case exists and is
+                            // fixed; where to read it is between the reporter
+                            // and whoever asks them, and `dispute show` prints
+                            // the digest to check whatever arrives.
+                            "(no locator given; `dispute show` has the digest)"
                         } else {
                             &d.evidence
                         }
@@ -739,6 +743,7 @@ mod tests {
             feed: "BTC_USD".into(),
             nonce: 42,
             evidence: "ipfs://bafy".into(),
+            evidence_digest: "ab".repeat(32),
             bond: 1_000,
             opened_at: 1_000,
             deadline: 2_000,
@@ -815,6 +820,23 @@ mod tests {
         // but there is nothing left here for the operator to do about it.
         s.answered.insert(1);
         assert!(derive(&s).is_empty());
+    }
+
+    #[test]
+    fn an_allegation_with_no_locator_still_points_somewhere() {
+        let mut s = snapshot(1_500);
+        let mut d = dispute(1, ME, DisputeStatus::Voting);
+        d.evidence = String::new();
+        s.disputes = vec![d];
+        // A reporter may pin their case without saying where it is. The line
+        // an operator reads must not imply there is nothing to read: the
+        // digest is on the ledger, and `dispute show` prints it.
+        let duties = derive(&s);
+        assert!(
+            duties[0].detail.contains("dispute show"),
+            "{}",
+            duties[0].detail
+        );
     }
 
     #[test]

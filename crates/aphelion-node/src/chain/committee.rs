@@ -100,7 +100,12 @@ pub struct DisputeRecord {
     /// number `replay <feed> <nonce>` takes, which is the point of it: an
     /// allegation names something the signature covers.
     pub nonce: u64,
+    /// Where the reporter said their case can be read. May be empty.
     pub evidence: String,
+    /// SHA-256 of the document the allegation rests on, in hex. Fixed when the
+    /// dispute was filed and never rewritten, which is what makes it something
+    /// the accused can answer.
+    pub evidence_digest: String,
     pub bond: i128,
     pub opened_at: u64,
     /// Voting closes here.
@@ -249,12 +254,15 @@ pub trait CommitteeClient: Send + Sync {
     async fn cast_ballot(&self, public_key_hex: &str, candidate: &str) -> Result<Receipt<()>>;
     async fn finalize_election(&self) -> Result<Receipt<String>>;
 
+    /// File an allegation. `digest` is the SHA-256 of the document it rests
+    /// on, and is fixed for the life of the dispute.
     async fn open_dispute(
         &self,
         accused: &str,
         feed: &str,
         nonce: u64,
         evidence: &str,
+        digest_hex: &str,
     ) -> Result<Receipt<u64>>;
     /// Put the digest of an answer on the record. Only the accused's owner may,
     /// which is the account this client signs as.
@@ -347,6 +355,9 @@ pub(crate) fn decode_dispute(v: &serde_json::Value) -> Result<DisputeRecord> {
         feed: str_field(v, "feed", ctx)?,
         nonce: u64_field(v, "nonce", ctx)?,
         evidence: str_field(v, "evidence", ctx)?,
+        evidence_digest: hex_key(field(v, "evidence_digest", ctx)?).ok_or_else(|| {
+            NodeError::Chain(format!("{ctx}.evidence_digest is not a 32-byte hash: {v}"))
+        })?,
         bond: i128_field(v, "bond", ctx)?,
         opened_at: u64_field(v, "opened_at", ctx)?,
         deadline: u64_field(v, "deadline", ctx)?,
@@ -662,6 +673,7 @@ impl CommitteeClient for CliCommittee {
         feed: &str,
         nonce: u64,
         evidence: &str,
+        digest_hex: &str,
     ) -> Result<Receipt<u64>> {
         let (v, tx_hash) = self
             .cli
@@ -674,6 +686,7 @@ impl CommitteeClient for CliCommittee {
                     ("feed", feed.to_string()),
                     ("nonce", nonce.to_string()),
                     ("evidence", evidence.to_string()),
+                    ("digest", digest_hex.to_string()),
                 ],
             )
             .await?;
@@ -774,6 +787,7 @@ mod tests {
             "feed": "BTC_USD",
             "nonce": 91,
             "evidence": "ipfs://bafy",
+            "evidence_digest": "0x".to_string() + &"9a".repeat(32),
             "bond": "1000000000",
             "opened_at": 1_700_000_000u64,
             "deadline": 1_700_086_400u64,
@@ -792,6 +806,9 @@ mod tests {
         assert_eq!(d.accused, "ab".repeat(32));
         // The allegation's identity, and the argument to `replay`.
         assert_eq!(d.nonce, 91);
+        // Normalised the same way the keys are: it is compared against a
+        // digest computed locally, and case would make every match a miss.
+        assert_eq!(d.evidence_digest, "9a".repeat(32));
         assert_eq!(d.status, DisputeStatus::Voting);
         assert_eq!(d.bond, 1_000_000_000);
         assert!(d.appellant.is_none());
@@ -803,7 +820,8 @@ mod tests {
     fn a_resolved_dispute_knows_when_its_money_moves() {
         let mut v = serde_json::json!({
             "id": 1, "accused": "cd".repeat(32), "reporter": "G", "feed": "ETH_USD",
-            "nonce": 1, "evidence": "", "bond": 1, "opened_at": 10, "deadline": 20,
+            "nonce": 1, "evidence": "", "evidence_digest": "cc".repeat(32),
+            "bond": 1, "opened_at": 10, "deadline": 20,
             "resolved_at": 25, "vote_round": 1, "votes_for": 3, "votes_against": 0,
             "status": { "Upheld": [] }, "appellant": "GAPPEAL", "appeal_bond": 5,
         });
@@ -816,6 +834,28 @@ mod tests {
         // duty derived from it is whether to tell an operator to appeal.
         v["status"] = serde_json::json!("Reheard");
         assert!(decode_dispute(&v).is_err());
+    }
+
+    #[test]
+    fn a_dispute_whose_case_is_not_pinned_is_refused_rather_than_read_as_unpinned() {
+        // An older contract, or a truncated read. Defaulting the digest to
+        // zeros would print `case: 0000...` to a committee, who would read it
+        // as "the reporter pinned nothing" -- a statement about the dispute,
+        // made up by a decoding failure in this build.
+        let mut v = serde_json::json!({
+            "id": 1, "accused": "aa".repeat(32), "reporter": "G", "feed": "BTC_USD",
+            "nonce": 1, "evidence": "", "bond": 1, "opened_at": 10, "deadline": 20,
+            "resolved_at": 0, "vote_round": 1, "votes_for": 0, "votes_against": 0,
+            "status": "Voting", "appellant": null, "appeal_bond": 0,
+        });
+        let e = decode_dispute(&v).unwrap_err().to_string();
+        assert!(e.contains("evidence_digest"), "unhelpful error: {e}");
+
+        v["evidence_digest"] = serde_json::json!("not a hash");
+        assert!(decode_dispute(&v).is_err());
+
+        v["evidence_digest"] = serde_json::json!("11".repeat(32));
+        assert_eq!(decode_dispute(&v).unwrap().evidence_digest, "11".repeat(32));
     }
 
     #[test]

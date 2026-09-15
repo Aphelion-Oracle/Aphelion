@@ -529,6 +529,20 @@ impl Slashing {
     /// committee can confirm that the bundle in front of it is about the
     /// submission on the ledger. A round id, being assigned after the fact and
     /// covered by no signature, leaves that correspondence to be asserted.
+    ///
+    /// `evidence` says where the case can be read and `digest` says what it is.
+    /// Both, because neither does the other's work: a locator is what a
+    /// committee follows and is not a commitment, since the file behind a URL
+    /// can change on the afternoon of the vote; a digest is a commitment and
+    /// leads nowhere. The accused answers under the same rule — see
+    /// [`Slashing::respond`] — and the symmetry is the point. A dispute where
+    /// only one side's document is fixed is one where the other side can edit
+    /// theirs after reading it.
+    ///
+    /// The digest may not be zero. Thirty-two zero bytes would be an unpinned
+    /// allegation wearing the shape of a pinned one, which is worse than the
+    /// free-form string this replaced: that at least did not look like a
+    /// commitment.
     pub fn open_dispute(
         env: Env,
         reporter: Address,
@@ -536,9 +550,14 @@ impl Slashing {
         feed: Symbol,
         nonce: u64,
         evidence: String,
+        digest: BytesN<32>,
     ) -> u64 {
         reporter.require_auth();
         let config = Self::load_config(&env);
+
+        if digest == BytesN::from_array(&env, &[0u8; 32]) {
+            panic_with_error!(&env, SlashingError::NoEvidence);
+        }
 
         if RegistryClient::new(&env, &config.registry)
             .owner_of(&accused)
@@ -574,6 +593,7 @@ impl Slashing {
             feed: feed.clone(),
             nonce,
             evidence: evidence.clone(),
+            evidence_digest: digest.clone(),
             bond: config.dispute_bond,
             opened_at: now,
             deadline: now + config.voting_period,
@@ -600,6 +620,7 @@ impl Slashing {
             feed,
             nonce,
             evidence,
+            evidence_digest: digest,
             deadline: dispute.deadline,
         }
         .publish(&env);

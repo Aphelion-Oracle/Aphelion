@@ -323,7 +323,7 @@ repository, not the target architecture.
 | `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 221 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 41 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
-| `aphelion-slashing` contract — disputes, answers, committee voting, appeals, elections | ✅ Implemented | 68 |
+| `aphelion-slashing` contract — disputes, answers, committee voting, appeals, elections | ✅ Implemented | 71 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
 | `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 38 |
 | Randomness participation from the node — commit/reveal loop and CLI | ✅ Implemented | 33 |
@@ -341,13 +341,13 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-631 tests in total: 329 off-chain (`cargo test --workspace`), 262 against the
+636 tests in total: 331 off-chain (`cargo test --workspace`), 265 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 329 are: 38 in `aphelion-core`, 227 in the node's library, 5 in
+The off-chain 331 are: 38 in `aphelion-core`, 229 in the node's library, 5 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 227 — 15 in the harness, and 44 across the
+target, so they are *not* inside the 229 — 15 in the harness, and 44 across the
 four integration suites (duties 12, evidence 11, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
@@ -355,19 +355,19 @@ because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 227. Committee participation is the same shape: its 12 cover assembling a
-snapshot off the chain, and the rules applied to that snapshot have 26 more
-unit tests with 7 on decoding what the contract returns, all inside the 227 —
+node's 229. Committee participation is the same shape: its 12 cover assembling a
+snapshot off the chain, and the rules applied to that snapshot have 27 more
+unit tests with 8 on decoding what the contract returns, all inside the 229 —
 with the 5 command tests in the binary target beside it. The dispute evidence
 pair is split the same way again: 11 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 28 more unit tests inside the 227. The harness's 15 are 12
+itself has 28 more unit tests inside the 229. The harness's 15 are 12
 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 317 tests and reported 329. The skip prints a `SKIP`
+with no Postgres has run 319 tests and reported 331. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -1424,7 +1424,7 @@ money at stake on both sides.
 
 | Step | Who | Cost of being wrong |
 | --- | --- | --- |
-| `open_dispute` | Anyone | Bond forfeited to the operator if dismissed |
+| `open_dispute` | Anyone | Bond forfeited to the operator if dismissed. Pins the case by its digest, for the life of the dispute |
 | `respond` | The accused, while voting is open | The answer nobody can prove was given |
 | `vote` | A committee member | — |
 | `resolve` | Anyone, after the voting period | — |
@@ -1448,6 +1448,11 @@ Four properties are deliberate:
 - **An allegation may be filed once**, identified by `(node, feed, round)`.
   Otherwise one offence becomes any number of seizures by re-filing after each
   settlement.
+- **Both sides pin their document.** The reporter's case is fixed by a SHA-256
+  at filing and the accused's answer by one published while the vote is open —
+  see [Putting the answer on the record](#putting-the-answer-on-the-record). A
+  dispute where only one side's document is fixed is one where the other can
+  edit theirs after reading it.
 
 An operator may not vote on a dispute against their own node, and the committee
 cannot be shrunk below the quorum it has to reach — which would dismiss every
@@ -1527,6 +1532,28 @@ digest of the wrong file can say so and a committee sees the substitution as a
 substitution. An appeal opens a second round and asks again; the first round's
 answer stays on the record and is not carried into the second, since an appeal
 is precisely the claim that the first hearing got it wrong.
+
+The allegation is pinned the same way and by the same hash — `open_dispute`
+takes a locator and a digest, and refuses a digest of thirty-two zero bytes,
+which would be an unpinned case wearing the shape of a pinned one. It cannot be
+corrected at all, and the asymmetry is deliberate: the allegation comes first
+and everything else in the dispute answers it, so moving it afterwards moves the
+question the accused has already spent their answer on. A reporter who files the
+wrong digest is in the position of one who files a broken link, and the bond is
+the price of the mistake.
+
+```bash
+aphelion-node dispute open <accused> BTC_USD 4812 \
+    --file case.json --uri ipfs://bafycase        # prints the bond and the digest
+aphelion-node dispute open <accused> BTC_USD 4812 \
+    --file case.json --uri ipfs://bafycase --commit
+```
+
+Where the reporter's case is itself a bundle — their own node's replay of the
+same round, showing a different price — the committee checks it with the same
+command they check the answer with, passing the digest `dispute show` prints
+under `case`. Where it is a written account or an archive, `sha256sum` and the
+same line on the ledger do the job.
 
 The dry run — `respond` without `--commit` — audits the bundle against the
 allegation first and refuses to publish one that grades `unsigned`,
@@ -1728,8 +1755,8 @@ Acting on one is always a separate command, run on purpose:
 
 | Command | What it does |
 | --- | --- |
-| `dispute list` / `dispute show <id>` | The allegation, the evidence link, the answers on the record, the votes and the clock |
-| `dispute open <accused> <feed> <nonce> <evidence> --commit` | File, posting the bond. The nonce the accused signed, which `SubmissionAccepted` carries alongside the round id |
+| `dispute list` / `dispute show <id>` | The allegation, the case's locator and digest, the answers on the record, the votes and the clock |
+| `dispute open <accused> <feed> <nonce> --file <path> [--uri <url>] --commit` | File, posting the bond and pinning the case by its digest. The nonce the accused signed, which `SubmissionAccepted` carries alongside the round id |
 | `dispute respond <id> --file <path> --commit` | Answer an allegation against this node: publish the digest of the evidence while the vote is open |
 | `dispute vote <id> --uphold\|--dismiss` | A committee vote |
 | `dispute resolve <id>` | Record the outcome once voting has closed |

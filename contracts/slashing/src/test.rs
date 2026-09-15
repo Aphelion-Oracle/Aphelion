@@ -134,7 +134,12 @@ impl Harness<'_> {
             &self.feed(),
             &42,
             &String::from_str(&self.env, "ipfs://bafyevidence"),
+            &self.digest(0x11),
         )
+    }
+
+    fn digest(&self, seed: u8) -> BytesN<32> {
+        BytesN::from_array(&self.env, &[seed; 32])
     }
 
     fn vote(&self, member: usize, id: u64, uphold: bool) {
@@ -259,6 +264,7 @@ fn a_dispute_must_name_a_registered_node() {
         &h.feed(),
         &42,
         &String::from_str(&h.env, "ipfs://nothing"),
+        &h.digest(0x11),
     );
 }
 
@@ -295,10 +301,69 @@ fn a_different_submission_is_a_different_allegation() {
         &h.feed(),
         &43,
         &String::from_str(&h.env, "ipfs://other"),
+        &h.digest(0x22),
     );
     assert_ne!(first, second);
     assert_eq!(h.slashing.dispute_for(&h.accused, &h.feed(), &42), Some(1));
     assert_eq!(h.slashing.dispute_for(&h.accused, &h.feed(), &99), None);
+}
+
+#[test]
+fn an_allegation_is_filed_against_a_document_that_cannot_move() {
+    let h = setup();
+    let id = h.open();
+    let d = h.dispute(id);
+
+    // The locator says where to read the case and the digest says what it is.
+    // A URL alone would leave the reporter free to rewrite the case after
+    // reading the defence, which is the same substitution `respond` stops on
+    // the other side.
+    assert_eq!(d.evidence_digest, h.digest(0x11));
+    assert_eq!(d.evidence, String::from_str(&h.env, "ipfs://bafyevidence"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #34)")] // NoEvidence
+fn an_allegation_with_nothing_behind_it_is_not_filed() {
+    let h = setup();
+    // Thirty-two zero bytes: an unpinned allegation in the shape of a pinned
+    // one, which is worse than no field at all.
+    h.slashing.open_dispute(
+        &h.reporter,
+        &h.accused,
+        &h.feed(),
+        &42,
+        &String::from_str(&h.env, "ipfs://bafyevidence"),
+        &BytesN::from_array(&h.env, &[0u8; 32]),
+    );
+}
+
+#[test]
+fn the_case_filed_is_the_case_settled_on() {
+    let h = setup();
+    let id = h.open();
+    let filed = h.dispute(id).evidence_digest;
+
+    // Through every phase the dispute can reach. Nothing in this contract
+    // writes the field after `open_dispute`, and this is the test that says
+    // so: an appeal rewrites most of a dispute record, and a reporter who
+    // could edit the allegation while the second hearing ran would be
+    // answering the defence with a new accusation.
+    h.vote(0, id, true);
+    h.vote(1, id, true);
+    h.vote(2, id, true);
+    h.advance(VOTING_PERIOD + 1);
+    h.slashing.resolve(&id);
+    assert_eq!(h.dispute(id).evidence_digest, filed);
+
+    h.slashing.appeal(&h.accused_owner, &id);
+    assert_eq!(h.dispute(id).evidence_digest, filed);
+
+    h.advance(VOTING_PERIOD + 1);
+    h.slashing.resolve(&id);
+    h.advance(APPEAL_PERIOD + 1);
+    h.slashing.settle(&id);
+    assert_eq!(h.dispute(id).evidence_digest, filed);
 }
 
 // -- answering ---------------------------------------------------------------

@@ -79,10 +79,26 @@ pub struct Dispute {
     /// matched against the evidence answering it except by taking somebody's
     /// word for the correspondence.
     pub nonce: u64,
-    /// Where the evidence lives — a URL or content hash. Deliberately not the
-    /// evidence itself: ledger space is the wrong place for a data dump, and a
-    /// hash is enough to prove nobody edited it afterwards.
+    /// Where the evidence lives: a URL, a content address, or nothing.
+    /// Deliberately not the evidence itself — ledger space is the wrong place
+    /// for a data dump. A locator this contract cannot check is worth less
+    /// than the digest beside it, which is why both are here.
     pub evidence: String,
+    /// SHA-256 of the document the allegation rests on, fixed at filing.
+    ///
+    /// The same commitment `respond` takes from the accused, and here for the
+    /// same reason: a case that can be edited after the defence is a case
+    /// nobody can answer. A URL is not a commitment — the file behind it can
+    /// change on the afternoon of the vote, and the reporter is the party who
+    /// would gain by changing it.
+    ///
+    /// Unlike an answer it can never be corrected. The allegation comes first
+    /// and everything else in the dispute answers it, so moving it afterwards
+    /// moves the question the accused spent their answer on. A reporter who
+    /// files the wrong digest is in the position of one who files a broken
+    /// link: the committee dismisses it and the bond is the price of the
+    /// mistake.
+    pub evidence_digest: BytesN<32>,
 
     pub bond: i128,
     pub opened_at: u64,

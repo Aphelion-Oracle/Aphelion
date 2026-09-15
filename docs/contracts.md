@@ -285,7 +285,7 @@ venue manipulated on purpose.
 
 | Function | Caller | Notes |
 | --- | --- | --- |
-| `open_dispute(reporter, accused, feed, nonce, evidence) -> u64` | Anyone | Posts `dispute_bond`. `(accused, feed, nonce)` may be filed once. The nonce the accused *signed*, not the aggregator's round id: it is inside the signed payload, so evidence can be checked against the allegation |
+| `open_dispute(reporter, accused, feed, nonce, evidence, digest) -> u64` | Anyone | Posts `dispute_bond`. `(accused, feed, nonce)` may be filed once. The nonce the accused *signed*, not the aggregator's round id: it is inside the signed payload, so evidence can be checked against the allegation. `evidence` is a locator and may be empty; `digest` is the SHA-256 of the case, may not be zero, and is fixed for the life of the dispute |
 | `respond(responder, dispute_id, digest, uri)` | The accused node's owner, while voting is open | Publishes the SHA-256 of the answer, not the answer. Up to `MAX_RESPONSES` (3) per voting round: an answer may be corrected and can never be withdrawn |
 | `vote(member, dispute_id, uphold)` | A committee member | Once per voting round. Refused if the member owns the accused node |
 | `resolve(dispute_id) -> DisputeStatus` | Anyone, after the voting period | Upheld only on quorum *and* a majority. A tie favours the accused |
@@ -295,6 +295,21 @@ venue manipulated on purpose.
 | `initialize` / `set_config` / `get_config` / `committee` | Admin / anyone | |
 | `get_dispute(id)` / `vote_of(id, member)` / `dispute_for(accused, feed, nonce)` / `dispute_count()` | Anyone | |
 | `responses(dispute_id, vote_round)` | Anyone | The answers on the record for that round, oldest first. Empty for a round nobody answered, which is itself worth reading |
+
+### Both documents are pinned
+
+The reporter commits to their case at `open_dispute` and the accused to their
+answer at `respond`, by the same hash over the same kind of thing: the bytes of
+a file, not a URL and not a claim about what it says. Neither document is on the
+ledger and neither could usefully be.
+
+The asymmetry between them is that an answer may be corrected — up to
+`MAX_RESPONSES` times in a round, every version kept — and an allegation may
+not. The allegation comes first and everything else answers it, so moving it
+after the defence has been given moves the question that defence was spent on.
+An answer is a reply to a question already fixed, and an operator who published
+the digest of the wrong file should be able to say so rather than being unable
+to answer at all.
 
 ### What `respond` is for, and what it is not
 
@@ -716,6 +731,7 @@ Soroban returns these as `Error(Contract, #n)`.
 | 20 | `UnknownDispute` | |
 | 21 | `UnknownNode` | The accused key is not registered |
 | 22 | `DuplicateDispute` | This allegation has been filed |
+| 34 | `NoEvidence` | Filing with a zero digest: an unpinned case in the shape of a pinned one |
 | 23 | `WrongPhase` | |
 | 24 | `VotingClosed` | |
 | 25 | `VotingOpen` | Resolving before the deadline |

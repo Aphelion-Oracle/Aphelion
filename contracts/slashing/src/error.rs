@@ -27,6 +27,9 @@ pub enum SlashingError {
     UnknownNode = 21,
     /// The same allegation has already been filed.
     DuplicateDispute = 22,
+    /// A dispute filed with no evidence digest. Thirty-two zero bytes is not a
+    /// document; it is an allegation that can be written after the defence.
+    NoEvidence = 34,
     /// The dispute is not in a state where this action makes sense.
     WrongPhase = 23,
     /// Voting has closed.

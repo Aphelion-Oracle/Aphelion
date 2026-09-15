@@ -20,6 +20,10 @@ pub struct DisputeOpened {
     /// The nonce the accused signed the disputed submission under.
     pub nonce: u64,
     pub evidence: String,
+    /// SHA-256 of the document the allegation rests on. In the event as well
+    /// as in storage, so a watcher who saw the filing knows what was filed
+    /// without re-reading the ledger for it.
+    pub evidence_digest: BytesN<32>,
     pub deadline: u64,
 }
 

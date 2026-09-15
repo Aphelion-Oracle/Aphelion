@@ -72,10 +72,17 @@ pub enum DisputeCmd {
         /// the evidence answering this allegation can be checked against it.
         /// `SubmissionAccepted` carries both.
         nonce: u64,
-        /// Where the evidence lives: a URL or a content hash. Not the evidence
-        /// itself — the ledger is the wrong place for a data dump, and a hash
-        /// is enough to prove nobody edited it afterwards.
-        evidence: String,
+        /// The case: the document the allegation rests on. Its SHA-256 goes on
+        /// the ledger and the file stays here — the ledger is the wrong place
+        /// for a data dump, and a digest is what stops the case being rewritten
+        /// once the accused has answered it.
+        #[arg(long)]
+        file: std::path::PathBuf,
+        /// Where the committee and the accused can fetch it. Optional, and
+        /// worth giving: a digest nobody can resolve to a document is a case
+        /// nobody can read.
+        #[arg(long)]
+        uri: Option<String>,
         /// Post the bond and file. Without this the bond is printed and
         /// nothing is sent.
         #[arg(long)]
@@ -504,11 +511,16 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             println!(
                 "evidence  : {}",
                 if d.evidence.is_empty() {
-                    "(none given)"
+                    "(no locator given)"
                 } else {
                     &d.evidence
                 }
             );
+            // The digest is the allegation's own commitment, fixed when it was
+            // filed. Printed next to the locator because the two are only
+            // worth anything together: follow the one, check the other.
+            println!("case      : {}", d.evidence_digest);
+            println!("            sha256sum the file you were sent and compare");
             println!("bond      : {}", d.bond);
             println!(
                 "votes     : {} for, {} against (quorum {}, round {})",
@@ -601,26 +613,44 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             accused,
             feed,
             nonce,
-            evidence,
+            file,
+            uri,
             commit,
         } => {
             let accused = normalise_key(&accused)?;
             let params = ctx.committee.params().await?;
+            // The same hash, over the same bytes, as the one the accused's
+            // answer is pinned by and the one `verify-evidence --digest`
+            // recomputes. Read as bytes and never normalised: a case rewritten
+            // in whitespace is a rewritten case.
+            let raw = std::fs::read(&file)
+                .map_err(|e| NodeError::Config(format!("cannot read `{}`: {e}", file.display())))?;
+            let digest = hex::encode(verify::sha256(&raw));
             println!(
-                "file against {accused}\n  {feed} nonce {nonce}\n  evidence {evidence}\n  \
-                 bond {} as {account}",
+                "file against {accused}\n  {feed} nonce {nonce}\n  case      {}\n  \
+                 sha256    {digest}\n  uri       {}\n  bond      {} as {account}",
+                file.display(),
+                uri.as_deref().unwrap_or("(none)"),
                 params.dispute_bond
             );
             if !commit {
                 println!(
                     "\nNothing sent. The bond is forfeited to the operator if the \
-                     committee dismisses this.\nRe-run with --commit to file it."
+                     committee dismisses this, and the digest above is fixed for the \
+                     life of the dispute — unlike an answer, an allegation cannot be \
+                     corrected.\nRe-run with --commit to file it."
                 );
                 return Ok(());
             }
             let r = ctx
                 .committee
-                .open_dispute(&accused, &feed, nonce, &evidence)
+                .open_dispute(
+                    &accused,
+                    &feed,
+                    nonce,
+                    uri.as_deref().unwrap_or(""),
+                    &digest,
+                )
                 .await
                 .map_err(|e| explain(e, &account))?;
             println!("\nfiled as dispute {}", r.value);
@@ -850,6 +880,7 @@ mod tests {
             feed: "BTC_USD".into(),
             nonce: 1,
             evidence: String::new(),
+            evidence_digest: "ab".repeat(32),
             bond: 0,
             opened_at: 0,
             deadline: 100,
