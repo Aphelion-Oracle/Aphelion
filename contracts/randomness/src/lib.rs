@@ -80,6 +80,8 @@ mod types;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_vectors;
 
 pub use error::RandomnessError;
 pub use types::*;

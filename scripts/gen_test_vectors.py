@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Regenerate the shared test vectors under tests/vectors/.
 
-Two files, both asserted from the off-chain Rust and from the Soroban
+Three files, all asserted from the off-chain Rust and from the Soroban
 contracts:
 
-  price_message.json  the canonical signing payload
-  aggregation.json    the consensus arithmetic
+  price_message.json      the canonical signing payload
+  aggregation.json        the consensus arithmetic
+  beacon_commitment.json  the randomness beacon's two payloads
 
 This script is a third, independent implementation of both. Writing it in
 another language is the point: two implementations that agree may simply
@@ -15,16 +16,26 @@ the same to two people and compiles differently.
 
 A drift in price_message.json means no signature verifies on chain. A drift in
 aggregation.json means a node can predict one round outcome while the contract
-computes another, and be slashed for the difference. Both are consensus bugs,
-not flaky tests.
+computes another, and be slashed for the difference. A drift in
+beacon_commitment.json is the nastiest of the three: a node computes a
+commitment the contract will not reproduce, so its reveal is rejected as a bad
+one and it is penalised for withholding a secret it did in fact publish. All
+three are consensus bugs, not flaky tests.
 
 Usage: python3 scripts/gen_test_vectors.py
 """
+import hashlib
 import json
 import pathlib
 
 DOMAIN = b"APHELION_PRICE_V1"
 MESSAGE_LEN = 117
+
+COMMITMENT_DOMAIN = b"APHELION_RANDOM_V1"
+COMMIT_SIGNATURE_DOMAIN = b"APHELION_COMMIT_V1"
+COMMITMENT_PREIMAGE_LEN = 122
+COMMIT_MESSAGE_LEN = 90
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -251,6 +262,98 @@ def aggregation_vectors() -> dict:
     }
 
 
+# --- the beacon -------------------------------------------------------------
+#
+# Mirrors of aphelion-core::message and contracts/randomness/src/message.rs.
+#
+# Two payloads, and they are easy to confuse: both begin "APHELION_", both are
+# 18-byte domains, both carry the contract id and the round id. The preimage
+# then carries the node's key and the secret; the signed message carries the
+# commitment instead. Swapping them produces a commitment that hashes fine and
+# opens nothing, so the vectors pin both and assert the domains differ.
+
+
+def commitment_preimage(contract_hex: str, round_id: int, pubkey_hex: str, secret_hex: str) -> str:
+    contract = bytes.fromhex(contract_hex)
+    pubkey = bytes.fromhex(pubkey_hex)
+    secret = bytes.fromhex(secret_hex)
+    assert len(contract) == 32, "contract id must be 32 bytes"
+    assert len(pubkey) == 32, "public key must be 32 bytes"
+    assert len(secret) == 32, "secret must be 32 bytes"
+    buf = COMMITMENT_DOMAIN + contract + round_id.to_bytes(8, "big") + pubkey + secret
+    assert len(buf) == COMMITMENT_PREIMAGE_LEN, len(buf)
+    return buf.hex()
+
+
+def commit_message(contract_hex: str, round_id: int, commitment_hex: str) -> str:
+    contract = bytes.fromhex(contract_hex)
+    commitment = bytes.fromhex(commitment_hex)
+    assert len(contract) == 32, "contract id must be 32 bytes"
+    assert len(commitment) == 32, "commitment must be 32 bytes"
+    buf = COMMIT_SIGNATURE_DOMAIN + contract + round_id.to_bytes(8, "big") + commitment
+    assert len(buf) == COMMIT_MESSAGE_LEN, len(buf)
+    return buf.hex()
+
+
+BEACON_CASES = [
+    ("typical", "11" * 32, 42, "22" * 32, "33" * 32),
+    ("round_zero", "00" * 32, 0, "01" * 32, "02" * 32),
+    (
+        "max_round_id",
+        "ff" * 32,
+        18446744073709551615,
+        "fe" * 32,
+        "fd" * 32,
+    ),
+    (
+        "realistic",
+        "3f9a2b7c81d045e6aa1234567890abcdef0011223344556677889900aabbccdd",
+        7,
+        "565cfc4e2239fcabea063061080790d58324fdd4a984c87c87055a08eff7dd62",
+        "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    ),
+]
+
+
+def beacon_vectors():
+    cases = []
+    for name, contract, round_id, pubkey, secret in BEACON_CASES:
+        preimage = commitment_preimage(contract, round_id, pubkey, secret)
+        commitment = hashlib.sha256(bytes.fromhex(preimage)).hexdigest()
+        cases.append(
+            {
+                "name": name,
+                "contract_hex": contract,
+                "round_id": round_id,
+                "pubkey_hex": pubkey,
+                "secret_hex": secret,
+                "preimage_hex": preimage,
+                # What the node stores and the contract recomputes. A node whose
+                # SHA-256 of the preimage differs from this publishes a
+                # commitment its own reveal will not open.
+                "commitment_hex": commitment,
+                "commit_message_hex": commit_message(contract, round_id, commitment),
+            }
+        )
+    return {
+        "_comment": [
+            "Canonical Aphelion beacon payloads: the commitment preimage and the message",
+            "signed alongside it. Asserted from the off-chain implementation",
+            "(crates/aphelion-core/src/message.rs) and the on-chain mirror",
+            "(contracts/randomness/src/message.rs).",
+            "A drift here does not merely fail: the node publishes a commitment the",
+            "contract cannot reproduce, its reveal is rejected as a bad one, and it is",
+            "penalised for withholding a secret it did publish.",
+            "Regenerate with: python3 scripts/gen_test_vectors.py",
+        ],
+        "commitment_domain": COMMITMENT_DOMAIN.decode(),
+        "signature_domain": COMMIT_SIGNATURE_DOMAIN.decode(),
+        "preimage_len": COMMITMENT_PREIMAGE_LEN,
+        "commit_message_len": COMMIT_MESSAGE_LEN,
+        "cases": cases,
+    }
+
+
 def main() -> None:
     out = {
         "_comment": [
@@ -286,6 +389,11 @@ def main() -> None:
     path.write_text(json.dumps(aggregation, indent=2) + "\n")
     count = sum(len(v) for k, v in aggregation.items() if k != "_comment")
     print(f"wrote {count} vectors to {path.relative_to(ROOT)}")
+
+    beacon = beacon_vectors()
+    path = ROOT / "tests" / "vectors" / "beacon_commitment.json"
+    path.write_text(json.dumps(beacon, indent=2) + "\n")
+    print(f"wrote {len(beacon['cases'])} vectors to {path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

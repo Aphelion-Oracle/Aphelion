@@ -1,0 +1,58 @@
+{
+  "_comment": [
+    "Canonical Aphelion beacon payloads: the commitment preimage and the message",
+    "signed alongside it. Asserted from the off-chain implementation",
+    "(crates/aphelion-core/src/message.rs) and the on-chain mirror",
+    "(contracts/randomness/src/message.rs).",
+    "A drift here does not merely fail: the node publishes a commitment the",
+    "contract cannot reproduce, its reveal is rejected as a bad one, and it is",
+    "penalised for withholding a secret it did publish.",
+    "Regenerate with: python3 scripts/gen_test_vectors.py"
+  ],
+  "commitment_domain": "APHELION_RANDOM_V1",
+  "signature_domain": "APHELION_COMMIT_V1",
+  "preimage_len": 122,
+  "commit_message_len": 90,
+  "cases": [
+    {
+      "name": "typical",
+      "contract_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "round_id": 42,
+      "pubkey_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+      "secret_hex": "3333333333333333333333333333333333333333333333333333333333333333",
+      "preimage_hex": "415048454c494f4e5f52414e444f4d5f56311111111111111111111111111111111111111111111111111111111111111111000000000000002a22222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333",
+      "commitment_hex": "ea79e49ac809a54e699cda94fbca7b395884b69312e20c1140e9ac4753796e8e",
+      "commit_message_hex": "415048454c494f4e5f434f4d4d49545f56311111111111111111111111111111111111111111111111111111111111111111000000000000002aea79e49ac809a54e699cda94fbca7b395884b69312e20c1140e9ac4753796e8e"
+    },
+    {
+      "name": "round_zero",
+      "contract_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "round_id": 0,
+      "pubkey_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "secret_hex": "0202020202020202020202020202020202020202020202020202020202020202",
+      "preimage_hex": "415048454c494f4e5f52414e444f4d5f56310000000000000000000000000000000000000000000000000000000000000000000000000000000001010101010101010101010101010101010101010101010101010101010101010202020202020202020202020202020202020202020202020202020202020202",
+      "commitment_hex": "3e92aadbbf4e754279d38047c1776944b6b9674c812d63fcb1cc1fb56431ab31",
+      "commit_message_hex": "415048454c494f4e5f434f4d4d49545f5631000000000000000000000000000000000000000000000000000000000000000000000000000000003e92aadbbf4e754279d38047c1776944b6b9674c812d63fcb1cc1fb56431ab31"
+    },
+    {
+      "name": "max_round_id",
+      "contract_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "round_id": 18446744073709551615,
+      "pubkey_hex": "fefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefe",
+      "secret_hex": "fdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfd",
+      "preimage_hex": "415048454c494f4e5f52414e444f4d5f5631fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfdfd",
+      "commitment_hex": "68ad3818b9709fb4ebf12d21668b7926c0c0321e1658fcfc2c66ff456d886839",
+      "commit_message_hex": "415048454c494f4e5f434f4d4d49545f5631ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff68ad3818b9709fb4ebf12d21668b7926c0c0321e1658fcfc2c66ff456d886839"
+    },
+    {
+      "name": "realistic",
+      "contract_hex": "3f9a2b7c81d045e6aa1234567890abcdef0011223344556677889900aabbccdd",
+      "round_id": 7,
+      "pubkey_hex": "565cfc4e2239fcabea063061080790d58324fdd4a984c87c87055a08eff7dd62",
+      "secret_hex": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "preimage_hex": "415048454c494f4e5f52414e444f4d5f56313f9a2b7c81d045e6aa1234567890abcdef0011223344556677889900aabbccdd0000000000000007565cfc4e2239fcabea063061080790d58324fdd4a984c87c87055a08eff7dd629f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "commitment_hex": "f7032affa6926a02eb6e64fb3e215cf21c0b373c5e13a7181811a19e68fc998d",
+      "commit_message_hex": "415048454c494f4e5f434f4d4d49545f56313f9a2b7c81d045e6aa1234567890abcdef0011223344556677889900aabbccdd0000000000000007f7032affa6926a02eb6e64fb3e215cf21c0b373c5e13a7181811a19e68fc998d"
+    }
+  ]
+}

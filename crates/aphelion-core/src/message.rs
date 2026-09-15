@@ -282,6 +282,70 @@ mod beacon_message_tests {
         assert_eq!(&msg[58..], &[0xDD; 32]);
     }
 
+    /// The contract-side mirror asserts the same file.
+    ///
+    /// A failure here is worse than a rejected submission. The node publishes a
+    /// commitment the contract cannot reproduce, so its reveal is refused as a
+    /// bad one — and it is then penalised for withholding a secret it did in
+    /// fact publish.
+    #[test]
+    fn matches_the_shared_test_vectors() {
+        let raw = include_str!("../../../tests/vectors/beacon_commitment.json");
+        let vectors: serde_json::Value =
+            serde_json::from_str(raw).expect("vector file is valid JSON");
+
+        assert_eq!(
+            vectors["commitment_domain"].as_str().unwrap().as_bytes(),
+            COMMITMENT_DOMAIN
+        );
+        assert_eq!(
+            vectors["signature_domain"].as_str().unwrap().as_bytes(),
+            COMMIT_SIGNATURE_DOMAIN
+        );
+        assert_eq!(
+            vectors["preimage_len"].as_u64().unwrap() as usize,
+            COMMITMENT_PREIMAGE_LEN
+        );
+        assert_eq!(
+            vectors["commit_message_len"].as_u64().unwrap() as usize,
+            COMMIT_MESSAGE_LEN
+        );
+
+        let cases = vectors["cases"].as_array().expect("cases array");
+        assert!(!cases.is_empty());
+
+        let bytes32 = |s: &str| -> [u8; 32] { hex::decode(s).unwrap().try_into().unwrap() };
+
+        for case in cases {
+            let contract = bytes32(case["contract_hex"].as_str().unwrap());
+            let round_id = case["round_id"].as_u64().unwrap();
+            let pubkey = bytes32(case["pubkey_hex"].as_str().unwrap());
+            let secret = bytes32(case["secret_hex"].as_str().unwrap());
+            let name = &case["name"];
+
+            let preimage = commitment_preimage(&contract, round_id, &pubkey, &secret);
+            assert_eq!(
+                hex::encode(preimage),
+                case["preimage_hex"].as_str().unwrap(),
+                "vector `{name}` preimage drifted"
+            );
+
+            // The commitment itself, which is what actually reaches the ledger.
+            let commitment: [u8; 32] = <sha2::Sha256 as sha2::Digest>::digest(preimage).into();
+            assert_eq!(
+                hex::encode(commitment),
+                case["commitment_hex"].as_str().unwrap(),
+                "vector `{name}` commitment drifted"
+            );
+
+            assert_eq!(
+                hex::encode(commit_message(&contract, round_id, &commitment)),
+                case["commit_message_hex"].as_str().unwrap(),
+                "vector `{name}` signed message drifted"
+            );
+        }
+    }
+
     #[test]
     fn the_two_domains_cannot_be_confused_for_one_another() {
         // Both are 18 bytes and both start "APHELION_". A signature over one

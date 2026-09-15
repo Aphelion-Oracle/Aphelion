@@ -14,3 +14,8 @@ hex = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Test-only: the beacon vectors pin the commitment, which is the SHA-256 of the
+# preimage this crate builds. The crate itself hashes nothing -- the node does
+# the hashing and the contract checks it -- so this stays out of the public
+# dependency set.
+sha2 = { workspace = true }

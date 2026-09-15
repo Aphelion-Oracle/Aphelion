@@ -19,4 +19,5 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 # rather than against a stub.
 aphelion-registry = { path = "../registry" }
 ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }
 sha2 = "0.10"
