@@ -59,8 +59,16 @@ max_connections = 10
 # Raw observations older than this are pruned hourly.
 #
 # These are the evidence trail: if a dispute is ever opened against this node,
-# the retained observations are what answer it. Keep this comfortably longer
-# than the slashing contract's voting and appeal periods combined.
+# the retained observations are what answer it. A dispute can go on asking for
+# *two* voting periods plus an appeal period — an appeal opens a second round
+# and asks again — and this has to cover the disputed round's age on top of
+# that, because the observations are read when the answer is given rather than
+# when the allegation is made.
+#
+# `aphelion-node status` does that arithmetic against the periods the slashing
+# contract actually holds, and reports how far back this node can still defend
+# itself. Setting this too low costs nothing and breaks nothing until the
+# afternoon somebody files a dispute, at which point it cannot be fixed.
 retention       = "30d"
 
 

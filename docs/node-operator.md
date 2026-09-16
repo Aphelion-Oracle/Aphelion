@@ -204,6 +204,44 @@ reads in particular go through the Stellar CLI, which wants
 `APHELION_STELLAR_SECRET` even though `status` never writes; without it the
 page still renders and those lines say so.
 
+### What `status` checks about retention
+
+One line on that page is not about whether the node is working:
+
+```
+evidence   : 30d retained · defends rounds up to 27d old
+```
+
+`database.retention` decides how long raw observations survive, and observations
+are the whole of a defence — `replay` grades a round whose inputs have been
+pruned `incomplete`, and an accused operator with an `incomplete` replay has
+nothing to answer with. So `status` reads the slashing contract's periods and
+does the arithmetic against your setting.
+
+The sum is not the obvious one. A dispute can go on asking for **two** voting
+periods plus an appeal period, because an appeal opens a second voting round and
+asks again — the first round's answer is not carried into it. And retention has
+to cover that *on top of the disputed round's age*, since the observations are
+read when the answer is given rather than when the allegation is made. What is
+left over is the horizon: the age of the oldest round you could still defend if
+a dispute over it were filed now.
+
+| What `status` says | What it means |
+| --- | --- |
+| `[critical] no round published by this node can be defended` | Retention does not even cover one dispute's full life. Nothing else on the page has moved: the node is collecting, signing and submitting perfectly, and can prove none of it |
+| `[degraded] only the last <window> of rounds can be defended` | Working, with a horizon shorter than one dispute takes to run. Worth widening — nothing on chain refuses an allegation about an old round |
+| `evidence : unread` | The periods could not be read, so your retention is unchecked against them. Not the same as fine |
+
+There is no staleness rule in `open_dispute`: it refuses a duplicate and an
+unregistered key and checks nothing about the round's age. Your retention is the
+only limit on how far back an allegation can reach and still be answerable, and
+it is set by you alone.
+
+Set it on a good day. Retention that is too short costs nothing, breaks nothing
+and shows up nowhere else, right up until the afternoon somebody files a
+dispute — at which point raising it changes nothing, because the observations
+the defence needed are already gone.
+
 ### What to watch
 
 Once the node is up, these are the same facts continuously:
@@ -597,10 +635,11 @@ What happens, and what you should do:
 
    A round whose observations have been pruned cannot be replayed at all, and
    grades as `incomplete` rather than as anything worse. This is the reason
-   observations are retained at all, and the reason to check that
-   `retention.raw_prices` is longer than the dispute and appeal windows
-   combined *before* you need it — the command cannot recover what retention
-   has already deleted.
+   observations are retained at all, and `aphelion-node status` now checks
+   `database.retention` against the periods the slashing contract holds rather
+   than leaving the sum to you — see [What `status` checks about
+   retention](#what-status-checks-about-retention). Nothing can recover what
+   retention has already deleted, which is why it is checked on a good day.
 
    Hand over the `--json` bundle, not the page. The other side can check it
    themselves with no access to your node, your key or your database:

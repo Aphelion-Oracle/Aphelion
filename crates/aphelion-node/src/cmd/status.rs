@@ -6,6 +6,13 @@
 //! [`aphelion_node::engine::status`], where it is a pure function and can be
 //! tested against a struct literal rather than against a chain.
 //!
+//! A sixth section is not a read of anything the operator could have looked at,
+//! because the two halves of it live in different places: `database.retention`
+//! is in their configuration and the periods it has to outlast are on the
+//! ledger. See [`aphelion_node::engine::status::EvidenceWindow`] for why a
+//! comparison nobody was making belongs on a page about whether the node is
+//! all right.
+//!
 //! Two properties matter more than the contents.
 //!
 //! **Nothing here needs the node to be running**, and nothing here needs a
@@ -22,12 +29,13 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use aphelion_node::chain::committee::CliCommittee;
+use aphelion_node::chain::committee::{CliCommittee, CommitteeClient};
 use aphelion_node::chain::{ChainClient, CliChain, RpcClient};
 use aphelion_node::config::Config;
 use aphelion_node::engine::duty::{Consequence, Watch};
 use aphelion_node::engine::status::{
-    assess, ChainStatus, DutiesStatus, FeedStatus, Registration, Report, SourceStatus, Verdict,
+    assess, humanise, ChainStatus, DutiesStatus, EvidenceWindow, FeedStatus, Registration, Report,
+    SourceStatus, Verdict,
 };
 use aphelion_node::error::{NodeError, Result};
 use aphelion_node::signer::NodeSigner;
@@ -203,6 +211,29 @@ async fn gather(config: &Config, probe: bool) -> Result<Report> {
         },
     };
 
+    // -- the evidence window ------------------------------------------------
+    //
+    // Reads the two periods and compares them against this operator's own
+    // retention setting. It needs the chain for the periods and nothing else:
+    // no database, which matters, because the failure it catches is one an
+    // operator is most likely to be looking for on a node that will not start.
+    let evidence = match (&config.network.slashing_contract, &chain_client) {
+        (None, _) => EvidenceWindow::NotConfigured,
+        (Some(_), None) => EvidenceWindow::Unavailable {
+            because: "no chain client".into(),
+        },
+        (Some(_), Some(_)) => match read_periods(config).await {
+            Ok((voting_period, appeal_period)) => EvidenceWindow::Measured {
+                retained: config.database.retention.as_secs(),
+                voting_period,
+                appeal_period,
+            },
+            Err(e) => EvidenceWindow::Unavailable {
+                because: e.to_string(),
+            },
+        },
+    };
+
     Ok(Report {
         node_name: config.node.name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -212,8 +243,16 @@ async fn gather(config: &Config, probe: bool) -> Result<Report> {
         feeds,
         sources: source_results,
         duties,
+        evidence,
         heartbeat_secs: config.engine.heartbeat.as_secs() as i64,
     })
+}
+
+/// The two periods that decide how long a dispute can keep asking.
+async fn read_periods(config: &Config) -> Result<(u64, u64)> {
+    let committee = CliCommittee::new(&config.network)?;
+    let params = committee.params().await?;
+    Ok((params.voting_period, params.appeal_period))
 }
 
 async fn read_duties(
@@ -302,6 +341,23 @@ fn render(r: &Report, verdict: Verdict, findings: &[aphelion_node::engine::statu
         } => println!(
             "\nduties     : {costly} costly · {forfeited} forfeited · {owed} owed · \
              {housekeeping} housekeeping"
+        ),
+    }
+
+    // Printed whether or not it is a finding, because the number an operator
+    // wants on a good day is "how far back can I still defend", and a line
+    // that appeared only when the answer was bad would never be read until it
+    // was too late to act on.
+    match &r.evidence {
+        EvidenceWindow::NotConfigured => {}
+        EvidenceWindow::Unavailable { .. } => println!("\nevidence   : unread"),
+        EvidenceWindow::Measured { retained, .. } => println!(
+            "\nevidence   : {} retained · defends rounds up to {} old",
+            humanise(*retained),
+            r.evidence
+                .defensible()
+                .map(humanise)
+                .unwrap_or_else(|| "?".into()),
         ),
     }
 

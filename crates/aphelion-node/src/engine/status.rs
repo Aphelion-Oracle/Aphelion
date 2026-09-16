@@ -164,6 +164,88 @@ pub enum DutiesStatus {
     },
 }
 
+/// Whether this node could still answer a dispute filed against it.
+///
+/// The one thing on this page that is neither about the chain nor about the
+/// network: it is a comparison between a number in this operator's
+/// configuration and two numbers on the ledger, and until now it was left to
+/// them to make. `database.retention` decides how long observations survive,
+/// and observations are the whole of a defence — `replay` grades a round whose
+/// inputs have been pruned `incomplete`, and an accused operator with an
+/// `incomplete` replay has nothing to answer with.
+///
+/// It is worth a section of its own because of *when* it fails. Retention set
+/// too short costs nothing, breaks nothing and is invisible on every other
+/// line of this page, right up until the afternoon somebody files a dispute —
+/// at which point it is unfixable, because the evidence is already gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum EvidenceWindow {
+    /// No `slashing_contract` in the configuration: nothing here can be
+    /// disputed, so nothing here has to be kept for a dispute.
+    NotConfigured,
+    /// Configured, and the periods could not be read. Reported rather than
+    /// assumed: a retention setting that has not been checked is not a
+    /// retention setting that is fine.
+    Unavailable { because: String },
+    Measured {
+        /// `database.retention`, in seconds.
+        retained: u64,
+        /// The slashing contract's, as the deployment currently holds them.
+        voting_period: u64,
+        appeal_period: u64,
+    },
+}
+
+impl EvidenceWindow {
+    /// The longest a single dispute can go on asking this node to produce its
+    /// observations.
+    ///
+    /// Two voting rounds and the appeal window between them. An appeal opens a
+    /// second round and asks again, and the first round's answer is not carried
+    /// into it — an appeal is precisely the claim that the first hearing was
+    /// wrong — so the accused has to be able to replay the round twice, the
+    /// second time at the far end of an appeal window that can be used on its
+    /// last day.
+    ///
+    /// It is a floor rather than a bound. `resolve` is permissionless and may
+    /// be called late, which stretches the appeal window's start, and nothing
+    /// caps how late. A deployment that sets retention to exactly this number
+    /// has set it too short.
+    pub fn required(&self) -> Option<u64> {
+        match self {
+            Self::Measured {
+                voting_period,
+                appeal_period,
+                ..
+            } => Some(2 * voting_period + appeal_period),
+            _ => None,
+        }
+    }
+
+    /// The age of the oldest round this node could still defend, if a dispute
+    /// over it were filed now.
+    ///
+    /// Retention has to cover the round's age *plus* the dispute's whole life,
+    /// because the observations are read when the answer is given rather than
+    /// when the allegation is made. Zero means no round is defensible — not
+    /// even one published this second.
+    ///
+    /// Nothing on chain bounds this from the other side. `open_dispute` refuses
+    /// a duplicate and an unregistered key and checks nothing about the round's
+    /// age, so there is no nonce too old to be disputed. This number is the
+    /// only limit on how far back an allegation can reach and be answered, and
+    /// it is set by the operator alone.
+    pub fn defensible(&self) -> Option<u64> {
+        match (self, self.required()) {
+            (Self::Measured { retained, .. }, Some(required)) => {
+                Some(retained.saturating_sub(required))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Everything gathered, before anything is concluded from it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
@@ -175,6 +257,8 @@ pub struct Report {
     pub feeds: Vec<FeedStatus>,
     pub sources: Vec<SourceStatus>,
     pub duties: DutiesStatus,
+    /// Whether a dispute filed against this node could still be answered.
+    pub evidence: EvidenceWindow,
     /// From `engine.heartbeat`, used to decide when a stored price is old.
     pub heartbeat_secs: i64,
 }
@@ -359,12 +443,96 @@ pub fn assess(report: &Report) -> (Verdict, Vec<Finding>) {
         }
     }
 
+    // -- the evidence window ------------------------------------------------
+    //
+    // Last, and the only finding here that is about something already true
+    // rather than something happening now. Everything above reports a node
+    // that has stopped doing its job; this reports one that is doing it
+    // perfectly and cannot prove it later.
+    match &report.evidence {
+        EvidenceWindow::NotConfigured => {}
+        EvidenceWindow::Unavailable { because } => findings.push(Finding::new(
+            Verdict::Degraded,
+            format!(
+                "could not read the slashing periods, so `database.retention` is unchecked \
+                 against them: {because}"
+            ),
+        )),
+        EvidenceWindow::Measured {
+            retained,
+            voting_period,
+            appeal_period,
+        } => {
+            let required = 2 * voting_period + appeal_period;
+            let defensible = retained.saturating_sub(required);
+            if defensible == 0 {
+                findings.push(Finding::new(
+                    Verdict::Critical,
+                    format!(
+                        "no round published by this node can be defended: observations are \
+                         pruned after {}, and a dispute can go on asking for {} (two voting \
+                         rounds of {} with an appeal window of {} between them). `replay` \
+                         will grade `incomplete` and the committee will see no answer. \
+                         Raise `database.retention`; nothing can restore observations \
+                         already pruned",
+                        humanise(*retained),
+                        humanise(required),
+                        humanise(*voting_period),
+                        humanise(*appeal_period),
+                    ),
+                ));
+            } else if defensible < required {
+                findings.push(Finding::new(
+                    Verdict::Degraded,
+                    format!(
+                        "only the last {} of rounds can be defended: a dispute filed now \
+                         about anything older is unanswerable, because `database.retention` \
+                         of {} has to cover the round's age plus the {} a dispute can go on \
+                         asking. That window is shorter than one dispute takes to run, and \
+                         nothing on chain stops an allegation about a round of any age",
+                        humanise(defensible),
+                        humanise(*retained),
+                        humanise(required),
+                    ),
+                ));
+            }
+        }
+    }
+
     findings.sort_by_key(|f| f.verdict);
     let verdict = findings
         .first()
         .map(|f| f.verdict)
         .unwrap_or(Verdict::Healthy);
     (verdict, findings)
+}
+
+/// Seconds as something an operator reads without counting zeros.
+///
+/// Deliberately coarse and never more than two units: these numbers are
+/// compared against each other in a sentence, and "3d 4h" reads as a duration
+/// where "277440s" reads as a serial number.
+///
+/// Public because the page and the finding have to agree. A retention of
+/// `30d` reported one way in the summary line and another in the finding
+/// under it reads as two different numbers.
+pub fn humanise(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    match secs {
+        0 => "nothing".into(),
+        s if s < MINUTE => format!("{s}s"),
+        s if s < HOUR => format!("{}m", s / MINUTE),
+        s if s < DAY => match (s / HOUR, (s % HOUR) / MINUTE) {
+            (h, 0) => format!("{h}h"),
+            (h, m) => format!("{h}h {m}m"),
+        },
+        s => match (s / DAY, (s % DAY) / HOUR) {
+            (d, 0) => format!("{d}d"),
+            (d, h) => format!("{d}d {h}h"),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -418,9 +586,19 @@ mod tests {
                 owed: 0,
                 housekeeping: 0,
             },
+            // A month retained against a day of voting and a day of appeal:
+            // comfortably more than one dispute takes, which is the shape of a
+            // deployment nobody has to think about.
+            evidence: EvidenceWindow::Measured {
+                retained: 30 * DAY,
+                voting_period: DAY,
+                appeal_period: DAY,
+            },
             heartbeat_secs: 300,
         }
     }
+
+    const DAY: u64 = 24 * 60 * 60;
 
     #[test]
     fn a_working_node_says_nothing() {
@@ -653,5 +831,129 @@ mod tests {
         assert_eq!(Verdict::Healthy.exit_code(), 0);
         assert_eq!(Verdict::Degraded.exit_code(), 1);
         assert_eq!(Verdict::Critical.exit_code(), 2);
+    }
+    // -- the evidence window ------------------------------------------------
+
+    fn retaining(secs: u64) -> Report {
+        Report {
+            evidence: EvidenceWindow::Measured {
+                retained: secs,
+                voting_period: DAY,
+                appeal_period: DAY,
+            },
+            ..report()
+        }
+    }
+
+    /// The failure this section exists for, and the reason it is critical
+    /// rather than a note. Nothing else on the page moves: the node is
+    /// collecting, signing and submitting perfectly, and cannot prove any of
+    /// it the moment somebody asks.
+    #[test]
+    fn retention_shorter_than_a_dispute_is_critical_while_everything_works() {
+        let (verdict, findings) = assess(&retaining(2 * DAY));
+        assert_eq!(verdict, Verdict::Critical);
+        let detail = &findings[0].detail;
+        assert!(
+            detail.contains("no round published by this node can be defended"),
+            "{detail}"
+        );
+        // The numbers that make it actionable: what is kept, and what is
+        // needed. A finding that says only "too short" leaves the operator to
+        // work out the target from a contract they have never read.
+        assert!(detail.contains("2d"), "{detail}");
+        assert!(detail.contains("3d"), "{detail}");
+    }
+
+    /// Exactly the required window is still nothing defensible. A round
+    /// published this second would have its observations pruned on the last
+    /// day of a second voting round, which is when the accused needs them.
+    #[test]
+    fn retention_equal_to_the_requirement_defends_nothing() {
+        let (verdict, findings) = assess(&retaining(3 * DAY));
+        assert_eq!(verdict, Verdict::Critical, "{findings:?}");
+    }
+
+    /// An appeal opens a second voting round and asks again, so the accused
+    /// has to replay twice. Counting one voting period would put the
+    /// requirement a whole round short and call an undefendable node healthy.
+    #[test]
+    fn the_requirement_counts_both_voting_rounds_and_not_just_the_first() {
+        let window = EvidenceWindow::Measured {
+            retained: 30 * DAY,
+            voting_period: 7 * DAY,
+            appeal_period: 3 * DAY,
+        };
+        assert_eq!(window.required(), Some(17 * DAY));
+        assert_eq!(window.defensible(), Some(13 * DAY));
+    }
+
+    /// Working, and with a horizon short enough to be worth saying out loud.
+    /// Nothing on chain refuses an allegation about an old round — there is no
+    /// staleness check in `open_dispute` — so the only thing deciding how far
+    /// back this operator is answerable is this number.
+    #[test]
+    fn a_horizon_shorter_than_one_dispute_is_degraded_and_names_it() {
+        let (verdict, findings) = assess(&retaining(5 * DAY));
+        assert_eq!(verdict, Verdict::Degraded);
+        let detail = &findings[0].detail;
+        assert!(detail.contains("only the last 2d"), "{detail}");
+        assert!(detail.contains("round of any age"), "{detail}");
+    }
+
+    /// Comfortable is silent. The number is still on the page; it is not worth
+    /// a finding, and a status page that is never green is one nobody reads.
+    #[test]
+    fn a_comfortable_window_is_not_a_finding() {
+        let (verdict, findings) = assess(&retaining(30 * DAY));
+        assert_eq!(verdict, Verdict::Healthy, "{findings:?}");
+    }
+
+    /// A deployment with no slashing contract has nothing to retain evidence
+    /// for, and must not be told its retention is wrong.
+    #[test]
+    fn a_deployment_with_no_slashing_contract_is_not_asked_to_keep_evidence() {
+        let (verdict, findings) = assess(&Report {
+            evidence: EvidenceWindow::NotConfigured,
+            ..retaining(60)
+        });
+        assert_eq!(verdict, Verdict::Healthy, "{findings:?}");
+    }
+
+    /// Unread is not fine. A retention setting nobody could check against the
+    /// ledger is a retention setting in exactly the state this section exists
+    /// to end, and reporting it as healthy would be the same silence in a
+    /// different place.
+    #[test]
+    fn periods_that_could_not_be_read_leave_retention_unchecked_and_say_so() {
+        let (verdict, findings) = assess(&Report {
+            evidence: EvidenceWindow::Unavailable {
+                because: "no network".into(),
+            },
+            ..report()
+        });
+        assert_eq!(verdict, Verdict::Degraded);
+        assert!(findings[0].detail.contains("unchecked"), "{findings:?}");
+        assert_eq!(
+            EvidenceWindow::Unavailable {
+                because: "no network".into()
+            }
+            .defensible(),
+            None,
+            "an unread window has no horizon, and must not report one"
+        );
+    }
+
+    /// The page and the findings quote the same durations, so they have to
+    /// spell them the same way.
+    #[test]
+    fn a_duration_reads_as_a_duration() {
+        assert_eq!(humanise(0), "nothing");
+        assert_eq!(humanise(45), "45s");
+        assert_eq!(humanise(90), "1m");
+        assert_eq!(humanise(3 * 60 * 60), "3h");
+        assert_eq!(humanise(3 * 60 * 60 + 30 * 60), "3h 30m");
+        assert_eq!(humanise(30 * DAY), "30d");
+        assert_eq!(humanise(DAY + 6 * 60 * 60), "1d 6h");
     }
 }

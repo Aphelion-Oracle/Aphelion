@@ -333,7 +333,7 @@ repository, not the target architecture.
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 12 |
 | Dispute evidence — replay a round, put the answer on the record, and check a document against either side of the record it was filed or answered with | ✅ Implemented | 84 |
-| Operator status page — five reads, one verdict, an exit code | ✅ Implemented | 17 |
+| Operator status page — six reads, one verdict, an exit code | ✅ Implemented | 25 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
 | Testnet deployment | 📋 Planned | — |
@@ -341,13 +341,13 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-664 tests in total: 359 off-chain (`cargo test --workspace`), 265 against the
+672 tests in total: 367 off-chain (`cargo test --workspace`), 265 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 359 are: 38 in `aphelion-core`, 244 in the node's library, 8 in
+The off-chain 367 are: 38 in `aphelion-core`, 252 in the node's library, 8 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 244 — 15 in the harness, and 54 across the
+target, so they are *not* inside the 252 — 15 in the harness, and 54 across the
 four integration suites (duties 12, evidence 21, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
@@ -355,20 +355,20 @@ because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 244. Committee participation is the same shape: its 12 cover assembling a
+node's 252. Committee participation is the same shape: its 12 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 27 more
-unit tests with 8 on decoding what the contract returns, all inside the 244 —
+unit tests with 8 on decoding what the contract returns, all inside the 252 —
 with the 8 command tests in the binary target beside it. The dispute evidence
 pair is split the same way again: 21 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 43 more unit tests inside the 244, with 20 on the replay that
+itself has 43 more unit tests inside the 252, with 20 on the replay that
 produces what they judge. The harness's 15 are 12 process-level tests plus 3
 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 347 tests and reported 359. The skip prints a `SKIP`
+with no Postgres has run 355 tests and reported 367. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -641,7 +641,7 @@ docker compose logs -f node
 | `keygen --out <path>` | Generate an Ed25519 node key (refuses to overwrite) |
 | `pubkey` | Print the configured node's public key |
 | `check-sources` | Fetch every configured source once and print the result |
-| `status [--json] [--no-probe]` | Identity, chain, standing, feeds, sources and duties in one page, with a verdict and an exit code |
+| `status [--json] [--no-probe]` | Identity, chain, standing, feeds, sources, duties and how far back this node can still defend itself, in one page with a verdict and an exit code |
 | `sweep [--commit]` | Show which registered nodes have gone silent; charge them with `--commit` |
 | `duties [--json]` | What the slashing contract is waiting on from this operator, and by when |
 | `beacon status \| tick \| open \| commit \| reveal \| finalize` | The randomness beacon, and what this node owes it |
@@ -911,6 +911,8 @@ sources    : 10 of 11 answered
 
 duties     : 0 costly · 1 forfeited · 0 owed · 2 housekeeping
 
+evidence   : 30d retained · defends rounds up to 27d old
+
 DEGRADED
   [degraded] USDC_USD: 1 live source(s), 2 required; this feed will not be signed
   [degraded] 1 of 11 source probe(s) failed, across coinbase
@@ -919,7 +921,13 @@ DEGRADED
 
 Five reads an operator could already do separately — `pubkey`, `check-sources`,
 `duties`, `/v1/node`, `/ready` — assembled into one page with a verdict on the
-end. Nothing here is a new fact; the assembly and the grade are the point.
+end. Nothing there is a new fact; the assembly and the grade are the point.
+
+The sixth is not a read at all, and it is the only thing on the page that
+reports something already true rather than something happening now. Everything
+else says the node has stopped doing its job; this says it is doing it perfectly
+and could not prove it later. See [Keeping enough to answer
+with](#keeping-enough-to-answer-with).
 
 It **needs no database and does not need the node to be running**, which is
 when it is worth the most: a node that will not start is exactly the case where
@@ -944,14 +952,55 @@ parsing its output:
 | 2 | `critical` | Not doing the job it is staked to do, now |
 
 Critical is reserved for: an unreachable RPC endpoint, a key the registry does
-not know, a jailed node, every feed short of sources at once, and a duty whose
-deadline costs stake. That last one is not a fault in the node at all — the
-grade answers "should somebody act now?", and a closing appeal window is the
-one thing on the page that cannot be done late.
+not know, a jailed node, every feed short of sources at once, a duty whose
+deadline costs stake, and a retention window too short to answer a dispute with.
+The last two are not faults in the node at all — the grade answers "should
+somebody act now?", and a closing appeal window is the one thing on the page
+that cannot be done late, while a retention setting is the one thing that cannot
+be fixed after it matters.
 
 Housekeeping duties deliberately never colour the verdict. They are work the
 network needs and anybody may do; charging them to this operator's status page
 would leave every node in the network permanently amber.
+
+#### Keeping enough to answer with
+
+```
+evidence   : 30d retained · defends rounds up to 27d old
+```
+
+`database.retention` decides how long raw observations survive, and observations
+are the whole of a defence. `replay` grades a round whose inputs have been pruned
+`incomplete`, and an accused operator holding an `incomplete` replay has nothing
+to answer with — the design principle that every published price is reproducible
+from its inputs is exactly as true as this one number makes it.
+
+It was left to the operator to check, and the arithmetic is not the obvious one.
+A dispute can go on asking for **two** voting periods plus an appeal period,
+because an appeal opens a second voting round and asks again, and the first
+round's answer is not carried into it. Retention has to cover that *on top of the
+disputed round's age*, since the observations are read when the answer is given
+rather than when the allegation is made. So `status` reads both periods off the
+slashing contract and reports what is left over: the age of the oldest round this
+node could still defend if a dispute over it were filed now.
+
+| Finding | When |
+| --- | --- |
+| `critical` — no round published by this node can be defended | Retention does not cover one dispute's full life. Nothing else on the page has moved |
+| `degraded` — only the last *window* of rounds can be defended | Working, with a horizon shorter than one dispute takes to run |
+| `degraded` — the periods could not be read | Retention is unchecked against them, which is not the same as fine |
+
+Nothing on chain bounds it from the other side. `open_dispute` refuses a
+duplicate and an unregistered key and checks nothing about the round's age, so
+there is no nonce too old to be disputed; this number is the only limit on how
+far back an allegation can reach and still be answerable, and the operator sets
+it alone.
+
+The reason it is worth a grade rather than a note is *when* it fails. Retention
+set too short costs nothing, breaks nothing, and is invisible on every other line
+of this page — right up until the afternoon somebody files a dispute, at which
+point raising it changes nothing, because the observations the defence needed
+have already been pruned.
 
 ### HTTP API
 
@@ -1500,8 +1549,9 @@ between.
 
 A round whose observations retention has already deleted grades as `incomplete`,
 not as anything worse — an absence of evidence is not evidence. Which is the
-reason to check that `retention.raw_prices` outlasts the dispute and appeal
-windows combined before it matters.
+reason `database.retention` has to outlast a dispute, and the reason `status`
+checks that it does rather than leaving the sum to be done by hand: see
+[Keeping enough to answer with](#keeping-enough-to-answer-with).
 
 ### Putting the answer on the record
 

@@ -445,8 +445,10 @@ fn reproduce(
         findings.push(Finding::new(
             Verdict::Incomplete,
             "no observations survive in this round's window. Raw observations are pruned on \
-             `retention.raw_prices`, so a round older than that window cannot be replayed at \
-             all — this says nothing about whether the price was right.",
+             `database.retention`, so a round older than that window cannot be replayed at \
+             all — this says nothing about whether the price was right. \
+             `aphelion-node status` reports how far back this node can still defend, and \
+             checks it against the periods the slashing contract holds.",
         ));
         return None;
     }
