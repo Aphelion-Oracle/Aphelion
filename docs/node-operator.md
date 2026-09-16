@@ -540,12 +540,18 @@ What happens, and what you should do:
    — the nonce you signed the submission under, not the round id the aggregator
    allocated afterwards — with a bond the reporter forfeits to you if it is
    dismissed, a link to their evidence and the SHA-256 of it. That digest was
-   fixed when they filed and cannot be changed afterwards, so `sha256sum`
-   whatever file you are sent and compare it against the `case` line in
-   `dispute show` before you spend any time answering it: a case that does not
-   match the one on the ledger is not the case against you. `duties` reports it as `COSTLY` with
-   the time left on the voting period; `dispute show` prints the evidence link,
-   and the two commands that answer it and check the answer, ready to paste.
+   fixed when they filed and cannot be changed afterwards, so check whatever
+   file you are sent against it before you spend any time answering: a case that
+   does not match the one on the ledger is not the case against you.
+
+   ```bash
+   aphelion-node dispute check 7 --file the-case.json
+   ```
+
+   It reports the file as the `case` or not, and audits it where it is a bundle.
+   `duties` reports the dispute as `COSTLY` with the time left on the voting
+   period; `dispute show` prints the evidence link, and the commands that answer
+   it and check either document, ready to paste.
 2. **The committee votes** for the configured voting period. If it does not reach
    quorum, or the vote ties, the dispute is **dismissed** — silence is not
    evidence against you.

@@ -1550,11 +1550,14 @@ aphelion-node dispute open <accused> BTC_USD 4812 \
     --file case.json --uri ipfs://bafycase --commit
 ```
 
-Where the reporter's case is itself a bundle — their own node's replay of the
-same round, showing a different price — the committee checks it with the same
-command they check the answer with, passing the digest `dispute show` prints
-under `case`. Where it is a written account or an archive, `sha256sum` and the
-same line on the ledger do the job.
+Both commitments are read by the same command, and neither has to be typed at
+it: `dispute check <id> --file <path>` hashes the file and asks the ledger which
+side of the record — if either — is to those bytes. Where the reporter's case is
+itself a bundle, usually their own node's replay of the same round showing a
+different price, it is audited like any other. Where it is a written account or
+an archive it is placed on the record and left ungraded, which is the honest
+result and not a failing one. [With a ledger to hand](#with-a-ledger-to-hand)
+is what that looks like.
 
 The dry run — `respond` without `--commit` — audits the bundle against the
 allegation first and refuses to publish one that grades `unsigned`,
@@ -1595,11 +1598,18 @@ Give what you have; a committee member holding only the accused's key is not
 made to invent a nonce.
 
 `--digest` is the odd one out, and it is about the file rather than about what
-the file says: it is the SHA-256 the accused published with `respond`, compared
-against the bytes in front of the verifier. That is a comparison of documents,
-not of meanings, so a re-serialised copy that asserts every last thing the
-original asserted is a different document and is reported as one. Forgiving the
-difference would forgive exactly the edit a substitution needs.
+the file says: it is a SHA-256 somebody put on the ledger — the accused's answer
+from `respond`, or the case the reporter filed — compared against the bytes in
+front of the verifier. That is a comparison of documents, not of meanings, so a
+re-serialised copy that asserts every last thing the original asserted is a
+different document and is reported as one. Forgiving the difference would
+forgive exactly the edit a substitution needs.
+
+For a case, **leave `--node` off**. It is the one flag that does not apply to
+the reporter's side: their document is normally signed by their own node, and
+holding it to the accused's key would grade every honest case `unrelated`.
+`dispute check` picks between the two itself; here it is the caller's to get
+right, which is one more reason to prefer it where there is a chain to hand.
 
 It treats the file as hostile input, not as stale input. The bundle's own verdict
 and findings are ignored outright; there is no field to read them into. What
@@ -1667,15 +1677,17 @@ flags are what it costs. An operator who already runs a node against the
 deployment — which is every elected committee member — does not have to pay it:
 
 ```bash
-aphelion-node dispute check 7 --file evidence.json    # or `-` for stdin
+aphelion-node dispute check 7 --file evidence.json    # the answer, or `-` for stdin
+aphelion-node dispute check 7 --file case.json        # the accusation
 ```
 
 It reads the standard off the ledger rather than off a terminal: the accused,
-the feed and the nonce from the dispute record, the digest from
-`slashing.responses`, and the deployment from the node's own configuration.
+the feed and the nonce from the dispute record, the digest from whichever
+commitment on the record is to these bytes — the reporter's case or an answer in
+`slashing.responses` — and the deployment from the node's own configuration.
 Nothing is read out of the file, which is the property the typed flags were
-protecting — the chain is simply a better source for it than a committee
-member's hands, and it is the source the vote will be recorded on.
+protecting; the chain is simply a better source for it than a committee member's
+hands, and it is the source the vote will be recorded on.
 
 Reading the *answers* rather than one digest also settles a case a single
 `--digest` grades wrongly. An answer may be corrected: the contract keeps every
