@@ -106,6 +106,36 @@ pub fn run(path: &Path, against: &Against, json: bool) -> Result<()> {
 }
 
 fn render(a: &Audit) {
+    render_body(a);
+
+    if a.signed.is_some() {
+        println!();
+        // What remains outside this command's reach depends on what it was
+        // given. Without the allegation it is the whole question of relevance;
+        // with it, the narrower one the registry answers.
+        let remaining = match a.bound_to_allegation {
+            None => {
+                "Still to establish elsewhere: that this bundle is about the dispute at \
+                 all. Read the accused, feed and nonce off `dispute show` and pass them \
+                 as --node, --feed and --nonce, and they are checked against the signed \
+                 bytes here."
+            }
+            Some(_) => {
+                "Still to establish elsewhere: that the key the allegation names is the \
+                 key of the operator it is against. That is `registry.owner_of`, and no \
+                 bundle can settle it. `aphelion-node dispute check <id> --file <bundle>` \
+                 reads both off the ledger for an operator who has one configured."
+            }
+        };
+        println!("{}", wrap(remaining, 0));
+    }
+}
+
+/// The audit itself: the signed payload, the document's digest, the arithmetic
+/// and the verdict. Shared with `dispute check`, which reaches the same
+/// judgement from the ledger rather than from typed flags — and so has a
+/// different set of questions left over at the end.
+pub(crate) fn render_body(a: &Audit) {
     match &a.signed {
         None => {
             println!("Signed payload");
@@ -145,30 +175,9 @@ fn render(a: &Audit) {
     for f in &a.findings {
         println!("  [{}] {}", f.verdict, wrap(&f.detail, 4));
     }
-
-    if a.signed.is_some() {
-        println!();
-        // What remains outside this command's reach depends on what it was
-        // given. Without the allegation it is the whole question of relevance;
-        // with it, the narrower one the registry answers.
-        let remaining = match a.bound_to_allegation {
-            None => {
-                "Still to establish elsewhere: that this bundle is about the dispute at \
-                 all. Read the accused, feed and nonce off `dispute show` and pass them \
-                 as --node, --feed and --nonce, and they are checked against the signed \
-                 bytes here."
-            }
-            Some(_) => {
-                "Still to establish elsewhere: that the key the allegation names is the \
-                 key of the operator it is against. That is `registry.owner_of`, and no \
-                 bundle can settle it."
-            }
-        };
-        println!("{}", wrap(remaining, 0));
-    }
 }
 
-fn verdict_line(v: Verdict) -> &'static str {
+pub(crate) fn verdict_line(v: Verdict) -> &'static str {
     match v {
         Verdict::Sound => {
             "sound — signed, honestly described, and supported by the observations offered"
@@ -185,7 +194,7 @@ fn verdict_line(v: Verdict) -> &'static str {
 }
 
 /// Wrap to something readable in a terminal, indented under its tag.
-fn wrap(text: &str, indent: usize) -> String {
+pub(crate) fn wrap(text: &str, indent: usize) -> String {
     const WIDTH: usize = 76;
     let pad = " ".repeat(indent);
     let mut out = String::new();

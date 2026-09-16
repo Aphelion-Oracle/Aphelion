@@ -280,7 +280,7 @@ fn dispute_duties(s: &Snapshot, d: &DisputeRecord) -> Vec<Duty> {
                     // before the votes came in.
                     command: format!(
                         "aphelion-node replay {} {} --json > evidence.json && \
-                         aphelion-node dispute respond {} --bundle evidence.json --commit",
+                         aphelion-node dispute respond {} --file evidence.json --commit",
                         d.feed, d.nonce, d.id
                     ),
                 });
@@ -811,6 +811,15 @@ mod tests {
         assert!(d[0].command.contains("replay BTC_USD"), "{}", d[0].command);
         assert!(
             d[0].command.contains("dispute respond 1"),
+            "{}",
+            d[0].command
+        );
+        // The flag as the binary actually spells it. A command printed under a
+        // closing deadline and pasted straight into a terminal is worth
+        // nothing if the CLI rejects it, and the two sides live in different
+        // compilation targets — `cmd::committee` pins the other end of this.
+        assert!(
+            d[0].command.contains("--file evidence.json"),
             "{}",
             d[0].command
         );

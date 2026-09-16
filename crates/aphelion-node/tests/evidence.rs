@@ -443,3 +443,177 @@ fn what_a_dispute_record_prints_is_what_the_verifier_accepts() {
         verify::Verdict::Sound
     );
 }
+
+/// What `dispute check` does, minus the RPC: the standard comes off the
+/// ledger's list of answers and nothing is typed.
+///
+/// The seam this pins is the one between [`aphelion_node::chain::committee`]
+/// and [`verify`]. The contract holds a digest as a hex string, `replay` emits
+/// bytes, and the two meet nowhere else — so a change to how either spells a
+/// digest would leave both sides passing their own tests while every answer on
+/// the record read as a substitution.
+fn answers(records: &[(&str, u64)]) -> Vec<aphelion_node::chain::committee::ResponseRecord> {
+    records
+        .iter()
+        .map(
+            |(digest, at)| aphelion_node::chain::committee::ResponseRecord {
+                dispute: 7,
+                vote_round: 0,
+                by: "GOPERATOR".into(),
+                digest: (*digest).into(),
+                uri: String::new(),
+                at: *at,
+            },
+        )
+        .collect()
+}
+
+fn refs(records: &[aphelion_node::chain::committee::ResponseRecord]) -> Vec<verify::AnswerRef<'_>> {
+    records
+        .iter()
+        .map(|r| verify::AnswerRef {
+            digest: &r.digest,
+            at: r.at,
+        })
+        .collect()
+}
+
+/// The audit a committee member gets without transcribing anything.
+#[test]
+fn an_answer_on_the_record_needs_no_flag_typed_at_it() {
+    let json = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let digest = verify::sha256(json.as_bytes());
+
+    let on_chain = answers(&[(&hex::encode(digest), 900)]);
+    let standing = verify::locate_document(&digest, &refs(&on_chain));
+    assert!(standing.is_on_record(), "{standing:?}");
+
+    // Every one of the five comes from somewhere other than the file: four
+    // from the dispute record, the fifth from the list of answers.
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let expect = verify::Expectations::parse(
+        Some(&accused),
+        Some("BTC_USD"),
+        Some(4),
+        Some(&hex::encode(AGGREGATOR)),
+        standing.expected_digest(),
+    )
+    .unwrap();
+
+    let audit = verify::verify_document(json.as_bytes(), &expect).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+    assert_eq!(audit.bound_to_allegation, Some(true));
+}
+
+/// An operator who posts the wrong file and corrects themselves has two real
+/// documents on the record, and the earlier one is not a substitution.
+///
+/// This is the case a single retyped `--digest` grades wrongly. A committee
+/// checking the first file against the last digest would be told it is
+/// `unrelated` — a finding against an operator for doing the honest thing in
+/// public.
+#[test]
+fn a_corrected_answer_is_graded_as_a_correction_and_not_as_a_swap() {
+    let disputed = round("100.00", 10, 950, 4);
+    let first = bundle_json(&round("100.00", 10, 950, 9), &honest_observations());
+    let second = bundle_json(&disputed, &honest_observations());
+
+    let mut padded = honest_observations();
+    padded.push(obs("okx", "100.00", 980));
+    let never_answered_with = bundle_json(&disputed, &padded);
+
+    let on_chain = answers(&[
+        (&hex::encode(verify::sha256(first.as_bytes())), 900),
+        (&hex::encode(verify::sha256(second.as_bytes())), 950),
+    ]);
+    let records = refs(&on_chain);
+
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let judge = |raw: &str| {
+        let standing = verify::locate_document(&verify::sha256(raw.as_bytes()), &records);
+        let expect = verify::Expectations::parse(
+            Some(&accused),
+            Some("BTC_USD"),
+            Some(4),
+            Some(&hex::encode(AGGREGATOR)),
+            standing.expected_digest(),
+        )
+        .unwrap();
+        (
+            standing,
+            verify::verify_document(raw.as_bytes(), &expect).unwrap(),
+        )
+    };
+
+    // The correction: the answer being offered, and about the right round.
+    let (standing, audit) = judge(&second);
+    assert!(matches!(standing, verify::OnRecord::Offered { .. }));
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+
+    // The file it replaced. Still the operator's own document, fixed at a real
+    // time — and `unrelated` here for the reason it is a wrong answer rather
+    // than a swapped one: it replays nonce 9, and the allegation is nonce 4.
+    let (standing, audit) = judge(&first);
+    assert!(
+        matches!(standing, verify::OnRecord::Superseded { .. }),
+        "{standing:?}"
+    );
+    assert!(standing.summary().contains("superseded"));
+    assert_eq!(audit.verdict, verify::Verdict::Unrelated);
+    assert!(
+        audit
+            .findings
+            .iter()
+            .any(|f| f.detail.contains("nonce 4") && f.detail.contains("nonce 9")),
+        "the finding should name the round, not the document: {:?}",
+        audit.findings
+    );
+
+    // And the substitution: a sound bundle for the disputed round that nobody
+    // ever committed to, measured against the answer that was offered.
+    let (standing, audit) = judge(&never_answered_with);
+    assert!(
+        matches!(standing, verify::OnRecord::Absent { .. }),
+        "{standing:?}"
+    );
+    assert_eq!(audit.verdict, verify::Verdict::Unrelated);
+    assert_eq!(audit.verdict.exit_code(), 2);
+}
+
+/// A dispute nobody has answered binds the file to nothing, and says so rather
+/// than failing it. A committee member handed a bundle privately can still
+/// check everything except which document the accused stands behind.
+#[test]
+fn an_unanswered_dispute_leaves_the_file_unbound_without_failing_it() {
+    let json = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let standing = verify::locate_document(&verify::sha256(json.as_bytes()), &[]);
+    assert_eq!(standing, verify::OnRecord::Unanswered);
+    assert!(standing.summary().contains("no answer"));
+
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let expect = verify::Expectations::parse(
+        Some(&accused),
+        Some("BTC_USD"),
+        Some(4),
+        Some(&hex::encode(AGGREGATOR)),
+        standing.expected_digest(),
+    )
+    .unwrap();
+    let audit = verify::verify_document(json.as_bytes(), &expect).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+}

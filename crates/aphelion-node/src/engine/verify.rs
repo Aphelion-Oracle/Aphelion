@@ -265,6 +265,147 @@ fn parse_contract_id(s: &str) -> Result<[u8; 32], String> {
     })
 }
 
+// -- where the file stands on the record -------------------------------------
+
+/// One answer the accused published, as much of it as this module needs.
+///
+/// Borrowed rather than owned, and deliberately not
+/// [`crate::chain::committee::ResponseRecord`]: nothing here should be able to
+/// reach a chain client, because the judgement below has to be checkable by
+/// someone who was handed a list of digests and a file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnswerRef<'a> {
+    /// SHA-256 of the document, in hex, as the ledger holds it.
+    pub digest: &'a str,
+    /// Ledger time it was published at.
+    pub at: u64,
+}
+
+/// Where a document stands on a dispute's record, decided by the ledger's list
+/// of answers rather than by anything in the document.
+///
+/// This is the question `--digest` asks, asked once against every answer in the
+/// voting round instead of once against a digest somebody retyped. The
+/// difference shows up in the case a single comparison cannot express: an
+/// operator who answered, then answered again, and whose two files are both
+/// genuine. A verifier that only ever knew the last digest would report the
+/// first as a substitution, which is a finding against an operator who did the
+/// honest thing and corrected themselves in public.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "standing", rename_all = "snake_case")]
+pub enum OnRecord {
+    /// The accused has published nothing in this voting round. Nothing on the
+    /// ledger ties this file to the dispute — which is not a finding against
+    /// it, and not a reason to treat it as the answer either.
+    Unanswered,
+    /// These bytes are the answer the accused is offering: the last digest they
+    /// published in this round.
+    Offered { digest: String, at: u64 },
+    /// These bytes were published in this round and answered over afterwards.
+    /// A real document, fixed at a real time, and not the one the committee is
+    /// being asked to read.
+    Superseded {
+        digest: String,
+        at: u64,
+        /// The digest that replaced it, and when.
+        by: String,
+        by_at: u64,
+    },
+    /// The accused answered, and this file is not any of the answers. The
+    /// substitution `--digest` exists to catch.
+    Absent { offered: String, at: u64 },
+}
+
+impl OnRecord {
+    /// The digest to measure the file against, taken from the ledger.
+    ///
+    /// Where the file is on the record this is the entry it matched, so the
+    /// audit records the comparison it actually made. Where it is not, it is
+    /// the answer the accused is offering, so the audit reports the mismatch
+    /// against the document the committee was told to expect. Neither is read
+    /// out of the file.
+    pub fn expected_digest(&self) -> Option<&str> {
+        match self {
+            Self::Unanswered => None,
+            Self::Offered { digest, .. } | Self::Superseded { digest, .. } => Some(digest),
+            Self::Absent { offered, .. } => Some(offered),
+        }
+    }
+
+    /// True only where the ledger commits the accused to these exact bytes.
+    pub fn is_on_record(&self) -> bool {
+        matches!(self, Self::Offered { .. } | Self::Superseded { .. })
+    }
+
+    /// One line, for a committee member reading the result rather than parsing
+    /// it. Says what the ledger establishes and stops there.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Unanswered => "nothing on the record: the accused has published no answer \
+                                 in this voting round, so no digest on the ledger commits \
+                                 them to this file or to any other"
+                .into(),
+            Self::Offered { at, .. } => {
+                format!(
+                    "on the record: the accused committed to these exact bytes at {at}, \
+                         while the vote was open, and this is the answer they are offering"
+                )
+            }
+            Self::Superseded { at, by, by_at, .. } => format!(
+                "superseded: the accused committed to these bytes at {at} and answered \
+                 over them at {by_at} with {by}. Both stand on the record; a committee \
+                 reads the last one as the answer"
+            ),
+            Self::Absent { offered, at } => format!(
+                "not on the record: the accused answered at {at} with {offered}, and these \
+                 are not those bytes. A file nobody committed to is a file that could have \
+                 been assembled after the votes came in"
+            ),
+        }
+    }
+}
+
+/// Place a document among the answers the accused put on the record.
+///
+/// `answers` is the voting round's list in the order the contract holds it,
+/// which is the order they were published in; the last is the one being
+/// offered. Digests are compared as bytes after normalising how they were
+/// written, because a leading `0x` or a capital letter is not a different file.
+pub fn locate_document(digest: &[u8; 32], answers: &[AnswerRef<'_>]) -> OnRecord {
+    let Some(offered) = answers.last() else {
+        return OnRecord::Unanswered;
+    };
+    let ours = hex::encode(digest);
+    let same = |a: &AnswerRef<'_>| {
+        a.digest
+            .trim()
+            .trim_start_matches("0x")
+            .to_ascii_lowercase()
+            == ours
+    };
+
+    if same(offered) {
+        return OnRecord::Offered {
+            digest: offered.digest.to_string(),
+            at: offered.at,
+        };
+    }
+    // Backwards: where a digest was published twice and answered over, the
+    // later of the two is the one a committee would have been looking at.
+    if let Some(earlier) = answers.iter().rev().skip(1).find(|a| same(a)) {
+        return OnRecord::Superseded {
+            digest: earlier.digest.to_string(),
+            at: earlier.at,
+            by: offered.digest.to_string(),
+            by_at: offered.at,
+        };
+    }
+    OnRecord::Absent {
+        offered: offered.digest.to_string(),
+        at: offered.at,
+    }
+}
+
 // -- the bundle, as untrusted input ------------------------------------------
 //
 // A separate set of types from the ones `replay` serialises, rather than
@@ -1475,5 +1616,148 @@ mod tests {
                 .aggregator,
             Some(crate::strkey::contract_id_bytes(strkey).unwrap())
         );
+    }
+
+    // -- where the file stands on the record --------------------------------
+
+    fn answer(digest: &str, at: u64) -> (String, u64) {
+        (digest.to_string(), at)
+    }
+
+    fn refs(answers: &[(String, u64)]) -> Vec<AnswerRef<'_>> {
+        answers
+            .iter()
+            .map(|(d, at)| AnswerRef { digest: d, at: *at })
+            .collect()
+    }
+
+    const D1: [u8; 32] = [0x11u8; 32];
+    const D2: [u8; 32] = [0x22u8; 32];
+    const D3: [u8; 32] = [0x33u8; 32];
+
+    /// The ordinary case: one answer, and the file in front of the committee
+    /// is it.
+    #[test]
+    fn a_file_the_accused_committed_to_is_the_answer_they_are_offering() {
+        let a = [answer(&hex::encode(D1), 900)];
+        let found = locate_document(&D1, &refs(&a));
+        assert_eq!(
+            found,
+            OnRecord::Offered {
+                digest: hex::encode(D1),
+                at: 900
+            }
+        );
+        assert!(found.is_on_record());
+        assert_eq!(found.expected_digest(), Some(hex::encode(D1).as_str()));
+    }
+
+    /// The case a single retyped `--digest` cannot express. An operator who
+    /// posted the wrong file and corrected themselves has two documents on the
+    /// record, and the earlier one is genuine rather than a substitution.
+    #[test]
+    fn a_corrected_answer_is_superseded_rather_than_a_substitution() {
+        let a = [answer(&hex::encode(D1), 900), answer(&hex::encode(D2), 950)];
+        let found = locate_document(&D1, &refs(&a));
+        assert_eq!(
+            found,
+            OnRecord::Superseded {
+                digest: hex::encode(D1),
+                at: 900,
+                by: hex::encode(D2),
+                by_at: 950,
+            }
+        );
+        assert!(found.is_on_record());
+        // Measured against itself, because that is the entry it matched. The
+        // audit should record a comparison that happened, not one against a
+        // document this file never claimed to be.
+        assert_eq!(found.expected_digest(), Some(hex::encode(D1).as_str()));
+        assert!(
+            found.summary().contains("superseded"),
+            "{}",
+            found.summary()
+        );
+    }
+
+    /// The substitution. Answers exist, and this file is none of them.
+    #[test]
+    fn a_file_nobody_committed_to_is_measured_against_the_one_they_did() {
+        let a = [answer(&hex::encode(D1), 900), answer(&hex::encode(D2), 950)];
+        let found = locate_document(&D3, &refs(&a));
+        assert_eq!(
+            found,
+            OnRecord::Absent {
+                offered: hex::encode(D2),
+                at: 950
+            }
+        );
+        assert!(!found.is_on_record());
+        // The offered answer, so the audit reports the mismatch against the
+        // document the committee was told to expect.
+        assert_eq!(found.expected_digest(), Some(hex::encode(D2).as_str()));
+    }
+
+    /// An unanswered dispute is not a finding against the file. There is
+    /// nothing to compare it to, and saying so is different from failing it.
+    #[test]
+    fn an_unanswered_dispute_binds_the_file_to_nothing() {
+        let found = locate_document(&D1, &[]);
+        assert_eq!(found, OnRecord::Unanswered);
+        assert!(!found.is_on_record());
+        assert_eq!(found.expected_digest(), None);
+    }
+
+    /// The ledger's hex is not a normalised form, and neither is what an
+    /// operator pastes. A leading `0x` or a capital letter is not a different
+    /// file, and reading it as one would be a substitution finding against an
+    /// honest answer.
+    #[test]
+    fn a_digest_is_the_same_digest_however_the_ledger_wrote_it() {
+        let a = [answer(
+            &format!("0x{}", hex::encode(D1).to_uppercase()),
+            900,
+        )];
+        assert!(locate_document(&D1, &refs(&a)).is_on_record());
+    }
+
+    /// Republishing the same digest leaves it the offered answer rather than
+    /// one it superseded. The scan runs backwards for exactly this.
+    #[test]
+    fn an_answer_republished_unchanged_is_still_the_one_being_offered() {
+        let a = [
+            answer(&hex::encode(D1), 900),
+            answer(&hex::encode(D2), 950),
+            answer(&hex::encode(D1), 990),
+        ];
+        assert_eq!(
+            locate_document(&D1, &refs(&a)),
+            OnRecord::Offered {
+                digest: hex::encode(D1),
+                at: 990
+            }
+        );
+    }
+
+    /// The standing feeds the audit, and the audit reports it as a document
+    /// comparison it made rather than as one it was asked about.
+    #[test]
+    fn the_record_supplies_the_standard_and_the_bundle_never_does() {
+        let raw = serde_json::to_vec(&serde_json::json!({})).unwrap();
+        let digest = sha256(&raw);
+
+        let a = [answer(&hex::encode(digest), 900)];
+        let standing = locate_document(&digest, &refs(&a));
+        let expect =
+            Expectations::parse(None, None, None, None, standing.expected_digest()).unwrap();
+        assert_eq!(expect.digest, Some(digest));
+
+        // And the mismatch case: the file's own digest is never what it is
+        // measured against.
+        let other = [answer(&hex::encode(D2), 950)];
+        let standing = locate_document(&digest, &refs(&other));
+        let expect =
+            Expectations::parse(None, None, None, None, standing.expected_digest()).unwrap();
+        assert_eq!(expect.digest, Some(D2));
     }
 }

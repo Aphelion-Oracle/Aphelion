@@ -675,18 +675,46 @@ If you sit on the committee, a vote is a decision about another operator's
 stake, so check their evidence rather than the summary attached to it:
 
 ```bash
-aphelion-node dispute show 7             # prints the line below, filled in
+aphelion-node dispute check 7 --file their-bundle.json     # or `-` for stdin
+```
+
+You are an operator, so your node already knows the deployment — and everything
+else comes off the ledger: the accused, the feed and the nonce from the dispute,
+and the digest from the answers on the record. Nothing is read out of the file.
+It grades `sound`, `unsupported`, `unrelated`, `misdescribed` or `unsigned` with
+the exit code to match (0, 1, 2, 2, 2), ignoring the bundle's own verdict and
+re-deriving everything from the signed payload. It sends nothing: reading an
+answer is not voting on it.
+
+Above the audit it prints two things the file cannot tell you. **Whose stake is
+at risk** — `registry.owner_of` on the accused key, which is the one question no
+bundle can settle; an allegation against a key the registry has never seen is an
+allegation against nobody's stake. And **where the file stands on the record**:
+
+| Standing | What it means |
+| --- | --- |
+| `offered` | They committed to these bytes while the vote was open, and this is the answer they are standing on |
+| `superseded` | They committed to these bytes and answered over them afterwards. Both are on the record; the last is the answer |
+| `absent` | They answered, and this is not what they answered with |
+| `unanswered` | Nothing on the record commits them to this file, or to any other |
+
+`superseded` is not a finding against them. Up to three answers are allowed in a
+voting round, they are kept oldest first, and an answer may be corrected but
+never erased — so a document that was answered over is still genuinely theirs,
+and the audit runs on it the same way.
+
+Where you have no node pointed at the deployment, the same judgement is one
+command with no configuration, no key, no database and no chain access at all,
+and `dispute show` prints it filled in:
+
+```bash
 aphelion-node verify-evidence their-bundle.json \
     --node <accused> --feed BTC_USD --nonce 4812 --aggregator C... \
     --digest <the answer on the record>
 ```
 
-It needs nothing from you but the file and those five — no configuration, no
-key, no database, no chain access. It ignores the bundle's own verdict and
-re-derives everything from the signed payload, and it grades `sound`,
-`unsupported`, `unrelated`, `misdescribed` or `unsigned` with the exit code to
-match (0, 1, 2, 2, 2). A mistyped flag exits 64 rather than 1, so a slip of
-yours is never read back as a finding against them.
+A mistyped flag exits 64 rather than 1, so a slip of yours is never read back as
+a finding against them.
 
 **`--digest` is the one to reach for first**, and it is the one flag that is
 not about the signed bytes. It is the SHA-256 the accused published with
@@ -699,11 +727,8 @@ still not be the file that was answered with — say, the same round with a venu
 added that helps their case. A `sound` verdict with `--digest` given is a much
 narrower claim than a `sound` verdict without it.
 
-Watch for more than one answer on the record. Up to three are allowed in a
-voting round and they are listed oldest first; the last is the one being
-offered, and the earlier ones are there because an answer may be corrected but
-not erased. A dispute with no answer at all says so in as many words, and what
-to make of that is yours to weigh.
+A dispute with no answer at all says so in as many words, and what to make of
+that is yours to weigh.
 
 **Type the rest off the dispute, not off the bundle.** They are checked against
 the signed bytes, and a file asked to supply the standard it is measured against
@@ -713,19 +738,22 @@ asking and being satisfied. The substitution they catch is the cheapest move
 available to an accused operator: replaying a round they reported honestly. It
 forges nothing, it reproduces, and on its own terms it is beyond reproach.
 
-Read what it says it cannot check as carefully as what it can. It cannot tell a
-bundle showing four venues from one showing four of six, where the two left out
-would have moved the median — only the operator holds the full table. And
-`--node` ties the evidence to the allegation, not the allegation to a person:
-that the key the dispute names belongs to the operator it is against is
-`registry.owner_of`, and no bundle can settle it.
+Read what it says it cannot check as carefully as what it can. Neither command
+can tell a bundle showing four venues from one showing four of six, where the
+two left out would have moved the median — only the operator holds the full
+table, and no arithmetic on what they chose to hand over closes that. The other
+limit is `verify-evidence`'s alone: `--node` ties the evidence to the
+allegation, not the allegation to a person, and it has no registry to ask.
+`dispute check` does, and prints the answer.
 
-Check the reporter's document the same way. `dispute show` prints its digest
-under `case`, fixed when the dispute was filed; if the case you were handed does
-not hash to that, it is not the case on the ledger and the accused has been
-answering something else. Where it is itself a bundle, the same
-`verify-evidence` line reads it, with `--digest` set to the `case` digest rather
-than to the answer's.
+Check the reporter's document too, and check it by hand. `dispute show` prints
+its digest under `case`, fixed when the dispute was filed; if the case you were
+handed does not hash to that, it is not the case on the ledger and the accused
+has been answering something else. `dispute check` will not do this one: it
+measures a file against the *answers*, and a reporter's case graded against
+those would read as `absent` no matter how genuine it is. Where the case is
+itself a bundle, the `verify-evidence` line above reads it, with `--digest` set
+to the `case` digest rather than to the answer's.
 
 ---
 

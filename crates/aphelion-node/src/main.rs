@@ -122,7 +122,7 @@ enum Command {
         cmd: BeaconCmd,
     },
 
-    /// Disputes: file, answer, vote, appeal, settle.
+    /// Disputes: file, answer, check, vote, appeal, settle.
     Dispute {
         #[command(subcommand)]
         cmd: DisputeCmd,

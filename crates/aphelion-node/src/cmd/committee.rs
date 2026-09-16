@@ -18,6 +18,7 @@
 //! printed on the failure path so the second is one line away from being
 //! ruled out.
 
+use std::io::Write;
 use std::sync::Arc;
 
 use aphelion_node::chain::committee::{
@@ -30,6 +31,9 @@ use aphelion_node::engine::verify;
 use aphelion_node::error::{NodeError, Result};
 use aphelion_node::signer::NodeSigner;
 use clap::Subcommand;
+use serde::Serialize;
+
+use crate::cmd::verify_evidence::{render_body, wrap};
 
 #[derive(Subcommand)]
 pub enum ElectionCmd {
@@ -108,6 +112,33 @@ pub enum DisputeCmd {
         /// Publish it. Without this the digest is printed and nothing is sent.
         #[arg(long)]
         commit: bool,
+    },
+    /// Check an answer against the dispute it answers, with the ledger
+    /// supplying the standard.
+    ///
+    /// The committee's counterpart to `respond`, and the one verifier that can
+    /// finish the job: `verify-evidence` needs the allegation typed at it
+    /// because it deliberately has no chain, and this has one. The accused, the
+    /// feed, the nonce and the digest the accused committed to are read off the
+    /// dispute; the deployment comes from this node's own configuration; and
+    /// `registry.owner_of` answers the one question no bundle can, which is
+    /// whose stake the allegation is actually against.
+    ///
+    /// Exits on the same scale as `verify-evidence`: 0 sound, 1 unsupported, 2
+    /// unrelated, misdescribed or unsigned.
+    Check {
+        /// The dispute this file is offered as an answer to. Everything the
+        /// file is measured against is read from it.
+        id: u64,
+        /// The file to check, or `-` for stdin. Read as bytes and never
+        /// re-serialised: the digest on the record is over the document as it
+        /// arrived.
+        #[arg(long)]
+        file: std::path::PathBuf,
+        /// Machine-readable output: the audit, plus what the ledger says about
+        /// the file and the allegation.
+        #[arg(long)]
+        json: bool,
     },
     /// Cast a committee vote.
     Vote {
@@ -590,7 +621,13 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                     "            aphelion-node dispute respond {id} --file evidence.json --commit"
                 );
             }
-            println!("check it  : aphelion-node verify-evidence <bundle> \\");
+            // Two ways to check it, and the first is the one to reach for.
+            // `dispute check` reads all five off the ledger; the flags below
+            // are for somebody who has no configuration pointed at this
+            // deployment, which is most of the people entitled to an opinion.
+            println!("check it  : aphelion-node dispute check {id} --file <bundle>");
+            println!("or, with no node of your own:");
+            println!("            aphelion-node verify-evidence <bundle> \\");
             println!(
                 "              --node {} --feed {} --nonce {} --aggregator {}{}",
                 d.accused,
@@ -742,6 +779,85 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             Ok(())
         }
 
+        DisputeCmd::Check { id, file, json } => {
+            let Some(d) = ctx.committee.dispute(id).await? else {
+                return Err(NodeError::Config(format!("no dispute {id}")));
+            };
+
+            // Bytes, and never re-serialised. Everything below turns on the
+            // file being the file: a copy this command normalised on the way in
+            // would have a different digest from the one on the ledger, and the
+            // difference would be reported against the accused.
+            let raw = read_document(&file)?;
+            let digest = verify::sha256(&raw);
+
+            // The standard comes off the ledger, in full. `verify-evidence`
+            // asks for these to be typed because it has no chain to read them
+            // from, and the typing is what makes them worth something there;
+            // here the chain is the same source the committee is judging on,
+            // and reading them is strictly better than retyping them.
+            let answers = ctx.committee.responses(id, d.vote_round).await?;
+            let refs: Vec<verify::AnswerRef<'_>> = answers
+                .iter()
+                .map(|a| verify::AnswerRef {
+                    digest: &a.digest,
+                    at: a.at,
+                })
+                .collect();
+            let standing = verify::locate_document(&digest, &refs);
+
+            let expect = verify::Expectations::parse(
+                Some(&d.accused),
+                Some(&d.feed),
+                Some(d.nonce),
+                Some(&config.network.aggregator_contract),
+                standing.expected_digest(),
+            )
+            .map_err(NodeError::Config)?;
+
+            let audit = verify::verify_document(&raw, &expect).map_err(|e| {
+                NodeError::Other(anyhow::anyhow!(
+                    "this is not an Aphelion evidence bundle: {e}. A bundle is the output \
+                     of `aphelion-node replay <feed> <nonce> --json`. An answer that is \
+                     not one — a written account, a log archive — is a legitimate answer \
+                     that nothing here can grade, and its digest is on the record either \
+                     way."
+                ))
+            })?;
+
+            // The question `verify-evidence` prints and cannot answer: the
+            // allegation names a key, and what binds a key to a person is the
+            // registry. This command has one.
+            let owner = ctx.committee.owner_of(&d.accused).await?;
+
+            if json {
+                let report = CheckReport {
+                    dispute: d.id,
+                    accused: &d.accused,
+                    owner: owner.as_deref(),
+                    feed: &d.feed,
+                    nonce: d.nonce,
+                    vote_round: d.vote_round,
+                    status: d.status,
+                    standing: &standing,
+                    audit: &audit,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .map_err(|e| NodeError::Other(e.into()))?
+                );
+            } else {
+                render_check(&d, owner.as_deref(), &standing, &audit);
+            }
+
+            std::io::stdout().flush().ok();
+            // The same scale as `verify-evidence`, because a script that reads
+            // one should read the other. Nothing about the dispute's own state
+            // moves it: this is a judgement on a document.
+            std::process::exit(audit.verdict.exit_code());
+        }
+
         DisputeCmd::Vote {
             id,
             uphold,
@@ -812,6 +928,96 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
     }
 }
 
+/// A checked answer, for something other than a person to read.
+///
+/// The allegation, whose stake it falls on, where the ledger puts the file, and
+/// the audit — in that order, because the audit is worth nothing until the
+/// first three say what it was an audit of.
+#[derive(Serialize)]
+struct CheckReport<'a> {
+    dispute: u64,
+    accused: &'a str,
+    /// `registry.owner_of` the accused. `None` where the registry has never
+    /// seen the key, which is a fact about the allegation rather than about the
+    /// file.
+    owner: Option<&'a str>,
+    feed: &'a str,
+    nonce: u64,
+    vote_round: u32,
+    status: DisputeStatus,
+    standing: &'a verify::OnRecord,
+    audit: &'a verify::Audit,
+}
+
+/// Read a document from a path or from stdin, as bytes.
+fn read_document(path: &std::path::Path) -> Result<Vec<u8>> {
+    if path == std::path::Path::new("-") {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .map_err(|e| NodeError::Config(format!("cannot read the answer from stdin: {e}")))?;
+        return Ok(buf);
+    }
+    std::fs::read(path)
+        .map_err(|e| NodeError::Config(format!("cannot read `{}`: {e}", path.display())))
+}
+
+/// The allegation first, then the file, then the audit.
+///
+/// The order is the argument. A committee member who reads the verdict before
+/// they read what it was a verdict about has learned that some bundle is sound,
+/// which is the one thing an evidence bundle can always be made to be.
+fn render_check(
+    d: &DisputeRecord,
+    owner: Option<&str>,
+    standing: &verify::OnRecord,
+    audit: &verify::Audit,
+) {
+    println!("Allegation (from the ledger, not from the file)");
+    println!("  dispute     {}", d.id);
+    println!("  accused     {}", d.accused);
+    match owner {
+        Some(o) => println!("  stake of    {o}"),
+        // Worth saying loudly. An allegation against a key the registry does
+        // not know is an allegation against nobody's stake, and no verdict on
+        // any document changes that.
+        None => {
+            println!("  stake of    the registry does not know this key —");
+            println!("              this allegation is against no registered node");
+        }
+    }
+    println!("  allegation  {} nonce {}", d.feed, d.nonce);
+    println!("  reporter    {}", d.reporter);
+    println!("  case        {}", d.evidence_digest);
+    println!("  vote round  {}", d.vote_round);
+    println!();
+
+    println!("The file");
+    if let Some(dig) = &audit.document_digest {
+        println!("  sha256      {dig}");
+    }
+    println!("  record      {}", wrap(&standing.summary(), 14));
+    println!();
+
+    render_body(audit);
+
+    println!();
+    // One question is answered here that `verify-evidence` can only print: the
+    // registry was read above. What is left is the one nobody can answer from
+    // outside the accused's own records.
+    println!(
+        "{}",
+        wrap(
+            "Still to establish elsewhere, and not by any arithmetic: whether an \
+             observation was left out. Four venues that agree look the same as four of \
+             six whose absent two would have moved the median, and only the operator \
+             holds the full table.",
+            0
+        )
+    );
+}
+
 fn describe_status(d: &DisputeRecord, now: u64) -> String {
     match d.status {
         // "voting" and "awaiting a result nobody recorded" are different
@@ -840,6 +1046,55 @@ fn normalise_key(s: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
+
+    /// Just enough of a parser to hand `DisputeCmd` a command line.
+    #[derive(Parser)]
+    struct Cli {
+        #[command(subcommand)]
+        cmd: DisputeCmd,
+    }
+
+    fn parse(line: &str) -> std::result::Result<DisputeCmd, clap::Error> {
+        Cli::try_parse_from(std::iter::once("dispute").chain(line.split_whitespace()))
+            .map(|c| c.cmd)
+    }
+
+    /// The other end of the pin in `engine::duty`. That test asserts the duty
+    /// prints `--file`; this one asserts the binary accepts it and rejects the
+    /// name it used to be printed under, which shipped as a command an operator
+    /// could not run.
+    #[test]
+    fn the_command_a_duty_prints_is_a_command_this_binary_accepts() {
+        assert!(matches!(
+            parse("respond 1 --file evidence.json --commit").unwrap(),
+            DisputeCmd::Respond {
+                id: 1,
+                commit: true,
+                ..
+            }
+        ));
+        assert!(parse("respond 1 --bundle evidence.json --commit").is_err());
+    }
+
+    /// Checking an answer is not a write, so it has no `--commit` and must not
+    /// grow one: a committee member who reads a bundle has not voted, and a
+    /// flag that looked like assent would be the one mistake this command can
+    /// make that costs somebody their stake.
+    #[test]
+    fn checking_an_answer_sends_nothing() {
+        assert!(matches!(
+            parse("check 7 --file evidence.json").unwrap(),
+            DisputeCmd::Check {
+                id: 7,
+                json: false,
+                ..
+            }
+        ));
+        assert!(parse("check 7 --file evidence.json --commit").is_err());
+        // The file is the whole input; there is nothing to check without one.
+        assert!(parse("check 7").is_err());
+    }
 
     #[test]
     fn a_key_is_accepted_however_it_was_pasted() {

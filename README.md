@@ -332,7 +332,7 @@ repository, not the target architecture.
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 12 |
-| Dispute evidence — replay a round, put the answer on the record, and check a replay somebody else produced | ✅ Implemented | 59 |
+| Dispute evidence — replay a round, put the answer on the record, and check a replay against the record it was answered with | ✅ Implemented | 69 |
 | Operator status page — five reads, one verdict, an exit code | ✅ Implemented | 17 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
@@ -341,33 +341,33 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-636 tests in total: 331 off-chain (`cargo test --workspace`), 265 against the
+648 tests in total: 343 off-chain (`cargo test --workspace`), 265 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 331 are: 38 in `aphelion-core`, 229 in the node's library, 5 in
+The off-chain 343 are: 38 in `aphelion-core`, 236 in the node's library, 7 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 229 — 15 in the harness, and 44 across the
-four integration suites (duties 12, evidence 11, multi-node 10, sweep 11).
+target, so they are *not* inside the 236 — 15 in the harness, and 47 across the
+four integration suites (duties 12, evidence 14, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
 because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 229. Committee participation is the same shape: its 12 cover assembling a
+node's 236. Committee participation is the same shape: its 12 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 27 more
-unit tests with 8 on decoding what the contract returns, all inside the 229 —
-with the 5 command tests in the binary target beside it. The dispute evidence
-pair is split the same way again: 11 integration tests run the real `replay`
+unit tests with 8 on decoding what the contract returns, all inside the 236 —
+with the 7 command tests in the binary target beside it. The dispute evidence
+pair is split the same way again: 14 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 28 more unit tests inside the 229. The harness's 15 are 12
+itself has 35 more unit tests inside the 236. The harness's 15 are 12
 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 319 tests and reported 331. The skip prints a `SKIP`
+with no Postgres has run 331 tests and reported 343. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -645,7 +645,7 @@ docker compose logs -f node
 | `duties [--json]` | What the slashing contract is waiting on from this operator, and by when |
 | `beacon status \| tick \| open \| commit \| reveal \| finalize` | The randomness beacon, and what this node owes it |
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
-| `dispute list \| show \| open \| respond \| vote \| resolve \| appeal \| settle` | Disputes |
+| `dispute list \| show \| open \| respond \| check \| vote \| resolve \| appeal \| settle` | Disputes. `check <id> --file <path>` is `verify-evidence` with the allegation and the answer's digest read off the ledger instead of typed, and the accused's owner read off the registry |
 | `replay <feed> <nonce> [--json]` | Rebuild a published round from the observations retained underneath it, and check the signature stored beside it |
 | `verify-evidence <path\|-> [--node --feed --nonce --aggregator --digest] [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. The flags are the allegation, read off `dispute show`, and bind the bundle to it; `--digest` binds it to the answer the accused put on the ledger. Needs no configuration, key, database or chain |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
@@ -1659,6 +1659,54 @@ to a person: that the key the dispute names belongs to the operator it is agains
 is `registry.owner_of`, and no bundle can settle it. The command prints whichever
 of the two is still outstanding rather than leaving it to be remembered.
 
+#### With a ledger to hand
+
+Having no chain is what makes `verify-evidence` runnable by anyone, and the five
+flags are what it costs. An operator who already runs a node against the
+deployment — which is every elected committee member — does not have to pay it:
+
+```bash
+aphelion-node dispute check 7 --file evidence.json    # or `-` for stdin
+```
+
+It reads the standard off the ledger rather than off a terminal: the accused,
+the feed and the nonce from the dispute record, the digest from
+`slashing.responses`, and the deployment from the node's own configuration.
+Nothing is read out of the file, which is the property the typed flags were
+protecting — the chain is simply a better source for it than a committee
+member's hands, and it is the source the vote will be recorded on.
+
+Reading the *answers* rather than one digest also settles a case a single
+`--digest` grades wrongly. An answer may be corrected: the contract keeps every
+digest published in the voting round, in order, and the last is the one being
+offered. A member who checked the earlier file against the latest digest would
+be told `unrelated` — a finding against an operator for correcting themselves in
+public. So the file is placed among the answers first, and the audit is bound to
+the entry it matched:
+
+| Standing | What the ledger establishes |
+| --- | --- |
+| `offered` | The accused committed to these bytes while the vote was open, and this is the answer they are standing on |
+| `superseded` | They committed to these bytes and answered over them afterwards. Both stand on the record; the last is the answer |
+| `absent` | They answered, and this is not what they answered with — the substitution `--digest` exists to catch |
+| `unanswered` | Nothing on the record commits them to this file, or to any other |
+
+A standing is not a verdict. `superseded` says the document is genuinely theirs
+and no longer the one offered; whether it is worth anything is still the audit's
+question, and the audit runs either way.
+
+This also closes the gap `verify-evidence` can only print. `--node` binds
+evidence to an allegation; `registry.owner_of` binds an allegation to an
+operator, and this command has a registry to ask — so it prints whose stake the
+dispute is against before it prints anything about the file. An allegation
+against a key the registry has never seen is an allegation against nobody's
+stake, and that is worth knowing before reading the evidence rather than after.
+
+The grades and the exit codes are the same as `verify-evidence`'s, so a script
+that reads one reads the other. It writes nothing and has no `--commit`:
+reading an answer is not voting on it, and the two stay separate commands for
+the same reason nothing else here is automatic.
+
 ### Who is on the committee
 
 The committee is elected by the operators, weighted by the same `weight_of`
@@ -1758,6 +1806,7 @@ Acting on one is always a separate command, run on purpose:
 | `dispute list` / `dispute show <id>` | The allegation, the case's locator and digest, the answers on the record, the votes and the clock |
 | `dispute open <accused> <feed> <nonce> --file <path> [--uri <url>] --commit` | File, posting the bond and pinning the case by its digest. The nonce the accused signed, which `SubmissionAccepted` carries alongside the round id |
 | `dispute respond <id> --file <path> --commit` | Answer an allegation against this node: publish the digest of the evidence while the vote is open |
+| `dispute check <id> --file <path>` | Check an answer against the dispute it answers, with the allegation, the digest and the deployment read off the ledger rather than typed |
 | `dispute vote <id> --uphold\|--dismiss` | A committee vote |
 | `dispute resolve <id>` | Record the outcome once voting has closed |
 | `dispute appeal <id> --commit` | Contest a resolved dispute, posting the larger bond |
@@ -1793,7 +1842,7 @@ refusal repeats it.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · a disputed round replayable from its inputs, the answer on the ledger rather than in the post, and the bundle checkable by the other side ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · a disputed round replayable from its inputs, the answer on the ledger rather than in the post, and the bundle checkable by the other side against the ledger's own record of it ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · a randomness beacon ✅ (contract and node-side participation) · non-price data · parameter governance ✅ |
 
