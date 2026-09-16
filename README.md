@@ -332,7 +332,7 @@ repository, not the target architecture.
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 12 |
-| Dispute evidence — replay a round, put the answer on the record, and check a replay against the record it was answered with | ✅ Implemented | 69 |
+| Dispute evidence — replay a round, put the answer on the record, and check a document against either side of the record it was filed or answered with | ✅ Implemented | 84 |
 | Operator status page — five reads, one verdict, an exit code | ✅ Implemented | 17 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
@@ -341,33 +341,34 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-648 tests in total: 343 off-chain (`cargo test --workspace`), 265 against the
+664 tests in total: 359 off-chain (`cargo test --workspace`), 265 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 343 are: 38 in `aphelion-core`, 236 in the node's library, 7 in
+The off-chain 359 are: 38 in `aphelion-core`, 244 in the node's library, 8 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 236 — 15 in the harness, and 47 across the
-four integration suites (duties 12, evidence 14, multi-node 10, sweep 11).
+target, so they are *not* inside the 244 — 15 in the harness, and 54 across the
+four integration suites (duties 12, evidence 21, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
 because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 236. Committee participation is the same shape: its 12 cover assembling a
+node's 244. Committee participation is the same shape: its 12 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 27 more
-unit tests with 8 on decoding what the contract returns, all inside the 236 —
-with the 7 command tests in the binary target beside it. The dispute evidence
-pair is split the same way again: 14 integration tests run the real `replay`
+unit tests with 8 on decoding what the contract returns, all inside the 244 —
+with the 8 command tests in the binary target beside it. The dispute evidence
+pair is split the same way again: 21 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 35 more unit tests inside the 236. The harness's 15 are 12
-process-level tests plus 3 covering the fake CLI's argument parsing.
+itself has 43 more unit tests inside the 244, with 20 on the replay that
+produces what they judge. The harness's 15 are 12 process-level tests plus 3
+covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 331 tests and reported 343. The skip prints a `SKIP`
+with no Postgres has run 347 tests and reported 359. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -645,9 +646,9 @@ docker compose logs -f node
 | `duties [--json]` | What the slashing contract is waiting on from this operator, and by when |
 | `beacon status \| tick \| open \| commit \| reveal \| finalize` | The randomness beacon, and what this node owes it |
 | `election show \| open \| nominate \| ballot \| finalize` | The committee's elections |
-| `dispute list \| show \| open \| respond \| check \| vote \| resolve \| appeal \| settle` | Disputes. `check <id> --file <path>` is `verify-evidence` with the allegation and the answer's digest read off the ledger instead of typed, and the accused's owner read off the registry |
+| `dispute list \| show \| open \| respond \| check \| vote \| resolve \| appeal \| settle` | Disputes. `check <id> --file <path>` is `verify-evidence` with the allegation read off the ledger instead of typed, the digest taken from whichever commitment — the reporter's case or the accused's answer — is to those bytes, and both the accused's owner and the signing key's read off the registry |
 | `replay <feed> <nonce> [--json]` | Rebuild a published round from the observations retained underneath it, and check the signature stored beside it |
-| `verify-evidence <path\|-> [--node --feed --nonce --aggregator --digest] [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. The flags are the allegation, read off `dispute show`, and bind the bundle to it; `--digest` binds it to the answer the accused put on the ledger. Needs no configuration, key, database or chain |
+| `verify-evidence <path\|-> [--node --feed --nonce --aggregator --digest] [--json]` | Check a bundle somebody else produced, trusting nothing in it but the signed bytes. The flags are the allegation, read off `dispute show`, and bind the bundle to it; `--digest` binds it to a document on the ledger — the accused's answer, or the case, in which case leave `--node` off. Needs no configuration, key, database or chain |
 | `sign <feed> <price> <ts> [conf] [nonce]` | Reproduce the exact bytes and signature for a submission |
 | `migrate` | Apply database migrations and exit |
 | `show-config` | Print the effective configuration after environment overrides |
@@ -1681,19 +1682,45 @@ Reading the *answers* rather than one digest also settles a case a single
 digest published in the voting round, in order, and the last is the one being
 offered. A member who checked the earlier file against the latest digest would
 be told `unrelated` — a finding against an operator for correcting themselves in
-public. So the file is placed among the answers first, and the audit is bound to
-the entry it matched:
+public. So the file is placed on the record first, and the audit is bound to the
+entry it matched.
+
+There are two sides to that record, because a dispute has two parties and the
+ledger holds a commitment from each: the reporter's case, fixed at filing, and
+the accused's answers, appended while the vote is open.
 
 | Standing | What the ledger establishes |
 | --- | --- |
+| `case` | These are the bytes the allegation was filed on, pinned when the dispute was opened and unchangeable since |
 | `offered` | The accused committed to these bytes while the vote was open, and this is the answer they are standing on |
 | `superseded` | They committed to these bytes and answered over them afterwards. Both stand on the record; the last is the answer |
 | `absent` | They answered, and this is not what they answered with — the substitution `--digest` exists to catch |
-| `unanswered` | Nothing on the record commits them to this file, or to any other |
+| `unanswered` | Nothing on the accused's side of the record commits them to this file, or to any other |
 
 A standing is not a verdict. `superseded` says the document is genuinely theirs
 and no longer the one offered; whether it is worth anything is still the audit's
 question, and the audit runs either way.
+
+Placing a file against the answers alone gets the other document in every
+dispute badly wrong. The reporter's case is not among the answers and never will
+be, so it grades `absent` — "a file nobody committed to", said about the
+document that opened the case. The ledger commits to it harder than to anything
+the accused has published, because a case can never be answered over.
+
+Which side the file is on decides one thing about the standard, and it is the
+accused's key. An answer is held to it, since an answer that does not carry the
+accused's own signature answers nothing. A case is not: the ordinary allegation
+is a second operator's node reporting what it saw, and a reporter required to
+produce the accused's signature could only ever file the case the accused had
+already signed for them. So whose key signed the file is read off the registry
+and printed rather than assumed:
+
+| Signed by | What it is |
+| --- | --- |
+| the accused | The strongest allegation there is, and the only one needing no second opinion: a payload nobody but the accused could have produced |
+| the reporter's node | One operator's word that their node saw something else. Evidence, and not by itself a finding |
+| a third operator's node | Corroboration, on the same terms as the reporter's own |
+| an unregistered key | A genuine signature with no stake in this network behind it |
 
 This also closes the gap `verify-evidence` can only print. `--node` binds
 evidence to an allegation; `registry.owner_of` binds an allegation to an
@@ -1703,9 +1730,23 @@ against a key the registry has never seen is an allegation against nobody's
 stake, and that is worth knowing before reading the evidence rather than after.
 
 The grades and the exit codes are the same as `verify-evidence`'s, so a script
-that reads one reads the other. It writes nothing and has no `--commit`:
-reading an answer is not voting on it, and the two stay separate commands for
-the same reason nothing else here is automatic.
+that reads one reads the other, with one addition at the far end of the scale. A
+document that is not an evidence bundle — a written account, a log archive, an
+exchange's own export — is legitimate on either side of a dispute and commoner
+on the reporter's. It is placed on the record and left ungraded, and the command
+exits 65 rather than 1: `unsupported` is a finding, and an operator who answered
+in prose has not earned one.
+
+The record has one edge it reports rather than papers over. A file that is
+neither the case nor an answer, in a dispute nobody has answered yet, is measured
+against nothing. A bundle the accused hands a member privately before publishing
+and a case the reporter swapped after filing are the same object to the ledger,
+and reaching for the case digest there would grade the first as a substitution
+for showing its working early.
+
+It writes nothing and has no `--commit`: reading a document is not voting on it,
+and the two stay separate commands for the same reason nothing else here is
+automatic.
 
 ### Who is on the committee
 
@@ -1803,10 +1844,10 @@ Acting on one is always a separate command, run on purpose:
 
 | Command | What it does |
 | --- | --- |
-| `dispute list` / `dispute show <id>` | The allegation, the case's locator and digest, the answers on the record, the votes and the clock |
+| `dispute list` / `dispute show <id>` | The allegation, the case's locator and digest, the answers on the record, the votes and the clock — with the one command that checks a file against any of them |
 | `dispute open <accused> <feed> <nonce> --file <path> [--uri <url>] --commit` | File, posting the bond and pinning the case by its digest. The nonce the accused signed, which `SubmissionAccepted` carries alongside the round id |
 | `dispute respond <id> --file <path> --commit` | Answer an allegation against this node: publish the digest of the evidence while the vote is open |
-| `dispute check <id> --file <path>` | Check an answer against the dispute it answers, with the allegation, the digest and the deployment read off the ledger rather than typed |
+| `dispute check <id> --file <path>` | Check a document against the dispute it belongs to — either side of the record — with the allegation, the digest, the deployment and both keys' owners read off the ledger rather than typed |
 | `dispute vote <id> --uphold\|--dismiss` | A committee vote |
 | `dispute resolve <id>` | Record the outcome once voting has closed |
 | `dispute appeal <id> --commit` | Contest a resolved dispute, posting the larger bond |
@@ -1842,7 +1883,7 @@ refusal repeats it.
 | --- | --- |
 | **1 — Foundation** ✅ | Core math and signing payload · node service · registry contract · aggregator contract |
 | **2 — Integration** *(current)* | Slashing contract ✅ · consumer-example ✅ · on-chain Byzantine simulation ✅ · multi-process harness ✅ · deployment verification ✅ · testnet deployment |
-| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · a disputed round replayable from its inputs, the answer on the ledger rather than in the post, and the bundle checkable by the other side against the ledger's own record of it ✅ · external review |
+| **3 — Hardening** | Governance timelock over every admin action ✅ · Grafana dashboards ✅ · a dispute committee elected rather than appointed ✅ · absence sweeps performed rather than merely permitted ✅ · disputes and elections an operator can actually reach ✅ · a status page that answers whether a node is doing its job ✅ · a disputed round replayable from its inputs, the answer on the ledger rather than in the post, and either party's document checkable by the other side against the ledger's own record of it ✅ · external review |
 | **4 — Launch** | Mainnet deployment with conservative parameters · recruit independent operators · first dApp integrations |
 | **5 — Expansion** | Additional feeds · a randomness beacon ✅ (contract and node-side participation) · non-price data · parameter governance ✅ |
 

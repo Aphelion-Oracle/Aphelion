@@ -14,8 +14,13 @@
 //! `--digest` is the odd one and the one a committee should reach for first. The
 //! other four are compared against the signed payload; this one is compared
 //! against the file's own bytes, and it answers a question the payload cannot:
-//! whether this is the document the accused committed to on the ledger while
-//! the vote was open, or one that arrived afterwards.
+//! whether this is a document somebody committed to on the ledger, or one that
+//! arrived afterwards. Either commitment goes in it — the accused's answer from
+//! `slashing.responses`, or the case digest the dispute was filed on — and for
+//! a case the accused's key is deliberately left off `--node`, because a
+//! reporter's document is normally signed by the reporter's own node. `dispute
+//! check` picks between the two off the ledger; here it is the caller's to
+//! choose, and `dispute show` prints both.
 //!
 //! The judgement is [`aphelion_node::engine::verify`]. What is here is reading a
 //! file, turning five flags into [`Expectations`], and printing the result.
@@ -33,8 +38,9 @@ pub struct Against {
     pub feed: Option<String>,
     pub nonce: Option<u64>,
     pub aggregator: Option<String>,
-    /// SHA-256 of the answer the accused put on the record, from
-    /// `slashing.responses` — `dispute show` prints it.
+    /// SHA-256 of a document on the record: the accused's answer from
+    /// `slashing.responses`, or the reporter's case. `dispute show` prints
+    /// both.
     pub digest: Option<String>,
 }
 
@@ -121,10 +127,13 @@ fn render(a: &Audit) {
                  bytes here."
             }
             Some(_) => {
-                "Still to establish elsewhere: that the key the allegation names is the \
-                 key of the operator it is against. That is `registry.owner_of`, and no \
-                 bundle can settle it. `aphelion-node dispute check <id> --file <bundle>` \
-                 reads both off the ledger for an operator who has one configured."
+                "Still to establish elsewhere: whose keys these are — the one the \
+                 allegation names, and the one that signed this file, which on a \
+                 reporter's document is usually not the same key. That is \
+                 `registry.owner_of`, and no bundle can settle it. `aphelion-node \
+                 dispute check <id> --file <document>` reads it, and which side of the \
+                 record the file is on, off the ledger for an operator who has a node \
+                 configured."
             }
         };
         println!("{}", wrap(remaining, 0));

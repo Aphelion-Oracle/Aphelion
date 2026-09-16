@@ -194,10 +194,12 @@ pub struct Expectations {
     pub nonce: Option<u64>,
     /// The deployment. A bundle from another network is sound and irrelevant.
     pub aggregator: Option<[u8; 32]>,
-    /// What the accused put on the record as their answer, from
-    /// `slashing.responses`. Unlike the four above this is a fact about the
-    /// document rather than about what it says, so it is checked against the
-    /// file's bytes rather than against the signed payload.
+    /// The commitment on the ledger these bytes are being measured against:
+    /// an answer from `slashing.responses`, or the case digest the dispute was
+    /// filed on. Unlike the four above this is a fact about the document rather
+    /// than about what it says, so it is checked against the file's bytes
+    /// rather than against the signed payload. [`Standing::expected_digest`]
+    /// picks which of the two it is.
     pub digest: Option<[u8; 32]>,
 }
 
@@ -403,6 +405,243 @@ pub fn locate_document(digest: &[u8; 32], answers: &[AnswerRef<'_>]) -> OnRecord
     OnRecord::Absent {
         offered: offered.digest.to_string(),
         at: offered.at,
+    }
+}
+
+// -- the other side of the record --------------------------------------------
+
+/// The allegation's own commitment, as the dispute record holds it.
+///
+/// The one digest in a dispute that cannot be corrected. It is fixed when the
+/// case is filed, before anybody has answered and before the reporter can know
+/// how a vote is going, which is what makes it something an answer can be a
+/// reply to rather than a target that moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaseRef<'a> {
+    /// SHA-256 of the document the allegation rests on, in hex, as the ledger
+    /// holds it.
+    pub digest: &'a str,
+    /// Ledger time the dispute was opened at. There is no later time to give:
+    /// the reporter commits once.
+    pub filed_at: u64,
+}
+
+/// Where a document stands against the reporter's commitment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "case", rename_all = "snake_case")]
+pub enum OnCase {
+    /// These bytes are the document the allegation was filed on.
+    Filed { digest: String, at: u64 },
+    /// They are not: the reporter pinned something else when they opened the
+    /// dispute.
+    Other { filed: String, at: u64 },
+}
+
+/// Where a document stands on a dispute's record — on both sides of it.
+///
+/// A dispute has two parties and the ledger holds a commitment from each: the
+/// reporter's case, fixed at filing, and the accused's answers, appended while
+/// the vote is open. A file handed to a committee member is one of those two,
+/// or neither, and which it is decides what it is worth measuring against.
+///
+/// Reading only the answers gets the commonest file in a dispute badly wrong.
+/// The reporter's own document is not among them and never will be, so
+/// [`locate_document`] alone places it as `absent` — "a file nobody committed
+/// to", which is the description of a substitution, said about the document
+/// that opened the case. The ledger does commit to it. It commits to it harder
+/// than it commits to anything the accused published, because a case cannot be
+/// answered over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Standing {
+    pub case: OnCase,
+    pub answers: OnRecord,
+}
+
+impl Standing {
+    /// True where these bytes are the document the allegation was filed on.
+    pub fn is_case(&self) -> bool {
+        matches!(self.case, OnCase::Filed { .. })
+    }
+
+    /// True where either party's commitment is to these exact bytes.
+    pub fn is_on_record(&self) -> bool {
+        self.is_case() || self.answers.is_on_record()
+    }
+
+    /// The digest to measure the file against, taken from the ledger.
+    ///
+    /// The case wins where the file is both, and the tie is not arbitrary: the
+    /// case digest was fixed before anyone had answered anything, so it is the
+    /// one commitment in a dispute that cannot have been chosen in response to
+    /// the file. Where the file is neither, this is whatever
+    /// [`OnRecord::expected_digest`] offers, which is the answer the accused is
+    /// standing behind.
+    pub fn expected_digest(&self) -> Option<&str> {
+        match &self.case {
+            OnCase::Filed { digest, .. } => Some(digest),
+            OnCase::Other { .. } => self.answers.expected_digest(),
+        }
+    }
+
+    /// Whether the accused's key is part of the standard this file is held to.
+    ///
+    /// It is, for a document offered as an answer: an answer that does not
+    /// carry the accused's own signature answers nothing. It is not, for the
+    /// case — see [`Signatory`] for what a reporter's document is allowed to
+    /// be signed by, which is very nearly anything.
+    pub fn binds_to_accused(&self) -> bool {
+        !self.is_case()
+    }
+
+    /// One line, for a committee member reading the result rather than parsing
+    /// it. Says what the ledger establishes and stops there.
+    pub fn summary(&self) -> String {
+        match (&self.case, &self.answers) {
+            (OnCase::Filed { at, .. }, OnRecord::Unanswered) => format!(
+                "the case: these are the bytes the allegation was filed on, pinned at \
+                 {at} when the dispute was opened and unchangeable since. The accused \
+                 has published no answer in this voting round"
+            ),
+            (
+                OnCase::Filed { at, .. },
+                OnRecord::Absent {
+                    offered,
+                    at: replied,
+                },
+            ) => format!(
+                "the case: these are the bytes the allegation was filed on, pinned at \
+                 {at} and unchangeable since. The accused answered at {replied} with \
+                 {offered}, which is a different document — as it should be, since the \
+                 answer is a reply to this one"
+            ),
+            // Both. Rare, and worth naming rather than flattening into either:
+            // an accused who answers with the reporter's own file is not
+            // offering a document of their own, and a committee weighing "the
+            // answer" should know it is weighing the case again.
+            (OnCase::Filed { at, .. }, answers) => format!(
+                "the case and the answer both: these are the bytes the allegation was \
+                 filed on at {at}, and the accused has answered with the same file \
+                 rather than one of their own. {}",
+                answers.summary()
+            ),
+            (OnCase::Other { filed, .. }, answers) => format!(
+                "{}. Nor are these the bytes the allegation was filed on, which are \
+                 {filed} — so neither side of the record commits to this file",
+                answers.summary()
+            ),
+        }
+    }
+}
+
+/// Place a document on both sides of a dispute's record.
+///
+/// `answers` is the voting round's list in the order the contract holds it; see
+/// [`locate_document`], which this defers to for that half. Nothing here is
+/// read out of the document but its bytes.
+pub fn place(document: &[u8; 32], case: CaseRef<'_>, answers: &[AnswerRef<'_>]) -> Standing {
+    let ours = hex::encode(document);
+    let filed = case
+        .digest
+        .trim()
+        .trim_start_matches("0x")
+        .to_ascii_lowercase();
+    Standing {
+        case: if filed == ours {
+            OnCase::Filed {
+                digest: case.digest.to_string(),
+                at: case.filed_at,
+            }
+        } else {
+            OnCase::Other {
+                filed: case.digest.to_string(),
+                at: case.filed_at,
+            }
+        },
+        answers: locate_document(document, answers),
+    }
+}
+
+// -- whose key signed it -----------------------------------------------------
+
+/// Whose key signed a document offered in a dispute.
+///
+/// A committee member needs this before they read a verdict, and it is not in
+/// the document's gift to answer: a bundle names a key, and what binds a key to
+/// a party is the dispute record and `registry.owner_of`.
+///
+/// It is not a grade, and none of the four is a defect. All of them are
+/// legitimate on the reporter's side of a case, and the difference between them
+/// is the difference between the kinds of allegation that can be made — which
+/// is why the accused's key is required of an answer and not of a case. An
+/// answer that does not carry the accused's signature answers nothing. A case
+/// that does not carry it is the ordinary shape of a case: one operator saying
+/// their node saw something else.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "signatory", rename_all = "snake_case")]
+pub enum Signatory {
+    /// The accused's own key. The strongest shape an allegation takes and the
+    /// only one that needs no second opinion: whoever holds this holds a
+    /// payload nobody but the accused could have produced.
+    Accused { key: String },
+    /// A node the registry says the reporter owns: the reporter's own node,
+    /// saying what it saw.
+    Reporter { key: String, owner: String },
+    /// A registered node belonging to neither party to the dispute.
+    Bystander { key: String, owner: String },
+    /// A key the registry has never seen. The signature is real and no stake
+    /// stands behind it.
+    Unregistered { key: String },
+}
+
+impl Signatory {
+    /// One line, in the same register as [`Standing::summary`]: what the
+    /// ledger establishes about the key, and nothing about the case.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Accused { key } => format!(
+                "{key} — the accused's own key. Whatever else this document is worth, \
+                 the payload in it is one only the accused could have signed"
+            ),
+            Self::Reporter { key, owner } => format!(
+                "{key} — a node the registry says the reporter ({owner}) owns. A \
+                 reporter's own node saying what it saw is evidence and is not, by \
+                 itself, a finding: two nodes disagreeing is the situation the median \
+                 exists for"
+            ),
+            Self::Bystander { key, owner } => format!(
+                "{key} — a registered node owned by {owner}, who is neither party to \
+                 this dispute. Corroboration from a third operator, on the same terms \
+                 as the reporter's own"
+            ),
+            Self::Unregistered { key } => format!(
+                "{key} — a key the registry has never seen. The signature is genuine \
+                 and no stake in this network stands behind it, so nothing follows \
+                 from the key being slashed if it turns out to be wrong"
+            ),
+        }
+    }
+}
+
+/// Attribute the key that signed a document to a party, or to nobody.
+///
+/// `owner` is `registry.owner_of` the signing key, which the caller has a chain
+/// to ask and this module does not. `reporter` is the address on the dispute
+/// record; the accused is a key, because that is how an allegation names them.
+pub fn attribute(signer: &str, accused: &str, reporter: &str, owner: Option<&str>) -> Signatory {
+    let key = signer.trim().trim_start_matches("0x").to_ascii_lowercase();
+    if key == accused.trim().trim_start_matches("0x").to_ascii_lowercase() {
+        return Signatory::Accused { key };
+    }
+    match owner {
+        Some(o) if o == reporter => Signatory::Reporter {
+            key,
+            owner: o.to_string(),
+        },
+        Some(o) => Signatory::Bystander {
+            key,
+            owner: o.to_string(),
+        },
+        None => Signatory::Unregistered { key },
     }
 }
 
@@ -684,7 +923,7 @@ fn check_relevance(
         match document {
             Some(actual) if actual == expected => checked.push("document"),
             Some(actual) => wrong.push(format!(
-                "the accused answered with document {}, this file is {}",
+                "the document committed to on the ledger is {}, this file is {}",
                 hex::encode(expected),
                 hex::encode(actual)
             )),
@@ -1759,5 +1998,155 @@ mod tests {
         let expect =
             Expectations::parse(None, None, None, None, standing.expected_digest()).unwrap();
         assert_eq!(expect.digest, Some(D2));
+    }
+
+    const CASE: [u8; 32] = [0xcau8; 32];
+
+    fn filed(digest: &str) -> CaseRef<'_> {
+        CaseRef {
+            digest,
+            filed_at: 800,
+        }
+    }
+
+    /// The document that opened the dispute, placed against the answers alone,
+    /// is a file nobody committed to. It is the reading this pair of types
+    /// exists to stop: the ledger commits to the case harder than to anything
+    /// the accused published, because a case cannot be answered over.
+    #[test]
+    fn the_reporters_own_document_is_not_a_substitution() {
+        let a = [answer(&hex::encode(D1), 900)];
+        let case = hex::encode(CASE);
+
+        assert!(matches!(
+            locate_document(&CASE, &refs(&a)),
+            OnRecord::Absent { .. }
+        ));
+
+        let standing = place(&CASE, filed(&case), &refs(&a));
+        assert!(standing.is_case());
+        assert!(standing.is_on_record());
+        assert_eq!(standing.expected_digest(), Some(case.as_str()));
+        let s = standing.summary();
+        assert!(s.starts_with("the case:"), "{s}");
+        assert!(!s.contains("assembled after the votes"), "{s}");
+    }
+
+    /// A case is measured against the feed, the nonce and the deployment, and
+    /// never against the accused's key. A reporter whose evidence had to carry
+    /// the accused's signature could only ever file the one allegation the
+    /// accused had already signed for them.
+    #[test]
+    fn a_case_is_not_held_to_the_accuseds_key_and_an_answer_is() {
+        let case = hex::encode(CASE);
+        let a = [answer(&hex::encode(D1), 900)];
+
+        assert!(!place(&CASE, filed(&case), &refs(&a)).binds_to_accused());
+        assert!(place(&D1, filed(&case), &refs(&a)).binds_to_accused());
+        assert!(place(&D3, filed(&case), &refs(&a)).binds_to_accused());
+    }
+
+    /// Neither side committed to it. Both halves are reported, because ruling
+    /// out the case is half of what a committee member handed a file wants.
+    #[test]
+    fn a_file_on_neither_side_of_the_record_is_measured_against_the_answer() {
+        let case = hex::encode(CASE);
+        let a = [answer(&hex::encode(D1), 900)];
+        let standing = place(&D3, filed(&case), &refs(&a));
+
+        assert!(!standing.is_case());
+        assert!(!standing.is_on_record());
+        assert_eq!(standing.expected_digest(), Some(hex::encode(D1).as_str()));
+        assert!(standing.summary().contains(&case), "{}", standing.summary());
+    }
+
+    /// An accused who answers with the reporter's own file is offering the
+    /// case back, and a committee weighing "the answer" should be told it is
+    /// weighing the case again rather than a document of the operator's own.
+    #[test]
+    fn a_file_that_is_both_is_reported_as_both_and_judged_as_the_case() {
+        let case = hex::encode(CASE);
+        let a = [answer(&case, 900)];
+        let standing = place(&CASE, filed(&case), &refs(&a));
+
+        assert!(standing.is_case());
+        assert!(standing.answers.is_on_record());
+        // The case, because it was fixed before anybody had answered anything:
+        // it is the one digest that cannot have been chosen in response to
+        // this file.
+        assert_eq!(standing.expected_digest(), Some(case.as_str()));
+        assert!(!standing.binds_to_accused());
+        let s = standing.summary();
+        assert!(s.contains("the case and the answer both"), "{s}");
+    }
+
+    /// The case is never a fallback for a missing answer. It is the only
+    /// commitment on the record before the accused has published anything, and
+    /// reaching for it there would measure every bundle handed over privately
+    /// against the reporter's document — a substitution finding against an
+    /// operator for showing their working early.
+    #[test]
+    fn a_file_that_is_not_the_case_is_never_measured_against_it() {
+        let case = hex::encode(CASE);
+        assert_eq!(place(&D1, filed(&case), &[]).expected_digest(), None);
+    }
+
+    /// The same normalisation the answers get. The contract stores what it was
+    /// given and an operator pastes what they were sent.
+    #[test]
+    fn a_case_digest_is_the_same_digest_however_it_was_written() {
+        let case = format!("0x{}", hex::encode(CASE).to_uppercase());
+        assert!(place(&CASE, filed(&case), &[]).is_case());
+    }
+
+    const ACCUSED: [u8; 32] = [0xaau8; 32];
+    const OTHER: [u8; 32] = [0xbbu8; 32];
+
+    /// The reporter holding the accused's own signature is the allegation that
+    /// needs no second opinion, and it has to be told apart from the ordinary
+    /// one, which is a second operator's word.
+    #[test]
+    fn a_key_is_attributed_to_a_party_and_not_graded() {
+        let accused = hex::encode(ACCUSED);
+        let other = hex::encode(OTHER);
+
+        assert_eq!(
+            attribute(&accused, &accused, "GREPORTER", Some("GOPERATOR")),
+            Signatory::Accused {
+                key: accused.clone()
+            }
+        );
+        assert_eq!(
+            attribute(&other, &accused, "GREPORTER", Some("GREPORTER")),
+            Signatory::Reporter {
+                key: other.clone(),
+                owner: "GREPORTER".into()
+            }
+        );
+        assert_eq!(
+            attribute(&other, &accused, "GREPORTER", Some("GTHIRD")),
+            Signatory::Bystander {
+                key: other.clone(),
+                owner: "GTHIRD".into()
+            }
+        );
+        assert_eq!(
+            attribute(&other, &accused, "GREPORTER", None),
+            Signatory::Unregistered { key: other }
+        );
+    }
+
+    /// The accused is the accused whoever owns them. A registry that has never
+    /// seen the accused's key does not turn their own signature into a
+    /// stranger's.
+    #[test]
+    fn the_accuseds_own_key_outranks_what_the_registry_says_about_it() {
+        let accused = format!("0x{}", hex::encode(ACCUSED).to_uppercase());
+        assert_eq!(
+            attribute(&accused, &hex::encode(ACCUSED), "GREPORTER", None),
+            Signatory::Accused {
+                key: hex::encode(ACCUSED)
+            }
+        );
     }
 }

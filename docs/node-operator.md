@@ -672,36 +672,74 @@ a transaction fee spent on a guaranteed refusal.
 ### Voting on somebody else's dispute
 
 If you sit on the committee, a vote is a decision about another operator's
-stake, so check their evidence rather than the summary attached to it:
+stake, so check the evidence rather than the summary attached to it. There are
+two documents in a dispute and the same command reads both:
 
 ```bash
 aphelion-node dispute check 7 --file their-bundle.json     # or `-` for stdin
+aphelion-node dispute check 7 --file the-case.json         # the reporter's
 ```
 
 You are an operator, so your node already knows the deployment — and everything
 else comes off the ledger: the accused, the feed and the nonce from the dispute,
-and the digest from the answers on the record. Nothing is read out of the file.
-It grades `sound`, `unsupported`, `unrelated`, `misdescribed` or `unsigned` with
-the exit code to match (0, 1, 2, 2, 2), ignoring the bundle's own verdict and
-re-deriving everything from the signed payload. It sends nothing: reading an
-answer is not voting on it.
+and the digest from whichever commitment on the record these bytes turn out to
+be. Nothing is read out of the file. It grades `sound`, `unsupported`,
+`unrelated`, `misdescribed` or `unsigned` with the exit code to match (0, 1, 2,
+2, 2), ignoring the bundle's own verdict and re-deriving everything from the
+signed payload. It sends nothing: reading a document is not voting on it.
 
-Above the audit it prints two things the file cannot tell you. **Whose stake is
-at risk** — `registry.owner_of` on the accused key, which is the one question no
-bundle can settle; an allegation against a key the registry has never seen is an
-allegation against nobody's stake. And **where the file stands on the record**:
+Above the audit it prints three things the file cannot tell you.
+
+**Whose stake is at risk** — `registry.owner_of` on the accused key, which is
+the one question no bundle can settle; an allegation against a key the registry
+has never seen is an allegation against nobody's stake.
+
+**Where the file stands on the record.** A dispute holds a commitment from each
+party: the reporter's case, fixed when it was filed, and the accused's answers,
+appended while the vote is open.
 
 | Standing | What it means |
 | --- | --- |
+| `case` | The document the allegation was filed on. Pinned when the dispute was opened and unchangeable since |
 | `offered` | They committed to these bytes while the vote was open, and this is the answer they are standing on |
 | `superseded` | They committed to these bytes and answered over them afterwards. Both are on the record; the last is the answer |
 | `absent` | They answered, and this is not what they answered with |
-| `unanswered` | Nothing on the record commits them to this file, or to any other |
+| `unanswered` | Nothing on the accused's side of the record commits them to this file, or to any other |
 
 `superseded` is not a finding against them. Up to three answers are allowed in a
 voting round, they are kept oldest first, and an answer may be corrected but
 never erased — so a document that was answered over is still genuinely theirs,
 and the audit runs on it the same way.
+
+Which side the file is on changes one thing about the standard, and it is the
+accused's key. An answer is held to it: an answer that does not carry the
+accused's own signature answers nothing. A case is not, because the ordinary
+allegation is a second operator's node reporting what it saw, and a reporter
+required to produce the accused's signature could only ever file the case the
+accused had already signed for them.
+
+**Whose key signed it**, resolved through the registry rather than taken from
+the file's own account of itself. None of the four is a defect, and the
+difference between them is the difference between the kinds of case that can be
+made:
+
+| Signed by | What it is |
+| --- | --- |
+| the accused | The strongest allegation there is: a payload nobody but the accused could have produced |
+| the reporter's node | One operator's word that their node saw something else. Evidence, and not by itself a finding — two nodes disagreeing is what the median exists for |
+| a third operator's node | Corroboration, on the same terms |
+| a key the registry has never seen | A genuine signature with no stake in this network behind it |
+
+A sound case is not a finding either way. What it establishes is that the
+payload in it was signed by the key it names; whether the accused's own
+submission was wrong is the question you are voting on, and their answer is the
+other half of it.
+
+A document that is not an evidence bundle at all — a written account, a log
+archive, an exchange's own export — is legitimate on either side and is read
+rather than graded. `dispute check` still places it on the record and says so,
+and exits 65 rather than 1: an operator who answered in prose has not earned a
+finding.
 
 Where you have no node pointed at the deployment, the same judgement is one
 command with no configuration, no key, no database and no chain access at all,
@@ -746,14 +784,20 @@ limit is `verify-evidence`'s alone: `--node` ties the evidence to the
 allegation, not the allegation to a person, and it has no registry to ask.
 `dispute check` does, and prints the answer.
 
-Check the reporter's document too, and check it by hand. `dispute show` prints
-its digest under `case`, fixed when the dispute was filed; if the case you were
-handed does not hash to that, it is not the case on the ledger and the accused
-has been answering something else. `dispute check` will not do this one: it
-measures a file against the *answers*, and a reporter's case graded against
-those would read as `absent` no matter how genuine it is. Where the case is
-itself a bundle, the `verify-evidence` line above reads it, with `--digest` set
-to the `case` digest rather than to the answer's.
+Check the reporter's document too, with the same command. If the case you were
+handed is not on the record as the case, it is not the case on the ledger and
+the accused has been answering something else. Without a node of your own the
+`verify-evidence` line above reads it, with `--digest` set to the `case` digest
+that `dispute show` prints and **`--node` left off** — a reporter's bundle is
+normally signed by the reporter's own node, and holding it to the accused's key
+would grade every honest case `unrelated`.
+
+One thing the record cannot tell you, and it is worth knowing where the edge is.
+A file that is neither the case nor an answer, in a dispute nobody has answered
+yet, is measured against nothing: a bundle the accused hands you privately
+before they publish and a case the reporter swapped after filing look identical
+to the ledger. It says so rather than guessing, and reaching for the case digest
+there would grade the first as a substitution for doing the honest thing early.
 
 ---
 

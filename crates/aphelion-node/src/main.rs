@@ -199,10 +199,13 @@ enum Command {
         /// network is sound and irrelevant.
         #[arg(long)]
         aggregator: Option<String>,
-        /// SHA-256 of the document the accused put on the record, as
-        /// `dispute show` prints it. Checked against this file's bytes rather
-        /// than against the signed payload: it answers whether this is the
-        /// answer they committed to while the vote was open.
+        /// SHA-256 of a document somebody put on the record, as `dispute show`
+        /// prints it: either the accused's answer or the case the dispute was
+        /// filed on. Checked against this file's bytes rather than against the
+        /// signed payload: it answers whether this is the document that was
+        /// committed to, or one that arrived afterwards. For a case, leave
+        /// --node off — a reporter's document is normally signed by the
+        /// reporter's own node, not the accused's.
         #[arg(long)]
         digest: Option<String>,
         #[arg(long)]

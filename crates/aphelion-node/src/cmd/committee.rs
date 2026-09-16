@@ -113,22 +113,30 @@ pub enum DisputeCmd {
         #[arg(long)]
         commit: bool,
     },
-    /// Check an answer against the dispute it answers, with the ledger
+    /// Check a document against the dispute it belongs to, with the ledger
     /// supplying the standard.
     ///
-    /// The committee's counterpart to `respond`, and the one verifier that can
-    /// finish the job: `verify-evidence` needs the allegation typed at it
-    /// because it deliberately has no chain, and this has one. The accused, the
-    /// feed, the nonce and the digest the accused committed to are read off the
-    /// dispute; the deployment comes from this node's own configuration; and
-    /// `registry.owner_of` answers the one question no bundle can, which is
-    /// whose stake the allegation is actually against.
+    /// The committee's counterpart to `open` and `respond` both, and the one
+    /// verifier that can finish the job: `verify-evidence` needs the allegation
+    /// typed at it because it deliberately has no chain, and this has one. The
+    /// accused, the feed and the nonce are read off the dispute; the deployment
+    /// comes from this node's own configuration; and `registry.owner_of`
+    /// answers the questions no document can, which are whose stake the
+    /// allegation is against and whose key signed the file.
+    ///
+    /// Either side of the record. A dispute holds a commitment from each party
+    /// — the reporter's case, fixed when it was filed, and the accused's
+    /// answers, appended while the vote is open — and which one these bytes are
+    /// is read rather than assumed. It decides the standard: an answer is held
+    /// to the accused's key and a case is not, because the ordinary allegation
+    /// is one operator's node reporting what it saw.
     ///
     /// Exits on the same scale as `verify-evidence`: 0 sound, 1 unsupported, 2
-    /// unrelated, misdescribed or unsigned.
+    /// unrelated, misdescribed or unsigned — and 65 for a document that is not
+    /// an evidence bundle, which is not a failing grade but the absence of one.
     Check {
-        /// The dispute this file is offered as an answer to. Everything the
-        /// file is measured against is read from it.
+        /// The dispute this file belongs to. Everything the file is measured
+        /// against is read from it.
         id: u64,
         /// The file to check, or `-` for stdin. Read as bytes and never
         /// re-serialised: the digest on the record is over the document as it
@@ -136,7 +144,7 @@ pub enum DisputeCmd {
         #[arg(long)]
         file: std::path::PathBuf,
         /// Machine-readable output: the audit, plus what the ledger says about
-        /// the file and the allegation.
+        /// the file, the key that signed it and the allegation.
         #[arg(long)]
         json: bool,
     },
@@ -549,9 +557,10 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             );
             // The digest is the allegation's own commitment, fixed when it was
             // filed. Printed next to the locator because the two are only
-            // worth anything together: follow the one, check the other.
+            // worth anything together: follow the one, check the other — and
+            // `dispute check` below is how, on this side of the record as much
+            // as on the accused's.
             println!("case      : {}", d.evidence_digest);
-            println!("            sha256sum the file you were sent and compare");
             println!("bond      : {}", d.bond);
             println!(
                 "votes     : {} for, {} against (quorum {}, round {})",
@@ -625,7 +634,9 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             // `dispute check` reads all five off the ledger; the flags below
             // are for somebody who has no configuration pointed at this
             // deployment, which is most of the people entitled to an opinion.
-            println!("check it  : aphelion-node dispute check {id} --file <bundle>");
+            println!("check it  : aphelion-node dispute check {id} --file <document>");
+            println!("            either side of the record: the case above, or an answer");
+            println!("            below, whichever file you were handed");
             println!("or, with no node of your own:");
             println!("            aphelion-node verify-evidence <bundle> \\");
             println!(
@@ -787,7 +798,7 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             // Bytes, and never re-serialised. Everything below turns on the
             // file being the file: a copy this command normalised on the way in
             // would have a different digest from the one on the ledger, and the
-            // difference would be reported against the accused.
+            // difference would be reported against whoever committed to it.
             let raw = read_document(&file)?;
             let digest = verify::sha256(&raw);
 
@@ -796,6 +807,11 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             // from, and the typing is what makes them worth something there;
             // here the chain is the same source the committee is judging on,
             // and reading them is strictly better than retyping them.
+            //
+            // Both sides of it. A dispute holds a commitment from each party
+            // and the file an operator was handed is as likely to be the
+            // reporter's as the accused's -- likelier, before the accused has
+            // answered -- so which side it is on is read rather than assumed.
             let answers = ctx.committee.responses(id, d.vote_round).await?;
             let refs: Vec<verify::AnswerRef<'_>> = answers
                 .iter()
@@ -804,10 +820,23 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                     at: a.at,
                 })
                 .collect();
-            let standing = verify::locate_document(&digest, &refs);
+            let standing = verify::place(
+                &digest,
+                verify::CaseRef {
+                    digest: &d.evidence_digest,
+                    filed_at: d.opened_at,
+                },
+                &refs,
+            );
 
+            // The one expectation that moves with the side. An answer is held
+            // to the accused's key, because an answer that does not carry the
+            // accused's signature answers nothing. A case is not: the ordinary
+            // allegation is one operator's node reporting what it saw, and a
+            // reporter required to produce the accused's signature could only
+            // ever file the case the accused had already signed for them.
             let expect = verify::Expectations::parse(
-                Some(&d.accused),
+                standing.binds_to_accused().then_some(d.accused.as_str()),
                 Some(&d.feed),
                 Some(d.nonce),
                 Some(&config.network.aggregator_contract),
@@ -815,20 +844,47 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
             )
             .map_err(NodeError::Config)?;
 
-            let audit = verify::verify_document(&raw, &expect).map_err(|e| {
-                NodeError::Other(anyhow::anyhow!(
-                    "this is not an Aphelion evidence bundle: {e}. A bundle is the output \
-                     of `aphelion-node replay <feed> <nonce> --json`. An answer that is \
-                     not one — a written account, a log archive — is a legitimate answer \
-                     that nothing here can grade, and its digest is on the record either \
-                     way."
-                ))
-            })?;
-
             // The question `verify-evidence` prints and cannot answer: the
             // allegation names a key, and what binds a key to a person is the
             // registry. This command has one.
             let owner = ctx.committee.owner_of(&d.accused).await?;
+
+            let audit = match verify::verify_document(&raw, &expect) {
+                Ok(a) => a,
+                // Not an error, and the distinction is the whole reason this
+                // path exists. A dispute is answered in prose as often as in
+                // JSON and filed in prose more often still, and the ledger's
+                // answer to "are these the bytes that were committed to" does
+                // not need the document to be a bundle. Printing the record
+                // and stopping is the honest result; failing would report a
+                // written account as a finding against whoever wrote it.
+                Err(e) => {
+                    ungradable(&d, owner.as_deref(), &standing, &digest, &e, json)?;
+                    std::io::stdout().flush().ok();
+                    std::process::exit(EX_DATAERR);
+                }
+            };
+
+            // Who signed it, resolved through the registry rather than guessed
+            // from the dispute. On the answer side this is the accused or the
+            // audit has already said `unrelated`; on the case side it is the
+            // shape of the allegation, and the four shapes are different cases.
+            let signatory = match &audit.signed {
+                None => None,
+                Some(s) => {
+                    let by = if s.public_key == d.accused {
+                        owner.clone()
+                    } else {
+                        ctx.committee.owner_of(&s.public_key).await?
+                    };
+                    Some(verify::attribute(
+                        &s.public_key,
+                        &d.accused,
+                        &d.reporter,
+                        by.as_deref(),
+                    ))
+                }
+            };
 
             if json {
                 let report = CheckReport {
@@ -839,8 +895,10 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                     nonce: d.nonce,
                     vote_round: d.vote_round,
                     status: d.status,
+                    document: &hex::encode(digest),
                     standing: &standing,
-                    audit: &audit,
+                    signatory: signatory.as_ref(),
+                    audit: Some(&audit),
                 };
                 println!(
                     "{}",
@@ -848,7 +906,7 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
                         .map_err(|e| NodeError::Other(e.into()))?
                 );
             } else {
-                render_check(&d, owner.as_deref(), &standing, &audit);
+                render_check(&d, owner.as_deref(), &standing, signatory.as_ref(), &audit);
             }
 
             std::io::stdout().flush().ok();
@@ -928,11 +986,21 @@ pub async fn dispute(config: &Config, cmd: DisputeCmd) -> Result<()> {
     }
 }
 
-/// A checked answer, for something other than a person to read.
+/// `EX_DATAERR`, as `sysexits.h` has meant it for forty years.
 ///
-/// The allegation, whose stake it falls on, where the ledger puts the file, and
-/// the audit — in that order, because the audit is worth nothing until the
-/// first three say what it was an audit of.
+/// For a document this command cannot grade because it is not a bundle, which
+/// is a different thing from a bundle that grades badly. It has to land outside
+/// [`verify::Verdict::exit_code`]'s range of three for the same reason
+/// `verify-evidence` puts a usage error outside it: 1 reads as `unsupported`,
+/// which is a finding, and an operator who answered a dispute in prose has not
+/// earned one.
+const EX_DATAERR: i32 = 65;
+
+/// A checked document, for something other than a person to read.
+///
+/// The allegation, whose stake it falls on, where the ledger puts the file, who
+/// signed it, and the audit — in that order, because the audit is worth nothing
+/// until the rest says what it was an audit of.
 #[derive(Serialize)]
 struct CheckReport<'a> {
     dispute: u64,
@@ -945,8 +1013,69 @@ struct CheckReport<'a> {
     nonce: u64,
     vote_round: u32,
     status: DisputeStatus,
-    standing: &'a verify::OnRecord,
-    audit: &'a verify::Audit,
+    /// SHA-256 of the file as it arrived. At the top level rather than inside
+    /// the audit because it is known whether or not the document could be
+    /// graded, and it is the number every other field here is about.
+    document: &'a str,
+    standing: &'a verify::Standing,
+    /// Absent where nothing was signed — an ungradable document, or one whose
+    /// signature did not verify.
+    signatory: Option<&'a verify::Signatory>,
+    /// Absent where the document is not an evidence bundle. `null` is not a
+    /// verdict and must not be read as one.
+    audit: Option<&'a verify::Audit>,
+}
+
+/// A document the ledger has something to say about and this command cannot
+/// grade: the record, and then plainly why there is no verdict under it.
+fn ungradable(
+    d: &DisputeRecord,
+    owner: Option<&str>,
+    standing: &verify::Standing,
+    digest: &[u8; 32],
+    why: &serde_json::Error,
+    json: bool,
+) -> Result<()> {
+    let document = hex::encode(digest);
+    if json {
+        let report = CheckReport {
+            dispute: d.id,
+            accused: &d.accused,
+            owner,
+            feed: &d.feed,
+            nonce: d.nonce,
+            vote_round: d.vote_round,
+            status: d.status,
+            document: &document,
+            standing,
+            signatory: None,
+            audit: None,
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| NodeError::Other(e.into()))?
+        );
+        return Ok(());
+    }
+
+    render_allegation(d, owner);
+    render_file(&document, standing, None);
+    println!(
+        "{}",
+        wrap(
+            &format!(
+                "No verdict: this is not an Aphelion evidence bundle ({why}). A bundle is \
+                 the output of `aphelion-node replay <feed> <nonce> --json`, and nothing \
+                 else can be checked against a signature, a window and an arithmetic. A \
+                 written account, a log archive or an exchange's own export is a \
+                 legitimate document in a dispute and is read rather than graded — which \
+                 is what the record above is for: it says who committed to these bytes \
+                 and when, whatever they turn out to contain."
+            ),
+            0
+        )
+    );
+    Ok(())
 }
 
 /// Read a document from a path or from stdin, as bytes.
@@ -971,9 +1100,40 @@ fn read_document(path: &std::path::Path) -> Result<Vec<u8>> {
 fn render_check(
     d: &DisputeRecord,
     owner: Option<&str>,
-    standing: &verify::OnRecord,
+    standing: &verify::Standing,
+    signatory: Option<&verify::Signatory>,
     audit: &verify::Audit,
 ) {
+    render_allegation(d, owner);
+    render_file(
+        audit.document_digest.as_deref().unwrap_or(""),
+        standing,
+        signatory,
+    );
+    render_body(audit);
+
+    println!();
+    // What is left over depends on which side of the record the file is on,
+    // and the two are not the same question. For an answer it is the one the
+    // arithmetic cannot reach. For a case it is larger and comes first: a
+    // sound document proves what somebody signed, and the dispute is about
+    // whether the accused's own submission was wrong.
+    let remaining = if standing.is_case() {
+        "A sound case is not a finding. What this establishes is that the payload in it \
+         was signed by the key it names — not that the accused's submission was wrong, \
+         which is what the committee is voting on and what the accused's answer is the \
+         other half of. Two nodes that disagree are the ordinary case and the reason \
+         the aggregator takes a median rather than a vote."
+    } else {
+        "Still to establish elsewhere, and not by any arithmetic: whether an observation \
+         was left out. Four venues that agree look the same as four of six whose absent \
+         two would have moved the median, and only the operator holds the full table."
+    };
+    println!("{}", wrap(remaining, 0));
+}
+
+/// What the ledger says the dispute is, before anything is read out of a file.
+fn render_allegation(d: &DisputeRecord, owner: Option<&str>) {
     println!("Allegation (from the ledger, not from the file)");
     println!("  dispute     {}", d.id);
     println!("  accused     {}", d.accused);
@@ -989,33 +1149,29 @@ fn render_check(
     }
     println!("  allegation  {} nonce {}", d.feed, d.nonce);
     println!("  reporter    {}", d.reporter);
-    println!("  case        {}", d.evidence_digest);
+    println!(
+        "  case        {} (filed {})",
+        d.evidence_digest, d.opened_at
+    );
     println!("  vote round  {}", d.vote_round);
     println!();
+}
 
+/// The file: what it hashes to, which commitment on the record is to these
+/// bytes, and whose key is on the payload inside.
+fn render_file(document: &str, standing: &verify::Standing, signatory: Option<&verify::Signatory>) {
     println!("The file");
-    if let Some(dig) = &audit.document_digest {
-        println!("  sha256      {dig}");
+    if !document.is_empty() {
+        println!("  sha256      {document}");
     }
     println!("  record      {}", wrap(&standing.summary(), 14));
+    if let Some(s) = signatory {
+        // Above the audit rather than in it. Whose signature this is decides
+        // what a verdict on it would even mean, and it is not something the
+        // document gets to answer about itself.
+        println!("  signed by   {}", wrap(&s.summary(), 14));
+    }
     println!();
-
-    render_body(audit);
-
-    println!();
-    // One question is answered here that `verify-evidence` can only print: the
-    // registry was read above. What is left is the one nobody can answer from
-    // outside the accused's own records.
-    println!(
-        "{}",
-        wrap(
-            "Still to establish elsewhere, and not by any arithmetic: whether an \
-             observation was left out. Four venues that agree look the same as four of \
-             six whose absent two would have moved the median, and only the operator \
-             holds the full table.",
-            0
-        )
-    );
 }
 
 fn describe_status(d: &DisputeRecord, now: u64) -> String {
@@ -1094,6 +1250,22 @@ mod tests {
         assert!(parse("check 7 --file evidence.json --commit").is_err());
         // The file is the whole input; there is nothing to check without one.
         assert!(parse("check 7").is_err());
+    }
+
+    /// A document that is not a bundle has no grade, and the code it exits with
+    /// must not be readable as one. 1 is `unsupported` — a finding — and an
+    /// operator who filed or answered a dispute in prose has not earned it.
+    #[test]
+    fn a_document_with_no_grade_exits_outside_the_range_of_grades() {
+        for v in [
+            verify::Verdict::Sound,
+            verify::Verdict::Unsupported,
+            verify::Verdict::Unrelated,
+            verify::Verdict::Misdescribed,
+            verify::Verdict::Unsigned,
+        ] {
+            assert_ne!(v.exit_code(), EX_DATAERR, "{v} would be read as ungradable");
+        }
     }
 
     #[test]

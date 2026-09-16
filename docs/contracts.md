@@ -328,7 +328,11 @@ boundary `vote` uses.
 It says nothing about whether the document is any good. That judgement is
 `aphelion-node verify-evidence`, off chain, by whoever holds the file —
 `--digest` is where the two meet, and it compares the digest against the bytes
-of the file rather than against anything the file says about itself.
+of the file rather than against anything the file says about itself. The same
+comparison runs against `evidence_digest` on the other side: the case is a
+commitment of the same kind, made earlier and never correctable, and
+`aphelion-node dispute check <id> --file <path>` reads whichever of the two
+these bytes are off the ledger rather than being told.
 
 Where the money goes at settlement:
 

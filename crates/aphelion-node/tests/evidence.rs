@@ -617,3 +617,311 @@ fn an_unanswered_dispute_leaves_the_file_unbound_without_failing_it() {
         audit.findings
     );
 }
+
+// -- the reporter's side of the same record ----------------------------------
+//
+// Everything above judges the accused's answer. A dispute has two documents,
+// and the other one is pinned harder: a case digest is fixed at filing and can
+// never be corrected. These run the same real `replay` output through the same
+// real `verify` on that side, because the two sides share one command and only
+// the standard differs.
+
+const REPORTER: &str = "GREPORTER";
+const CASE_FILED_AT: u64 = 800;
+
+fn case(digest: &str) -> verify::CaseRef<'_> {
+    verify::CaseRef {
+        digest,
+        filed_at: CASE_FILED_AT,
+    }
+}
+
+/// A second node, so the reporter's evidence can be signed by something other
+/// than the key it is an allegation against — which is the ordinary shape of a
+/// case and the one the answer-only reading gets wrong.
+fn reporters_key() -> SigningKey {
+    SigningKey::from_bytes(&[99u8; 32])
+}
+
+/// `bundle_json`, signed by whichever key is given rather than the node's.
+///
+/// The signature is re-made over the same canonical bytes, because a bundle
+/// carrying somebody else's key and the original signature would be `unsigned`
+/// and would prove nothing about the standard these tests are checking.
+fn bundle_json_from(
+    signer: &SigningKey,
+    round: &RecordedRound,
+    observations: &[Observation],
+) -> String {
+    let message = aphelion_core::PriceMessage {
+        aggregator: AGGREGATOR,
+        feed: round.feed.clone(),
+        price: round.price,
+        timestamp: round.observed_at.timestamp() as u64,
+        confidence_bps: round.confidence_bps,
+        nonce: round.nonce,
+    };
+    let mut round = round.clone();
+    round.signature = hex::encode(signer.sign(&message.to_bytes()).to_bytes());
+
+    let result = replay::replay(
+        &round,
+        observations,
+        window(observations),
+        params(),
+        &signer.verifying_key(),
+    );
+    serde_json::to_string_pretty(&result).expect("a bundle serialises")
+}
+
+/// The document that opened the dispute, put through the command a committee
+/// member actually runs.
+///
+/// Against the answers alone it is `absent` — "a file nobody committed to",
+/// which is the description of a substitution said about the case itself. The
+/// ledger does commit to it, earlier and more permanently than to anything the
+/// accused has published.
+#[test]
+fn the_document_a_dispute_was_filed_on_is_on_the_record_not_missing_from_it() {
+    let filed = bundle_json_from(
+        &reporters_key(),
+        &round("100.00", 10, 950, 4),
+        &honest_observations(),
+    );
+    let digest = verify::sha256(filed.as_bytes());
+    let pinned = hex::encode(digest);
+
+    // The accused has answered, with a document of their own.
+    let answered = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let on_chain = answers(&[(&hex::encode(verify::sha256(answered.as_bytes())), 900)]);
+
+    let standing = verify::place(&digest, case(&pinned), &refs(&on_chain));
+    assert!(standing.is_case());
+    assert!(standing.is_on_record());
+    assert!(
+        !standing.binds_to_accused(),
+        "a case is not held to the accused's key"
+    );
+    assert_eq!(standing.expected_digest(), Some(pinned.as_str()));
+
+    let summary = standing.summary();
+    assert!(summary.starts_with("the case:"), "{summary}");
+    assert!(!summary.contains("assembled after the votes"), "{summary}");
+}
+
+/// The reporter's own node, saying what it saw. Sound, about the disputed
+/// round, and signed by a key that is not the accused's — which is what the
+/// standard has to allow for, and what the attribution has to name.
+#[test]
+fn a_case_signed_by_the_reporters_own_node_is_sound_and_says_whose_it_is() {
+    let reporter = reporters_key();
+    let filed = bundle_json_from(
+        &reporter,
+        &round("100.00", 10, 950, 4),
+        &honest_observations(),
+    );
+    let digest = verify::sha256(filed.as_bytes());
+    let pinned = hex::encode(digest);
+
+    let standing = verify::place(&digest, case(&pinned), &[]);
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let expect = verify::Expectations::parse(
+        standing.binds_to_accused().then_some(accused.as_str()),
+        Some("BTC_USD"),
+        Some(4),
+        Some(&hex::encode(AGGREGATOR)),
+        standing.expected_digest(),
+    )
+    .unwrap();
+
+    let audit = verify::verify_document(filed.as_bytes(), &expect).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+    assert_eq!(audit.bound_to_allegation, Some(true));
+
+    // And the key it is signed by is the reporter's, resolved through the
+    // registry rather than read off the file's own account of itself.
+    let signer = audit.signed.as_ref().unwrap().public_key.clone();
+    assert_ne!(signer, accused);
+    assert_eq!(
+        verify::attribute(&signer, &accused, REPORTER, Some(REPORTER)),
+        verify::Signatory::Reporter {
+            key: signer.clone(),
+            owner: REPORTER.into()
+        }
+    );
+    assert!(
+        verify::attribute(&signer, &accused, REPORTER, Some(REPORTER))
+            .summary()
+            .contains("is not, by itself, a finding")
+    );
+}
+
+/// The same file measured the way an answer is measured. `unrelated`, for the
+/// only reason it could be: the reporter did not sign it with the accused's
+/// key, and could not have. Holding a case to that standard would leave a
+/// reporter able to file nothing but the allegations the accused had already
+/// signed for them.
+#[test]
+fn holding_a_case_to_the_accuseds_key_would_reject_every_honest_one() {
+    let filed = bundle_json_from(
+        &reporters_key(),
+        &round("100.00", 10, 950, 4),
+        &honest_observations(),
+    );
+    let accused = hex::encode(key().verifying_key().to_bytes());
+
+    let as_an_answer = verify::Expectations::parse(
+        Some(&accused),
+        Some("BTC_USD"),
+        Some(4),
+        Some(&hex::encode(AGGREGATOR)),
+        None,
+    )
+    .unwrap();
+    let audit = verify::verify_document(filed.as_bytes(), &as_an_answer).unwrap();
+    assert_eq!(audit.verdict, verify::Verdict::Unrelated);
+    assert_eq!(audit.verdict.exit_code(), 2);
+}
+
+/// A reporter holding the accused's own signed round. The strongest allegation
+/// there is, and the standard does not change to accommodate it: the same
+/// expectations grade it sound and the attribution names the key.
+#[test]
+fn a_case_carrying_the_accuseds_own_signature_needs_no_second_opinion() {
+    let filed = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let digest = verify::sha256(filed.as_bytes());
+    let pinned = hex::encode(digest);
+
+    let standing = verify::place(&digest, case(&pinned), &[]);
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let expect = verify::Expectations::parse(
+        standing.binds_to_accused().then_some(accused.as_str()),
+        Some("BTC_USD"),
+        Some(4),
+        Some(&hex::encode(AGGREGATOR)),
+        standing.expected_digest(),
+    )
+    .unwrap();
+
+    let audit = verify::verify_document(filed.as_bytes(), &expect).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+
+    let signer = audit.signed.as_ref().unwrap().public_key.clone();
+    assert_eq!(
+        verify::attribute(&signer, &accused, REPORTER, None),
+        verify::Signatory::Accused { key: accused }
+    );
+}
+
+/// The substitution, on the reporter's side. A second sound bundle for the same
+/// round, produced after the case was filed, is not the case — and because a
+/// case can never be corrected there is no `superseded` to soften it.
+///
+/// What catches it is the record rather than the arithmetic, and it has to be:
+/// both files are genuine, both are about the disputed round, and the only
+/// thing that separates them is which one the reporter committed to. The
+/// summary names the digest that was filed so a committee member can see what
+/// they were supposed to have been handed.
+#[test]
+fn a_case_cannot_be_swapped_for_a_better_one_after_it_is_filed() {
+    let reporter = reporters_key();
+    let disputed = round("100.00", 10, 950, 4);
+    let filed = bundle_json_from(&reporter, &disputed, &honest_observations());
+
+    let mut padded = honest_observations();
+    padded.push(obs("okx", "100.00", 980));
+    let improved = bundle_json_from(&reporter, &disputed, &padded);
+    assert_ne!(filed, improved);
+
+    let pinned = hex::encode(verify::sha256(filed.as_bytes()));
+    let standing = verify::place(&verify::sha256(improved.as_bytes()), case(&pinned), &[]);
+
+    assert!(!standing.is_case());
+    assert!(!standing.is_on_record());
+    let summary = standing.summary();
+    assert!(summary.contains(&pinned), "{summary}");
+    assert!(summary.contains("neither side of the record"), "{summary}");
+
+    // And the audit under it is unchanged: the swapped file is a perfectly
+    // sound bundle about the disputed round, which is exactly why the record
+    // is the only thing that can tell the two apart.
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let expect = verify::Expectations::parse(
+        standing.binds_to_accused().then_some(accused.as_str()),
+        Some("BTC_USD"),
+        Some(4),
+        Some(&hex::encode(AGGREGATOR)),
+        standing.expected_digest(),
+    )
+    .unwrap();
+    let audit = verify::verify_document(improved.as_bytes(), &expect).unwrap();
+    assert_eq!(audit.verdict, verify::Verdict::Unrelated);
+    assert_eq!(audit.verdict.exit_code(), 2);
+}
+
+/// A bundle the accused hands over privately, before they have answered, is not
+/// measured against the reporter's case.
+///
+/// The one thing [`verify::Standing::expected_digest`] must not do is fall back
+/// to the case when there are no answers. It is the only commitment on the
+/// record at that point, and reaching for it would grade every pre-answer
+/// bundle `unrelated` — a substitution finding against an operator for showing
+/// their working early.
+#[test]
+fn a_bundle_offered_before_any_answer_is_not_measured_against_the_case() {
+    let filed = b"an exchange's own export, which is not a bundle".to_vec();
+    let pinned = hex::encode(verify::sha256(&filed));
+
+    let answering = bundle_json(&round("100.00", 10, 950, 4), &honest_observations());
+    let standing = verify::place(&verify::sha256(answering.as_bytes()), case(&pinned), &[]);
+
+    assert!(!standing.is_case());
+    assert_eq!(standing.expected_digest(), None);
+    assert!(standing.binds_to_accused());
+
+    let accused = hex::encode(key().verifying_key().to_bytes());
+    let expect = verify::Expectations::parse(
+        Some(&accused),
+        Some("BTC_USD"),
+        Some(4),
+        Some(&hex::encode(AGGREGATOR)),
+        standing.expected_digest(),
+    )
+    .unwrap();
+    let audit = verify::verify_document(answering.as_bytes(), &expect).unwrap();
+    assert_eq!(
+        audit.verdict,
+        verify::Verdict::Sound,
+        "{:?}",
+        audit.findings
+    );
+}
+
+/// The commonest document in a dispute is not a bundle at all, and on the
+/// reporter's side it is commoner still: an exchange's own export, a written
+/// account, a log archive. The ledger still answers the question that matters
+/// about it, and nothing here grades it.
+#[test]
+fn a_case_that_is_not_a_bundle_is_placed_on_the_record_and_not_graded() {
+    let written = b"The node published 100.00 while every venue we read was at 92.\n";
+    let digest = verify::sha256(written);
+    let pinned = hex::encode(digest);
+
+    let standing = verify::place(&digest, case(&pinned), &[]);
+    assert!(standing.is_case());
+    assert!(standing.summary().contains(&CASE_FILED_AT.to_string()));
+
+    // No verdict, and deliberately not a failed one.
+    let expect = verify::Expectations::parse(None, None, None, None, Some(&pinned)).unwrap();
+    assert!(verify::verify_document(written, &expect).is_err());
+}
