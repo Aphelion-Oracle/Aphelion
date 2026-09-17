@@ -13,6 +13,12 @@
 //! comparison nobody was making belongs on a page about whether the node is
 //! all right.
 //!
+//! The registry's minimum stake is read for the same reason and is not a
+//! section: on its own it says nothing, and what it is for is the two
+//! sentences it lets the standing line finish. A jailed node is refused by
+//! `release` while it is under-bonded, however long it waits, and an active
+//! node under the minimum has already lost the way back it has not needed yet.
+//!
 //! Two properties matter more than the contents.
 //!
 //! **Nothing here needs the node to be running**, and nothing here needs a
@@ -30,12 +36,12 @@ use std::io::Write;
 use std::sync::Arc;
 
 use aphelion_node::chain::committee::{CliCommittee, CommitteeClient};
-use aphelion_node::chain::{ChainClient, CliChain, RpcClient};
+use aphelion_node::chain::{ChainClient, CliChain, OnChainNode, RpcClient};
 use aphelion_node::config::Config;
 use aphelion_node::engine::duty::{Consequence, Watch};
 use aphelion_node::engine::status::{
-    assess, humanise, ChainStatus, DutiesStatus, EvidenceWindow, FeedStatus, Registration, Report,
-    SourceStatus, Verdict,
+    assess, humanise, stroops, ChainStatus, DutiesStatus, EvidenceWindow, FeedStatus, Registration,
+    Report, SourceStatus, Verdict,
 };
 use aphelion_node::error::{NodeError, Result};
 use aphelion_node::signer::NodeSigner;
@@ -234,6 +240,17 @@ async fn gather(config: &Config, probe: bool) -> Result<Report> {
         },
     };
 
+    // -- the stake floor ----------------------------------------------------
+    //
+    // Read whenever the registry was: it is one more field of the same
+    // contract's config, and it is the half of `release` that a jailed
+    // operator cannot satisfy by waiting. Left `None` on a failed read rather
+    // than defaulted to zero, which would report every bond as sufficient.
+    let min_stake = match &chain_client {
+        Some(c) => c.min_stake().await.ok(),
+        None => None,
+    };
+
     Ok(Report {
         node_name: config.node.name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -244,6 +261,7 @@ async fn gather(config: &Config, probe: bool) -> Result<Report> {
         sources: source_results,
         duties,
         evidence,
+        min_stake,
         heartbeat_secs: config.engine.heartbeat.as_secs() as i64,
     })
 }
@@ -277,6 +295,27 @@ async fn read_duties(
 // rendering
 // ---------------------------------------------------------------------------
 
+/// The deadline a jailed or exiting node is waiting on, as a suffix.
+///
+/// On the summary line and not only in the findings, because the line is what
+/// an operator reads first and "jailed" without a date is the state they
+/// already knew they were in.
+fn standing_clock(n: &OnChainNode, r: &Report) -> String {
+    let Some(now) = r.chain.ledger_time else {
+        return String::new();
+    };
+    let (deadline, waiting, ready) = match n.status.to_ascii_lowercase().as_str() {
+        "jailed" => (n.jailed_until, "release in", "releasable now"),
+        "exiting" => (n.unbonding_until, "unlocks in", "withdrawable now"),
+        _ => return String::new(),
+    };
+    match deadline {
+        0 => String::new(),
+        d if now < d => format!(" · {waiting} {}", humanise(d - now)),
+        _ => format!(" · {ready}"),
+    }
+}
+
 fn render(r: &Report, verdict: Verdict, findings: &[aphelion_node::engine::status::Finding]) {
     println!("{} {}", r.node_name, r.version);
     println!("key        : {}", r.public_key);
@@ -289,8 +328,12 @@ fn render(r: &Report, verdict: Verdict, findings: &[aphelion_node::engine::statu
 
     match &r.registration {
         Registration::Present(n) => println!(
-            "registry   : {} · {} bps · reputation {} · stake {}",
-            n.status, n.weight_bps, n.reputation, n.stake
+            "registry   : {} · {} bps · reputation {} · stake {}{}",
+            n.status,
+            n.weight_bps,
+            n.reputation,
+            stroops(n.stake),
+            standing_clock(n, r)
         ),
         Registration::Absent => println!("registry   : not registered"),
         Registration::Unknown { .. } => println!("registry   : unread"),
@@ -364,5 +407,91 @@ fn render(r: &Report, verdict: Verdict, findings: &[aphelion_node::engine::statu
     println!("\n{}", verdict.as_str().to_uppercase());
     for f in findings {
         println!("  [{}] {}", f.verdict.as_str(), f.detail);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000;
+
+    fn node(status: &str, jailed_until: u64, unbonding_until: u64) -> OnChainNode {
+        OnChainNode {
+            public_key_hex: "ab".repeat(32),
+            stake: 1_000 * 10_000_000,
+            reputation: 2_500,
+            status: status.into(),
+            weight_bps: 0,
+            last_submission: NOW,
+            jailed_until,
+            unbonding_until,
+        }
+    }
+
+    fn report(ledger_time: Option<u64>) -> Report {
+        Report {
+            node_name: "test-node".into(),
+            version: "0.1.0".into(),
+            public_key: "ab".repeat(32),
+            chain: ChainStatus {
+                reachable: ledger_time.is_some(),
+                ledger_sequence: Some(42),
+                ledger_time,
+                error: None,
+            },
+            registration: Registration::Absent,
+            feeds: Vec::new(),
+            sources: Vec::new(),
+            duties: DutiesStatus::NotConfigured,
+            evidence: EvidenceWindow::NotConfigured,
+            min_stake: Some(500 * 10_000_000),
+            heartbeat_secs: 300,
+        }
+    }
+
+    /// The summary line is what an operator reads first, and "jailed" without a
+    /// date is the state they already knew they were in.
+    #[test]
+    fn the_registry_line_carries_the_deadline_the_state_ends_at() {
+        let r = report(Some(NOW));
+        assert_eq!(
+            standing_clock(&node("Jailed", NOW + 6 * 60 * 60, 0), &r),
+            " · release in 6h"
+        );
+        assert_eq!(
+            standing_clock(&node("jailed", NOW - 60, 0), &r),
+            " · releasable now"
+        );
+        assert_eq!(
+            standing_clock(&node("Exiting", 0, NOW + 3 * 24 * 60 * 60), &r),
+            " · unlocks in 3d"
+        );
+        assert_eq!(
+            standing_clock(&node("exiting", 0, NOW - 1), &r),
+            " · withdrawable now"
+        );
+    }
+
+    /// A state with no deadline, a deadline that did not decode, and a ledger
+    /// time that could not be read all print nothing rather than a guess. The
+    /// findings say why in each case; the line does not invent one.
+    #[test]
+    fn nothing_is_printed_where_there_is_no_clock_to_print() {
+        let r = report(Some(NOW));
+        assert_eq!(standing_clock(&node("Active", 0, 0), &r), "");
+        assert_eq!(standing_clock(&node("jailed", 0, 0), &r), "");
+        assert_eq!(
+            standing_clock(&node("jailed", NOW + 60, 0), &report(None)),
+            "",
+            "the clock is the ledger's; this machine's is never a substitute"
+        );
+    }
+
+    /// The line and the findings quote the same amount, so they read as one
+    /// number rather than two.
+    #[test]
+    fn the_line_prints_stake_in_the_units_the_findings_use() {
+        assert_eq!(stroops(1_000 * 10_000_000), "1000");
     }
 }

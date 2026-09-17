@@ -333,7 +333,7 @@ repository, not the target architecture.
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 12 |
 | Dispute evidence — replay a round, put the answer on the record, and check a document against either side of the record it was filed or answered with | ✅ Implemented | 84 |
-| Operator status page — six reads, one verdict, an exit code | ✅ Implemented | 25 |
+| Operator status page — seven reads, one verdict, an exit code | ✅ Implemented | 41 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
 | Testnet deployment | 📋 Planned | — |
@@ -341,13 +341,13 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-672 tests in total: 367 off-chain (`cargo test --workspace`), 265 against the
+692 tests in total: 387 off-chain (`cargo test --workspace`), 265 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 367 are: 38 in `aphelion-core`, 252 in the node's library, 8 in
+The off-chain 387 are: 38 in `aphelion-core`, 269 in the node's library, 11 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 252 — 15 in the harness, and 54 across the
+target, so they are *not* inside the 269 — 15 in the harness, and 54 across the
 four integration suites (duties 12, evidence 21, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
@@ -355,20 +355,22 @@ because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 252. Committee participation is the same shape: its 12 cover assembling a
+node's 269. Committee participation is the same shape: its 12 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 27 more
-unit tests with 8 on decoding what the contract returns, all inside the 252 —
-with the 8 command tests in the binary target beside it. The dispute evidence
+unit tests with 8 on decoding what the contract returns, all inside the 269 —
+with 8 of the binary target's 11 command tests beside it. The dispute evidence
 pair is split the same way again: 21 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 43 more unit tests inside the 252, with 20 on the replay that
-produces what they judge. The harness's 15 are 12 process-level tests plus 3
-covering the fake CLI's argument parsing.
+itself has 43 more unit tests inside the 269, with 20 on the replay that
+produces what they judge. The status page splits in two for the same reason:
+38 of its 41 are the verdict, which is a pure function and lives in the
+library, and 3 are the rendering, which lives in the binary. The harness's 15
+are 12 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 355 tests and reported 367. The skip prints a `SKIP`
+with no Postgres has run 375 tests and reported 387. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -900,7 +902,7 @@ aphelion-node status --json       # for a monitor rather than a person
 aphelion-node-1 0.1.0
 key        : 565cfc4e2239fcabea063061080790d58324fdd4a984c87c87055a08eff7dd62
 ledger     : 4674851
-registry   : active · 10000 bps · reputation 8000 · stake 100000000
+registry   : active · 10000 bps · reputation 8000 · stake 10
 
 feeds
   BTC_USD    3/2 sources · on chain: 41s old
@@ -928,6 +930,9 @@ reports something already true rather than something happening now. Everything
 else says the node has stopped doing its job; this says it is doing it perfectly
 and could not prove it later. See [Keeping enough to answer
 with](#keeping-enough-to-answer-with).
+
+The registry line carries a clock when the node is in a state that ends at one.
+See [Jail, exit, and the clock on each](#jail-exit-and-the-clock-on-each).
 
 It **needs no database and does not need the node to be running**, which is
 when it is worth the most: a node that will not start is exactly the case where
@@ -962,6 +967,57 @@ be fixed after it matters.
 Housekeeping duties deliberately never colour the verdict. They are work the
 network needs and anybody may do; charging them to this operator's status page
 would leave every node in the network permanently amber.
+
+#### Jail, exit, and the clock on each
+
+```
+registry   : jailed · 0 bps · reputation 2500 · stake 6 · releasable now
+```
+
+Jail and exit are the two states a node is in that end at a timestamp, and
+neither ends by itself: `release` and `withdraw` are calls somebody has to make.
+A page that named the state and not the date left an operator to go and read
+`get_node` themselves, which is the one errand this command exists to remove.
+
+So the registry line carries the deadline — `release in 6h`, `releasable now`,
+`unlocks in 3d`, `withdrawable now` — and the finding under it says what to do
+about it:
+
+| State | Finding |
+| --- | --- |
+| Jailed, term still running | `critical` — jailed for another *t*. Jail is served as time; a jailed node has zero weight, so it cannot behave its way out, and `release` reverts before the term ends |
+| Jailed, term served | `critical` — `release` is **permissionless** and nobody has called it. Every ledger until somebody does is downtime nothing in the network is imposing |
+| Exiting, unbonding | `degraded` — no longer voting; the stake unlocks in *t* and stays slashable until then, which is what the wait is for |
+| Exiting, period elapsed | `degraded` — `withdraw` releases the stake. Left bonded it votes at nothing and is still exposed to a dispute over any round this node published |
+
+A deadline of zero is the registry's "not in that state", so a jailed record
+carrying zero reads as *unknown* rather than as a term served in 1970. The same
+goes for a ledger time that could not be read: the clock is never taken from the
+machine `status` is running on.
+
+##### The half of `release` that waiting does not satisfy
+
+`release` has three preconditions — jailed, term served, **and a bond at or
+above the registry's minimum** — and only the second is served by waiting. A
+node slashed below `min_stake` serves its whole term and is refused anyway,
+because `add_stake` and time fix different halves and neither fixes the other:
+topping up does not clear jail, since jail is a statement about reputation that
+capital cannot answer, and the wait does not restore a bond a slash took.
+
+`status` therefore reads `min_stake` off the registry alongside the node record
+and says so before the term ends rather than after:
+
+| Finding | When |
+| --- | --- |
+| `critical` — jailed and under-bonded | `release` will refuse. Names the shortfall, which is the number to pass to `add_stake` |
+| `degraded` — bonded below the minimum while active | Costs nothing today: the aggregator weighs reputation, not stake, so submissions still count. It costs on the day this node is jailed, because from here there is no way back that waiting completes |
+| `degraded` — the minimum could not be read | Only on a jailed node, where it is the difference between a wait and a dead end. An unread minimum is not a satisfied one |
+
+The minimum is governable, which is why it is read rather than assumed; a
+constant compiled into the node would be wrong the first time anybody moved it.
+Amounts on this page are printed in whole units of the staking token rather than
+in its smallest denomination, and without naming it — the token is whatever the
+registry was initialised with.
 
 #### Keeping enough to answer with
 
@@ -1401,6 +1457,13 @@ judgements — and requires three of them: the node is jailed, the term is serve
 and the bond is still at or above the minimum. A node slashed below the minimum
 must top up before it can return, because coming back under-bonded would mean
 voting with less at risk than the network requires of everyone else.
+
+Permissionless also means nothing calls it for you. A node whose term ended
+overnight stays at zero weight until somebody sends the transaction, and that
+is downtime no part of the network is imposing. `aphelion-node status` reads
+the term and the bond and reports both — the wait while it runs, the call once
+it is served, and the shortfall when waiting is not going to be enough. See
+[Jail, exit, and the clock on each](#jail-exit-and-the-clock-on-each).
 
 Release restores **exactly a newcomer's standing**, 5 000, and no more. That
 number is forced from both sides:

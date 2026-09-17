@@ -59,6 +59,21 @@ pub struct OnChainNode {
     /// will apply it.
     pub weight_bps: u32,
     pub last_submission: u64,
+    /// Ledger time after which a jailed node may be released, and zero when
+    /// the node is not jailed.
+    ///
+    /// Carried because `release` is permissionless and its precondition is a
+    /// timestamp: without this, "wait for the term" is advice with no end in
+    /// it, and an operator whose term is already served has no way to learn
+    /// that the only thing between them and voting again is a call nobody has
+    /// made.
+    pub jailed_until: u64,
+    /// Ledger time after which an exiting node may withdraw, and zero when the
+    /// node is not exiting.
+    ///
+    /// The stake stays bonded — and stays slashable — until `withdraw` is
+    /// called, which is why this outlives the moment it elapses.
+    pub unbonding_until: u64,
 }
 
 /// Result of a permissionless absence sweep.
@@ -128,6 +143,16 @@ pub trait ChainClient: Send + Sync {
     /// governance can change it and a stale local copy would make the node
     /// pay fees for calls the aggregator declines.
     async fn absence_threshold(&self) -> Result<u64>;
+
+    /// The stake the registry currently requires of a node.
+    ///
+    /// Read rather than assumed, for the reason above and one more: it is the
+    /// precondition of `release` that has nothing to do with time. A node
+    /// slashed below this serves its whole jail term and is still refused,
+    /// because a bond restored by waiting is not a thing that happens. The
+    /// minimum is governable, so a constant here would be wrong the first time
+    /// anybody moved it.
+    async fn min_stake(&self) -> Result<i128>;
 
     /// Charge a missed round to whichever of `pubkeys` has been silent past
     /// the absence threshold.

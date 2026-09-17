@@ -244,6 +244,8 @@ impl ChainClient for Clock {
             status: "Active".into(),
             weight_bps: self.weight_bps,
             last_submission: 0,
+            jailed_until: 0,
+            unbonding_until: 0,
         }))
     }
     async fn last_nonce(&self, _: &str, _: &aphelion_core::FeedId) -> Result<u64> {
@@ -251,6 +253,9 @@ impl ChainClient for Clock {
     }
     async fn list_nodes(&self) -> Result<Vec<String>> {
         Ok(vec![ME.into()])
+    }
+    async fn min_stake(&self) -> Result<i128> {
+        Ok(0)
     }
     async fn absence_threshold(&self) -> Result<u64> {
         Ok(600)

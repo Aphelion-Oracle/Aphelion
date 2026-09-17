@@ -83,6 +83,14 @@ pub struct MockChain {
     max_deviation_bps: u32,
     /// Silence beyond which `sweep_absent` may charge a node a missed round.
     absence_threshold: u64,
+    /// How long a node stays jailed, mirrored so that a sweep which crosses
+    /// the jail line sets the same clock the registry would set. A fixture
+    /// whose jailed node had no release time would be staging a state the
+    /// chain never produces.
+    jail_period: u64,
+    /// The stake the registry requires, and the one precondition of `release`
+    /// that waiting does not satisfy.
+    min_stake: i128,
 }
 
 impl MockChain {
@@ -94,6 +102,8 @@ impl MockChain {
             quorum: 1,
             max_deviation_bps: 500,
             absence_threshold: 3_600,
+            jail_period: 24 * 3_600,
+            min_stake: 1_000 * 10_000_000,
         }
     }
 
@@ -140,6 +150,19 @@ impl MockChain {
     /// Set the silence the aggregator tolerates before a sweep may charge.
     pub fn with_absence_threshold(mut self, seconds: u64) -> Self {
         self.absence_threshold = seconds;
+        self
+    }
+
+    /// Set how long jail lasts, for tests about the clock rather than about
+    /// what put the node on it.
+    pub fn with_jail_period(mut self, seconds: u64) -> Self {
+        self.jail_period = seconds;
+        self
+    }
+
+    /// Set the registry's minimum stake.
+    pub fn with_min_stake(mut self, amount: i128) -> Self {
+        self.min_stake = amount;
         self
     }
 
@@ -401,6 +424,10 @@ impl ChainClient for MockChain {
         Ok(keys)
     }
 
+    async fn min_stake(&self) -> Result<i128> {
+        Ok(self.min_stake)
+    }
+
     async fn absence_threshold(&self) -> Result<u64> {
         Ok(self.absence_threshold)
     }
@@ -451,8 +478,9 @@ impl ChainClient for MockChain {
 
             if let Some(node) = state.nodes.get_mut(pubkey) {
                 node.reputation = node.reputation.saturating_sub(REPUTATION_MISS);
-                if node.reputation < JAIL_THRESHOLD {
+                if node.reputation < JAIL_THRESHOLD && node.status == "active" {
                     node.status = "jailed".into();
+                    node.jailed_until = now + self.jail_period;
                 }
                 node.weight_bps = weight_for(&node.status, node.reputation);
             }
@@ -510,6 +538,8 @@ fn node_at_weight(public_key_hex: &str, weight_bps: u32) -> OnChainNode {
         status: status.into(),
         weight_bps: weight_for(status, reputation),
         last_submission: 0,
+        jailed_until: 0,
+        unbonding_until: 0,
     }
 }
 
@@ -593,5 +623,78 @@ mod tests {
         let on_chain = chain.latest_price(&feed).await.unwrap().unwrap();
         assert_eq!(on_chain.price.to_string(), "64231.55000000");
         assert_eq!(chain.submission_count(), 1);
+    }
+
+    /// Crossing the jail line sets a release time, because the registry sets
+    /// one. A mock that jailed without a clock would let the status page's jail
+    /// section pass its tests against a state the chain never produces.
+    #[tokio::test]
+    async fn a_sweep_that_jails_sets_the_term_the_registry_would_set() {
+        const NOW: u64 = 1_700_000_000;
+        let key = "ab".repeat(32);
+        let chain = MockChain::new(NOW)
+            .with_absence_threshold(3_600)
+            .with_jail_period(24 * 3_600)
+            // One miss from the line, so a single charged absence crosses it.
+            .with_node(OnChainNode {
+                public_key_hex: key.clone(),
+                stake: 1_000 * 10_000_000,
+                reputation: JAIL_THRESHOLD,
+                status: "active".into(),
+                weight_bps: 5_000,
+                last_submission: NOW - 10 * 3_600,
+                jailed_until: 0,
+                unbonding_until: 0,
+            });
+        chain.set_last_seen(&key, NOW - 10 * 3_600);
+
+        assert_eq!(
+            chain
+                .sweep_absent(std::slice::from_ref(&key))
+                .await
+                .unwrap()
+                .charged,
+            1
+        );
+
+        let node = chain.node_info(&key).await.unwrap().unwrap();
+        assert_eq!(node.status, "jailed");
+        assert_eq!(node.weight_bps, 0);
+        assert_eq!(node.jailed_until, NOW + 24 * 3_600);
+    }
+
+    /// A second absence charged to an already-jailed node must not push the
+    /// release time out again. On chain `maybe_jail` only fires on an active
+    /// node, so jail is not extended by being ignored.
+    #[tokio::test]
+    async fn a_second_absence_does_not_restart_a_term_already_running() {
+        const NOW: u64 = 1_700_000_000;
+        let key = "cd".repeat(32);
+        let chain = MockChain::new(NOW)
+            .with_absence_threshold(3_600)
+            .with_jail_period(24 * 3_600)
+            .with_node(OnChainNode {
+                public_key_hex: key.clone(),
+                stake: 1_000 * 10_000_000,
+                reputation: 1_000,
+                status: "jailed".into(),
+                weight_bps: 0,
+                last_submission: NOW - 10 * 3_600,
+                jailed_until: NOW + 3_600,
+                unbonding_until: 0,
+            });
+        chain.set_last_seen(&key, NOW - 10 * 3_600);
+
+        chain
+            .sweep_absent(std::slice::from_ref(&key))
+            .await
+            .unwrap();
+
+        let node = chain.node_info(&key).await.unwrap().unwrap();
+        assert_eq!(
+            node.jailed_until,
+            NOW + 3_600,
+            "an absence charged to a jailed node takes reputation, not time"
+        );
     }
 }

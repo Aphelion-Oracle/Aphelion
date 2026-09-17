@@ -420,6 +420,8 @@ mod tests {
             status: if weight_bps == 0 { "jailed" } else { "active" }.into(),
             weight_bps,
             last_submission,
+            jailed_until: 0,
+            unbonding_until: 0,
         }
     }
 

@@ -151,21 +151,7 @@ impl ChainClient for CliChain {
         if value.is_null() {
             return Ok(None);
         }
-        Ok(Some(OnChainNode {
-            public_key_hex: public_key_hex.to_string(),
-            stake: value.get("stake").and_then(as_i128).unwrap_or(0),
-            reputation: value.get("reputation").and_then(as_u64).unwrap_or(0) as u32,
-            status: value
-                .get("status")
-                .and_then(|v| {
-                    v.as_str()
-                        .map(str::to_string)
-                        .or_else(|| Some(v.to_string()))
-                })
-                .unwrap_or_else(|| "unknown".into()),
-            weight_bps: value.get("weight_bps").and_then(as_u64).unwrap_or(0) as u32,
-            last_submission: value.get("last_submission").and_then(as_u64).unwrap_or(0),
-        }))
+        Ok(Some(decode_node(public_key_hex, &value)))
     }
 
     async fn last_nonce(&self, public_key_hex: &str, feed: &FeedId) -> Result<u64> {
@@ -206,6 +192,16 @@ impl ChainClient for CliChain {
             })
     }
 
+    async fn min_stake(&self) -> Result<i128> {
+        let value = self
+            .cli
+            .view(&self.network.registry_contract, "get_config", &[])
+            .await?;
+        value.get("min_stake").and_then(as_i128).ok_or_else(|| {
+            NodeError::Chain(format!("registry.get_config has no min_stake: {value}"))
+        })
+    }
+
     async fn sweep_absent(&self, pubkeys: &[String]) -> Result<SweepReceipt> {
         if pubkeys.is_empty() {
             // Nothing to charge is not a transaction. Submitting an empty
@@ -234,10 +230,72 @@ impl ChainClient for CliChain {
     }
 }
 
+/// One `NodeView`, as the registry's `get_node` returns it.
+///
+/// A free function so the decoding can be tested without a CLI to drive. Every
+/// field falls back rather than failing, because a record that decoded
+/// partially still answers most of what the caller asked — but the fallbacks
+/// are chosen to be the reading the ledger would have produced, never the
+/// reassuring one.
+fn decode_node(public_key_hex: &str, value: &serde_json::Value) -> OnChainNode {
+    OnChainNode {
+        public_key_hex: public_key_hex.to_string(),
+        stake: value.get("stake").and_then(as_i128).unwrap_or(0),
+        reputation: value.get("reputation").and_then(as_u64).unwrap_or(0) as u32,
+        status: value
+            .get("status")
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| Some(v.to_string()))
+            })
+            .unwrap_or_else(|| "unknown".into()),
+        weight_bps: value.get("weight_bps").and_then(as_u64).unwrap_or(0) as u32,
+        last_submission: value.get("last_submission").and_then(as_u64).unwrap_or(0),
+        // Zero is what the registry itself stores when the node is in neither
+        // state, so a missing field and an absent deadline decode alike. The
+        // judgement that reads them treats zero as "no deadline" rather than
+        // as a moment long past, which is what makes that safe.
+        jailed_until: value.get("jailed_until").and_then(as_u64).unwrap_or(0),
+        unbonding_until: value.get("unbonding_until").and_then(as_u64).unwrap_or(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::stellar::parse_json;
     use super::*;
+
+    /// The clocks are the two fields on this record that nothing else would
+    /// notice going missing: both decode to zero, and zero is a legal value
+    /// meaning "not in that state". A rename on the contract side would
+    /// silently turn every jailed node into one with no term to serve.
+    #[test]
+    fn a_node_record_decodes_its_deadlines() {
+        let node = decode_node(
+            "ab",
+            &serde_json::json!({
+                "stake": "10000000000",
+                "reputation": 2_500,
+                "status": "Jailed",
+                "weight_bps": 0,
+                "last_submission": 1_700_000_000u64,
+                "jailed_until": 1_700_086_400u64,
+                "unbonding_until": 0,
+            }),
+        );
+        assert_eq!(node.jailed_until, 1_700_086_400);
+        assert_eq!(node.unbonding_until, 0);
+        assert_eq!(node.status, "Jailed");
+        assert_eq!(node.stake, 10_000_000_000);
+    }
+
+    #[test]
+    fn a_record_without_deadlines_is_a_node_in_neither_state() {
+        let node = decode_node("ab", &serde_json::json!({"status": "Active"}));
+        assert_eq!(node.jailed_until, 0);
+        assert_eq!(node.unbonding_until, 0);
+    }
 
     #[test]
     fn decodes_a_node_index_and_drops_what_is_not_a_key() {

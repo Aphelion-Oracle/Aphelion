@@ -79,6 +79,10 @@ impl ChainClient for ReadOnlyChain {
         self.inner.absence_threshold().await
     }
 
+    async fn min_stake(&self) -> Result<i128> {
+        self.inner.min_stake().await
+    }
+
     /// Refused for the same reason `submit_price` is. A sweep costs a fee and
     /// takes reputation off another operator: it is the second thing in this
     /// trait that changes somebody's state, and a dry run that did it would be
@@ -114,6 +118,8 @@ mod tests {
                     status: "active".into(),
                     weight_bps: 10_000,
                     last_submission: 0,
+                    jailed_until: 0,
+                    unbonding_until: 0,
                 }),
         )
     }

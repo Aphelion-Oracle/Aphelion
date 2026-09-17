@@ -259,6 +259,13 @@ pub struct Report {
     pub duties: DutiesStatus,
     /// Whether a dispute filed against this node could still be answered.
     pub evidence: EvidenceWindow,
+    /// The stake the registry currently requires, if it could be read.
+    ///
+    /// `None` is not zero. A bond compared against a minimum nobody could read
+    /// is a comparison that was not made, and the findings below say so rather
+    /// than reporting a node as adequately bonded on the strength of a failed
+    /// read.
+    pub min_stake: Option<i128>,
     /// From `engine.heartbeat`, used to decide when a stored price is old.
     pub heartbeat_secs: i64,
 }
@@ -306,20 +313,17 @@ pub fn assess(report: &Report) -> (Verdict, Vec<Finding>) {
             // Comparing case-sensitively here would have this silently stop
             // noticing jail on one of the two paths.
             match node.status.to_ascii_lowercase().as_str() {
-                "jailed" => findings.push(Finding::new(
-                    Verdict::Critical,
-                    "jailed: the aggregator refuses every submission from this node until its \
-                     jail term is served and `release` is called",
-                )),
-                "exiting" => findings.push(Finding::new(
-                    Verdict::Degraded,
-                    "exiting: stake is unbonding, this node no longer votes, and its \
-                     submissions no longer count",
-                )),
-                "active" if node.weight_bps == 0 => findings.push(Finding::new(
-                    Verdict::Degraded,
-                    "active but carrying no weight: submissions land and change nothing",
-                )),
+                "jailed" => findings.extend(jailed(node, report)),
+                "exiting" => findings.push(exiting(node, report)),
+                "active" => {
+                    if node.weight_bps == 0 {
+                        findings.push(Finding::new(
+                            Verdict::Degraded,
+                            "active but carrying no weight: submissions land and change nothing",
+                        ));
+                    }
+                    findings.extend(under_bonded(node, report));
+                }
                 _ => {}
             }
         }
@@ -507,6 +511,199 @@ pub fn assess(report: &Report) -> (Verdict, Vec<Finding>) {
     (verdict, findings)
 }
 
+// ---------------------------------------------------------------------------
+// standing
+// ---------------------------------------------------------------------------
+//
+// Jail and exit are the two states where the thing an operator needs is a
+// date. Both end at a timestamp the registry stores and both are left by a
+// call somebody has to make; neither ends on its own. A page that named the
+// state without the clock left the operator to go and read `get_node`
+// themselves, which is the one thing this command exists not to make them do.
+
+/// Where a deadline on the ledger stands relative to ledger time.
+enum Clock {
+    /// `n` seconds still to run.
+    Remaining(u64),
+    /// Reached `n` seconds ago. Zero is exactly now.
+    Elapsed(u64),
+    /// Either the deadline or ledger time is missing.
+    Unknown,
+}
+
+/// A stored deadline against ledger time, and never against this machine's.
+///
+/// A deadline of zero is the registry's "not set" rather than a moment in
+/// 1970, so it reads as unknown instead of as long past. The two send an
+/// operator to opposite conclusions and only one of them is supported by a
+/// field the contract clears.
+fn clock(deadline: u64, now: Option<u64>) -> Clock {
+    match now {
+        _ if deadline == 0 => Clock::Unknown,
+        Some(now) if now < deadline => Clock::Remaining(deadline - now),
+        Some(now) => Clock::Elapsed(now - deadline),
+        None => Clock::Unknown,
+    }
+}
+
+/// How much short of the registry's minimum this node's bond is, if it is
+/// short and if the minimum could be read at all.
+fn shortfall(node: &OnChainNode, min_stake: Option<i128>) -> Option<i128> {
+    min_stake
+        .filter(|min| node.stake < *min)
+        .map(|min| min - node.stake)
+}
+
+/// A jailed node: how long is left, and whether waiting is even the remedy.
+///
+/// Two findings rather than one, because there are two independent conditions
+/// on `release` and an operator can be failing both. The term is served by
+/// waiting and the bond is not; topping up does not clear jail and the wait
+/// does not restore the bond. Reporting only the clock to an under-bonded node
+/// would have them wait out the term and find `release` still refuses.
+fn jailed(node: &OnChainNode, report: &Report) -> Vec<Finding> {
+    let mut out = vec![match clock(node.jailed_until, report.chain.ledger_time) {
+        Clock::Remaining(left) => Finding::new(
+            Verdict::Critical,
+            format!(
+                "jailed for another {}: the aggregator refuses every submission from this \
+                 node, which is also why it cannot behave its way out — jail is served as \
+                 time, and `release` does nothing before the term ends",
+                humanise(left)
+            ),
+        ),
+        Clock::Elapsed(ago_secs) => Finding::new(
+            Verdict::Critical,
+            format!(
+                "jailed, and the term ended {}: `release` is permissionless, so this \
+                 operator — or anybody at all — can end it now. Until somebody does, this \
+                 node votes at zero weight and earns nothing, and none of that is the \
+                 network's doing",
+                ago(ago_secs)
+            ),
+        ),
+        Clock::Unknown => Finding::new(
+            Verdict::Critical,
+            "jailed: the aggregator refuses every submission from this node until its jail \
+             term is served and `release` is called. How much of the term is left could not \
+             be read",
+        ),
+    }];
+
+    match (shortfall(node, report.min_stake), report.min_stake) {
+        (Some(short), Some(min)) => out.push(Finding::new(
+            Verdict::Critical,
+            format!(
+                "jailed and under-bonded, which is the harder half: `release` refuses a node \
+                 whose stake is below the registry's minimum, so serving the term is not \
+                 enough to come back. Stake is {}, the minimum is {} — `add_stake` the {} \
+                 short. Neither fixes the other: topping up does not clear jail, and waiting \
+                 does not restore a bond a slash took",
+                stroops(node.stake),
+                stroops(min),
+                stroops(short)
+            ),
+        )),
+        (None, None) => out.push(Finding::new(
+            Verdict::Degraded,
+            "the registry's minimum stake could not be read, so whether `release` will \
+             accept this node's bond is unknown — a node slashed below the minimum serves \
+             its whole term and is refused anyway",
+        )),
+        _ => {}
+    }
+
+    out
+}
+
+/// An exiting node: when the stake unlocks, and that it is still at risk.
+fn exiting(node: &OnChainNode, report: &Report) -> Finding {
+    match clock(node.unbonding_until, report.chain.ledger_time) {
+        Clock::Remaining(left) => Finding::new(
+            Verdict::Degraded,
+            format!(
+                "exiting: this node no longer votes and its submissions no longer count. The \
+                 stake unlocks in {}, and stays slashable until then — which is what the \
+                 wait is for",
+                humanise(left)
+            ),
+        ),
+        Clock::Elapsed(ago_secs) => Finding::new(
+            Verdict::Degraded,
+            format!(
+                "exiting, and the unbonding period ended {}: `withdraw` releases the stake to \
+                 its owner. Left bonded it votes at nothing and remains exposed to a dispute \
+                 over any round this node ever published",
+                ago(ago_secs)
+            ),
+        ),
+        Clock::Unknown => Finding::new(
+            Verdict::Degraded,
+            "exiting: stake is unbonding, this node no longer votes, and its submissions no \
+             longer count",
+        ),
+    }
+}
+
+/// An active node bonded below the minimum: nothing today, everything later.
+///
+/// Degraded rather than critical because it changes nothing about what this
+/// node does now — the aggregator weighs reputation, not stake, so an
+/// under-bonded active node submits and is counted exactly like any other. It
+/// is a finding at all because of what it does to the way back: `release`
+/// refuses an under-bonded node, so a node that crosses the jail line from
+/// here has no path back that waiting completes.
+fn under_bonded(node: &OnChainNode, report: &Report) -> Option<Finding> {
+    let short = shortfall(node, report.min_stake)?;
+    let min = report.min_stake?;
+    Some(Finding::new(
+        Verdict::Degraded,
+        format!(
+            "bonded below the registry's minimum: stake is {}, the minimum is {}. Submissions \
+             still count, so this costs nothing today. It costs on the day this node is \
+             jailed: `release` refuses an under-bonded node, and no amount of waiting fixes \
+             that. `add_stake` the {} short now, while it is a chore rather than a rescue",
+            stroops(node.stake),
+            stroops(min),
+            stroops(short)
+        ),
+    ))
+}
+
+/// How long ago, phrased so that "now" does not come out as a duration.
+fn ago(secs: u64) -> String {
+    match secs {
+        0 => "just now".into(),
+        s => format!("{} ago", humanise(s)),
+    }
+}
+
+/// An amount of the stake token, as an operator would type it.
+///
+/// Seven decimal places is the token's precision, and trailing zeros are
+/// dropped because `1000.0000000` reads as a claim about precision where
+/// `1000` reads as a round thousand. Deliberately carries no unit: the staking
+/// token is whatever the registry was initialised with, and naming it XLM
+/// would be wrong on every network where it is not.
+///
+/// Public for the same reason [`humanise`] is. The summary line and the
+/// finding under it have to be in the same units or they read as two numbers.
+pub fn stroops(amount: i128) -> String {
+    const PER_UNIT: u128 = 10_000_000;
+    let magnitude = amount.unsigned_abs();
+    let mut out = String::new();
+    if amount < 0 {
+        out.push('-');
+    }
+    out.push_str(&(magnitude / PER_UNIT).to_string());
+    let frac = magnitude % PER_UNIT;
+    if frac > 0 {
+        out.push('.');
+        out.push_str(format!("{frac:07}").trim_end_matches('0'));
+    }
+    out
+}
+
 /// Seconds as something an operator reads without counting zeros.
 ///
 /// Deliberately coarse and never more than two units: these numbers are
@@ -543,16 +740,31 @@ mod tests {
         FeedId::new(id).unwrap()
     }
 
+    /// A comfortably bonded, full-weight, unjailed node.
+    ///
+    /// The stake is above `MIN_STAKE` on purpose: the bond check applies to
+    /// every state, so a fixture that was short of the minimum would put an
+    /// under-bonded finding on every test in this module.
     fn healthy_node() -> OnChainNode {
         OnChainNode {
             public_key_hex: "ab".repeat(32),
-            stake: 10_000,
+            stake: 1_000 * UNIT,
             reputation: 8_000,
             status: "active".into(),
             weight_bps: 10_000,
             last_submission: 1_000,
+            jailed_until: 0,
+            unbonding_until: 0,
         }
     }
+
+    /// One unit of the stake token, in the smallest denomination.
+    const UNIT: i128 = 10_000_000;
+    const MIN_STAKE: i128 = 500 * UNIT;
+
+    /// Ledger time in every fixture, so a deadline can be written either side
+    /// of it without arithmetic in the test.
+    const NOW: u64 = 1_700_000_000;
 
     fn report() -> Report {
         Report {
@@ -562,7 +774,7 @@ mod tests {
             chain: ChainStatus {
                 reachable: true,
                 ledger_sequence: Some(42),
-                ledger_time: Some(1_000),
+                ledger_time: Some(NOW),
                 error: None,
             },
             registration: Registration::Present(healthy_node()),
@@ -594,8 +806,29 @@ mod tests {
                 voting_period: DAY,
                 appeal_period: DAY,
             },
+            min_stake: Some(MIN_STAKE),
             heartbeat_secs: 300,
         }
+    }
+
+    /// A node in `status`, with the deadline that state waits on.
+    fn standing(status: &str, deadline: u64) -> Registration {
+        let mut node = healthy_node();
+        node.status = status.into();
+        node.weight_bps = 0;
+        match status.to_ascii_lowercase().as_str() {
+            "jailed" => node.jailed_until = deadline,
+            _ => node.unbonding_until = deadline,
+        }
+        Registration::Present(node)
+    }
+
+    fn details(findings: &[Finding]) -> String {
+        findings
+            .iter()
+            .map(|f| f.detail.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 
     const DAY: u64 = 24 * 60 * 60;
@@ -665,6 +898,179 @@ mod tests {
         node.status = "Exiting".into();
         r.registration = Registration::Present(node);
         assert_eq!(assess(&r).0, Verdict::Degraded);
+    }
+
+    // -- the jail clock ----------------------------------------------------
+
+    /// The difference an operator acts on: a term still running is a wait, and
+    /// a term already served is a call somebody has not made.
+    #[test]
+    fn a_served_term_says_release_is_callable_now() {
+        let mut r = report();
+        r.registration = standing("jailed", NOW - 2 * DAY);
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Critical);
+        let detail = details(&findings);
+        assert!(detail.contains("2d ago"), "{detail}");
+        assert!(
+            detail.contains("permissionless"),
+            "a served term is ended by a call anybody can make, and the page has to say \
+             so or the operator keeps waiting: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_running_term_says_how_much_is_left_and_does_not_offer_release() {
+        let mut r = report();
+        r.registration = standing("jailed", NOW + 6 * 60 * 60);
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Critical);
+        let detail = details(&findings);
+        assert!(detail.contains("another 6h"), "{detail}");
+        assert!(
+            !detail.contains("permissionless"),
+            "`release` before the term ends is a transaction that reverts: {detail}"
+        );
+    }
+
+    /// Zero is the registry's "not jailed", so a jailed record carrying zero is
+    /// a read that failed rather than a term served in 1970.
+    #[test]
+    fn a_jail_without_a_deadline_is_unknown_rather_than_long_past() {
+        let mut r = report();
+        r.registration = standing("jailed", 0);
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Critical);
+        let detail = details(&findings);
+        assert!(detail.contains("could not be read"), "{detail}");
+        assert!(!detail.contains("ago"), "{detail}");
+    }
+
+    /// The same, from the other side: the deadline is there and ledger time is
+    /// not, which is what an unreachable endpoint leaves behind.
+    #[test]
+    fn a_jail_clock_without_ledger_time_is_not_guessed_from_this_machine() {
+        let mut r = report();
+        r.chain.ledger_time = None;
+        r.registration = standing("jailed", NOW + DAY);
+        let detail = details(&assess(&r).1);
+        assert!(detail.contains("could not be read"), "{detail}");
+    }
+
+    // -- the bond ----------------------------------------------------------
+
+    /// The trap this section exists for. `release` has two preconditions and
+    /// only one of them is served by waiting, so an under-bonded jailed node
+    /// has to be told about both or it waits out the term and is still refused.
+    #[test]
+    fn an_under_bonded_jailed_node_is_told_that_waiting_will_not_be_enough() {
+        let mut r = report();
+        let mut node = healthy_node();
+        node.status = "jailed".into();
+        node.weight_bps = 0;
+        node.jailed_until = NOW + DAY;
+        node.stake = MIN_STAKE - 40 * UNIT;
+        r.registration = Registration::Present(node);
+
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Critical);
+        let detail = details(&findings);
+        assert!(
+            detail.contains("another 1d"),
+            "the term is still reported: {detail}"
+        );
+        assert!(detail.contains("add_stake"), "{detail}");
+        assert!(
+            detail.contains("40"),
+            "the shortfall is the number the operator has to act on: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_bond_at_the_minimum_is_not_short() {
+        let mut r = report();
+        let mut node = healthy_node();
+        node.stake = MIN_STAKE;
+        r.registration = Registration::Present(node);
+        assert_eq!(
+            assess(&r).0,
+            Verdict::Healthy,
+            "`release` accepts a bond equal to the minimum, so the page must not call it short"
+        );
+    }
+
+    /// Degraded, not critical: an under-bonded active node submits and is
+    /// counted exactly like any other. What it has lost is the way back.
+    #[test]
+    fn an_under_bonded_active_node_is_a_warning_about_later() {
+        let mut r = report();
+        let mut node = healthy_node();
+        node.stake = MIN_STAKE - UNIT;
+        r.registration = Registration::Present(node);
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Degraded);
+        let detail = details(&findings);
+        assert!(detail.contains("costs nothing today"), "{detail}");
+        assert!(detail.contains("release"), "{detail}");
+    }
+
+    /// An unread minimum is not a satisfied one. Reported, because the
+    /// comparison this section is for did not happen.
+    #[test]
+    fn an_unread_minimum_leaves_the_bond_unchecked_and_says_so() {
+        let mut r = report();
+        r.min_stake = None;
+        r.registration = standing("jailed", NOW + DAY);
+        let detail = details(&assess(&r).1);
+        assert!(detail.contains("could not be read"), "{detail}");
+        assert!(detail.contains("minimum stake"), "{detail}");
+    }
+
+    #[test]
+    fn an_unread_minimum_is_not_a_finding_on_a_node_that_is_not_jailed() {
+        let mut r = report();
+        r.min_stake = None;
+        assert_eq!(
+            assess(&r).0,
+            Verdict::Healthy,
+            "a bond that cannot be checked matters when `release` is in the operator's \
+             future, not on every green page"
+        );
+    }
+
+    // -- the unbonding clock -----------------------------------------------
+
+    #[test]
+    fn an_unbonding_period_still_running_says_when_the_stake_unlocks() {
+        let mut r = report();
+        r.registration = standing("exiting", NOW + 3 * DAY);
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Degraded);
+        let detail = details(&findings);
+        assert!(detail.contains("unlocks in 3d"), "{detail}");
+    }
+
+    /// Stake left bonded past the unbonding period is still slashable, which is
+    /// the reason to mention it rather than leave the operator to notice.
+    #[test]
+    fn stake_left_bonded_after_unbonding_is_reported_as_still_at_risk() {
+        let mut r = report();
+        r.registration = standing("exiting", NOW - 90);
+        let detail = details(&assess(&r).1);
+        assert!(detail.contains("withdraw"), "{detail}");
+        assert!(detail.contains("exposed"), "{detail}");
+    }
+
+    #[test]
+    fn a_deadline_reached_this_second_reads_as_now_rather_than_as_a_duration() {
+        let mut r = report();
+        r.registration = standing("jailed", NOW);
+        let detail = details(&assess(&r).1);
+        assert!(detail.contains("just now"), "{detail}");
+        assert!(
+            !detail.contains("nothing ago"),
+            "zero seconds is a moment, not a length: {detail}"
+        );
     }
 
     #[test]
@@ -955,5 +1361,20 @@ mod tests {
         assert_eq!(humanise(3 * 60 * 60 + 30 * 60), "3h 30m");
         assert_eq!(humanise(30 * DAY), "30d");
         assert_eq!(humanise(DAY + 6 * 60 * 60), "1d 6h");
+    }
+
+    /// The summary line and the findings quote the same amounts too.
+    #[test]
+    fn an_amount_reads_as_an_amount() {
+        assert_eq!(stroops(0), "0");
+        assert_eq!(stroops(UNIT), "1");
+        assert_eq!(stroops(1_000 * UNIT), "1000");
+        assert_eq!(stroops(UNIT / 2), "0.5");
+        assert_eq!(stroops(1), "0.0000001");
+        assert_eq!(stroops(15_000_001), "1.5000001");
+        // Negative is not an amount the registry stores, but a shortfall
+        // subtraction is one slip away from producing one and `-0.5` is a
+        // better thing to print than a number the size of the address space.
+        assert_eq!(stroops(-UNIT / 2), "-0.5");
     }
 }

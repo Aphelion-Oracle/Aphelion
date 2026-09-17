@@ -204,6 +204,58 @@ reads in particular go through the Stellar CLI, which wants
 `APHELION_STELLAR_SECRET` even though `status` never writes; without it the
 page still renders and those lines say so.
 
+### If the page says jailed or exiting
+
+Both states end at a timestamp, and neither ends on its own — `release` and
+`withdraw` are transactions somebody has to send. So the registry line carries
+the clock:
+
+```
+registry   : jailed · 0 bps · reputation 2500 · stake 6 · releasable now
+```
+
+`releasable now` means the term is served and the only thing between this node
+and voting again is a call. `release` is permissionless — anybody can send it,
+including you — and until somebody does, the node sits at zero weight earning
+nothing. That is downtime no part of the network is imposing on you.
+
+`release in 6h` means wait. A jailed node has zero weight, the aggregator
+refuses a zero-weight submission outright, and so there is nothing to do in the
+meantime: jail is served as time, not as work, and `release` reverts before the
+term ends. [If your node is jailed](#if-your-node-is-jailed) has the rest —
+what release costs you, and why the term is the length it is.
+
+**Check the bond as well as the clock.** `release` has three conditions —
+jailed, term served, and a stake at or above the registry's minimum — and only
+the middle one is served by waiting. If a slash took you below the minimum you
+will serve the whole term and still be refused:
+
+```
+  [critical] jailed and under-bonded, which is the harder half: `release` refuses
+             a node whose stake is below the registry's minimum ... `add_stake`
+             the 40 short
+```
+
+Top up with `add_stake` before the term ends, not after. The two remedies do not
+substitute for each other: topping up does not clear jail, because jail is a
+statement about reputation that capital cannot answer, and waiting does not
+restore a bond a slash took.
+
+The same warning appears at `degraded` on a node that is still **active** and
+below the minimum. It costs nothing that day — the aggregator weighs reputation,
+not stake, so your submissions still count — which is exactly why it is worth
+saying then. From there, one bad spell puts you in a jail you cannot leave by
+waiting.
+
+For an exiting node the line reads `unlocks in 3d` or `withdrawable now`. The
+stake stays bonded, and stays slashable, until `withdraw` is called: that
+exposure is what the unbonding period is for, and it does not end when the
+period does — it ends when the stake leaves. See [Exiting](#9-exiting).
+
+A deadline the node reports as unknown is a read that did not land, not a term
+that has run. `status` never takes the clock from this machine; the ledger's
+time is the only one a claim about a contract deadline can honestly be made in.
+
 ### What `status` checks about retention
 
 One line on that page is not about whether the node is working:
@@ -516,7 +568,13 @@ weight the same way a new node does: 40 in-band rounds. Your stake stays bonded
 the whole time, which is the point of jail rather than ejection — you remain
 reachable while the term runs.
 
-Read your term off the node record:
+You do not have to read your term off the ledger to know where you stand —
+`aphelion-node status` reports all three conditions, the wait while the term
+runs, the call once it is served, and the shortfall when the bond is the thing
+in the way. See [If the page says jailed or
+exiting](#if-the-page-says-jailed-or-exiting).
+
+The record itself, if you want it:
 
 ```bash
 stellar contract invoke --id "$APHELION_REGISTRY" -- get_node --pubkey "$PUBKEY"
