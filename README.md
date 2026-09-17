@@ -320,7 +320,7 @@ repository, not the target architecture.
 | Component | Status | Tests |
 | --- | --- | --- |
 | `aphelion-core` — fixed-point prices, aggregation math, signing payloads | ✅ Implemented | 38 |
-| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 221 |
+| `aphelion-node` — sources, collector, round loop, signer, HTTP API, CLI | ✅ Implemented | 229 |
 | `aphelion-registry` contract — identity, stake, reputation, jail, slashing accounting | ✅ Implemented | 41 |
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
 | `aphelion-slashing` contract — disputes, answers, committee voting, appeals, elections | ✅ Implemented | 71 |
@@ -341,13 +341,13 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-692 tests in total: 387 off-chain (`cargo test --workspace`), 265 against the
+700 tests in total: 395 off-chain (`cargo test --workspace`), 265 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 387 are: 38 in `aphelion-core`, 269 in the node's library, 11 in
+The off-chain 395 are: 38 in `aphelion-core`, 277 in the node's library, 11 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 269 — 15 in the harness, and 54 across the
+target, so they are *not* inside the 277 — 15 in the harness, and 54 across the
 four integration suites (duties 12, evidence 21, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
@@ -355,14 +355,14 @@ because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 269. Committee participation is the same shape: its 12 cover assembling a
+node's 277. Committee participation is the same shape: its 12 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 27 more
-unit tests with 8 on decoding what the contract returns, all inside the 269 —
+unit tests with 8 on decoding what the contract returns, all inside the 277 —
 with 8 of the binary target's 11 command tests beside it. The dispute evidence
 pair is split the same way again: 21 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 43 more unit tests inside the 269, with 20 on the replay that
+itself has 43 more unit tests inside the 277, with 20 on the replay that
 produces what they judge. The status page splits in two for the same reason:
 38 of its 41 are the verdict, which is a pure function and lives in the
 library, and 3 are the rendering, which lives in the binary. The harness's 15
@@ -370,7 +370,7 @@ are 12 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 375 tests and reported 387. The skip prints a `SKIP`
+with no Postgres has run 383 tests and reported 395. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -890,6 +890,34 @@ tell "unchanged" from "this node is dead". Aphelion resolves this with movement
 **and** a heartbeat: publish when the price moves more than
 `submit_deviation_bps`, and at least once per `heartbeat` regardless.
 
+There is a second question underneath that one: whether a submission from this
+node would be *counted*. `submit_price` reads the submitter's weight from the
+registry and reverts with `NotAuthorizedNode` when it is zero — which is the
+state of every jailed, exiting and unregistered node — and it does that after
+the transaction has been paid for. A node left in one of those states buys that
+refusal once per feed per round interval, indefinitely.
+
+So the node reads its own registry record at the top of every tick and withholds
+the transaction when the answer is zero weight. Everything before the fee still
+happens: the round is aggregated, signed and written to the local history
+exactly as it would have been, because all of that is free and it is the record
+an operator wants when they come back — what this node would have published
+throughout, rather than a gap. `/v1/rounds` shows those rounds as `skipped` with
+the reason, and `aphelion_submissions_total{outcome="refused"}` counts them.
+
+Not submitting costs nothing extra, which is what makes the skip safe rather
+than merely cheap: `sweep_absent` excuses a zero-weight node explicitly and
+marks it swept, on the reasoning that its silence is the punishment already
+running. See [Who charges an absence](#who-charges-an-absence).
+
+**A registry read that fails never stops a submission.** The node keeps
+whatever answer it last had, and a node that has never managed to read its
+record submits. That asymmetry is deliberate and it is the whole safety
+argument: a refused submission costs one transaction fee, while a round the
+node stays quiet for is a missed round that anybody may sweep and charge to its
+reputation. An RPC blip must not be able to turn the cheap failure into the
+expensive one.
+
 ### Is the node all right?
 
 ```bash
@@ -1115,12 +1143,14 @@ debug a problem that lives at the exchanges.
 | `aphelion_source_price{source,feed}` | Latest price seen per venue |
 | `aphelion_source_spread_bps{feed}` | Highest-to-lowest source spread — the best early warning available |
 | `aphelion_local_price{feed}` | This node's aggregated price |
-| `aphelion_rounds_total{feed,outcome}` | Rounds by outcome — `submitted`, `skipped_unchanged`, `skipped_no_data`, `dry_run`, `failed` |
+| `aphelion_rounds_total{feed,outcome}` | Rounds by outcome — `submitted`, `skipped_unchanged`, `skipped_no_data`, `skipped_refused`, `dry_run`, `failed` |
 | `aphelion_round_errors_total{kind[,feed]}` | Failed rounds by error kind — see the note below |
 | `aphelion_round_duration_seconds` | Wall time from opening a round to submitting or skipping it |
-| `aphelion_submissions_total{feed,outcome}` | On-chain submissions by outcome |
+| `aphelion_submissions_total{feed,outcome}` | On-chain submissions by outcome. `refused` is the one that cost nothing: the round was signed and recorded, and the transaction withheld |
 | `aphelion_clock_skew_seconds` | Node clock minus ledger clock |
-| `aphelion_reputation`, `aphelion_stake` | On-chain standing |
+| `aphelion_reputation`, `aphelion_stake` | On-chain standing, refreshed every tick |
+| `aphelion_weight_bps` | Voting weight the aggregator will apply, 0..10000. Zero means every submission would be refused |
+| `aphelion_standing_deadline_seconds` | Seconds until a jail term ends or an unbonding period elapses; absent when in neither state |
 | `aphelion_seconds_since_submission{feed}` | Time since this node last landed a price |
 | `aphelion_registry_nodes` | Nodes in the registry, as this node last read it |
 | `aphelion_sweep_candidates` | Registered nodes this node currently reads as absent |
@@ -1144,6 +1174,23 @@ carried by nodes that have stopped earning it, which is a property of the
 network rather than of this process. A number that climbs and never falls means
 nobody is calling `sweep_absent`.
 
+`aphelion_weight_bps` is the one to alert on rather than `aphelion_reputation`.
+Reputation is what moves; weight is what decides, and the step function between
+them means a node can shed a great deal of the first without losing any of the
+second — and then lose all of the second at once. Zero is graphed as zero rather
+than left absent, because a node that cannot vote is a fact worth a flat line:
+absence would make it indistinguishable from an exporter that has stopped.
+`aphelion_standing_deadline_seconds` is the companion, and it goes negative at
+the moment `release` or `withdraw` begins to succeed — which is the moment
+somebody has to send one, because neither happens on its own.
+
+Both were invisible until recently for a duller reason than it sounds:
+`aphelion_reputation` and `aphelion_stake` were written once, at startup, and
+never again. A node jailed at three in the morning went on exporting the
+reputation it had at boot, so the one gauge that would have shown what happened
+was the one that had stopped moving. The registry record is now read at the top
+of every tick, which is also what the submission gate needs.
+
 `aphelion_duties_outstanding` is labelled by what going undone costs, and the
 label is the point: `costly` is stake or a finding that could have been
 contested, `forfeited` is a vote not cast, `owed` is money sitting unsettled,
@@ -1154,11 +1201,11 @@ absent rather than zero when there is nothing costly outstanding, so a
 threshold rule on it does not fire permanently on a quiet network.
 
 Suggested alerts: `aphelion_seconds_since_submission > 2 × heartbeat`,
-`aphelion_clock_skew_seconds` outside ±30, `aphelion_reputation < 4000`,
+`aphelion_clock_skew_seconds` outside ±30, `aphelion_weight_bps == 0`,
 `aphelion_source_spread_bps` sustained above the usual band,
 `aphelion_sweep_candidates > 0` held for a couple of hours, and
-`aphelion_duties_outstanding{consequence="costly"} > 0` with no `for:` at all.
-All nine ship in
+`aphelion_duties_outstanding{consequence="costly"} > 0` with no `for:` at all,
+and `aphelion_standing_deadline_seconds < 0`. All eleven ship in
 [`deploy/prometheus/alerts.yml`](deploy/prometheus/alerts.yml). Two are
 deliberately not pages. `aphelion_sweep_candidates` is about other people's
 nodes: nothing is broken at your end, and the weight it names is still
@@ -1166,6 +1213,12 @@ counting. An outstanding *vote* is a warning on a twelve-hour delay, because
 nothing is taken from an operator who has not voted yet and a committee member
 is entitled to think about it. A dispute against your own node is the
 exception: it pages immediately, because the window it names does not reopen.
+
+`aphelion_standing_deadline_seconds` fires once it goes *negative* rather than
+as it approaches zero, which is the opposite of how a deadline alert usually
+reads. Before the deadline there is nothing anybody can do and `release`
+reverts; after it, the only thing standing between the node and voting again is
+a transaction nobody has sent.
 
 `docker compose up` also provisions a Grafana dashboard
 ([`deploy/grafana/provisioning/dashboards/node-overview.json`](deploy/grafana/provisioning/dashboards/node-overview.json))

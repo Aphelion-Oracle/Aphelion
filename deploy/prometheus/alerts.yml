@@ -43,6 +43,44 @@ groups:
             Below 3000 the node is jailed and its submissions carry zero weight.
             Investigate whether its prices are diverging from the network.
 
+      - alert: AphelionNotVoting
+        # Weight is what the aggregator actually reads. Reputation is the thing
+        # that moves, and the step function between them means a node can shed a
+        # great deal of the first without losing any of the second -- and then
+        # lose all of the second at once. This fires on the state itself rather
+        # than on its most common cause: unregistered and exiting reach it too,
+        # and neither moves reputation at all.
+        expr: aphelion_weight_bps == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Node carries no voting weight"
+          description: >-
+            Jailed, exiting, or not in the registry. The aggregator refuses every
+            submission, and the node has stopped sending them rather than paying
+            a fee per feed per round to be told so -- so this will not show up as
+            failures on any other panel. Run `aphelion-node status`, which names
+            which of the three it is and what ends it.
+
+      - alert: AphelionReleaseDue
+        # Fires when the deadline has passed, not when it is close: before then
+        # there is nothing anybody can do, and `release` reverts. `release` is
+        # permissionless, which also means nothing calls it for you -- a node
+        # whose term ended overnight sits at zero weight until somebody sends
+        # the transaction.
+        expr: aphelion_standing_deadline_seconds < 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Jail term served or unbonding elapsed {{ $value }}s ago"
+          description: >-
+            Nothing happens next on its own. Send `release` (jailed) or
+            `withdraw` (exiting). If `release` refuses, the bond is below the
+            registry minimum and needs `add_stake` first -- `aphelion-node
+            status` prints the shortfall.
+
       - alert: AphelionSourcesDisagreeing
         # The single best early warning that something is wrong upstream.
         expr: aphelion_source_spread_bps > 500

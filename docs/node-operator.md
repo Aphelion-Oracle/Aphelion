@@ -464,6 +464,38 @@ A node that is not submitting is not necessarily broken. Check `/v1/rounds`:
 | `failed` | The submission was attempted and rejected — investigate |
 | `pending` | Signed, outcome not yet recorded |
 
+A `skipped` row carries the reason, and one of them is not about the price at
+all: **this node has no voting weight**, so the transaction was withheld rather
+than paid for. The aggregator reads your weight and reverts on zero — jailed,
+exiting, or not in the registry — and it does that after the fee. Rather than
+buy that refusal once per feed per round, the node signs and records the round
+as usual and stops at the transaction.
+
+That is why a jailed node looks quiet rather than broken on every panel: there
+are no failures to count, because nothing was sent. `aphelion_weight_bps` is the
+metric that shows it, and one line in the log says it when it starts:
+
+```
+WARN this node's submissions would not be counted; not paying to send them
+     authority="jailed, so the aggregator would refuse every submission until
+     the term is served and `release` is called; see `aphelion-node status`"
+```
+
+Logged on the change rather than on the tick — a line per feed per interval for
+the length of a jail term would be the loudest thing in the log and the least
+informative — so if you have missed it, `aphelion-node status` or `/v1/node`
+will tell you the same thing at any time.
+
+Nothing extra is charged for the silence. `sweep_absent` excuses a zero-weight
+node explicitly and marks it swept, on the reasoning that its silence is the
+punishment already running, so skipping is not trading a fee for a missed round.
+
+**A registry read that fails never stops a submission.** The node keeps the last
+answer it had, and a node that has never managed to read its record submits
+anyway. A refused submission costs one fee; a round you stay quiet for is a
+missed round somebody may sweep. An RPC blip must not turn the first into the
+second.
+
 ---
 
 ## 6. Troubleshooting

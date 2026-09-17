@@ -91,7 +91,10 @@ fn describe_metrics() {
     );
     describe_counter!(
         "aphelion_submissions_total",
-        "On-chain submissions attempted, labelled by feed and outcome"
+        "On-chain submissions attempted, labelled by feed and outcome. \
+         `refused` is the one that costs nothing: the round was aggregated, \
+         signed and recorded, and the transaction was withheld because the \
+         registry gives this node no weight to submit with"
     );
     describe_gauge!(
         "aphelion_clock_skew_seconds",
@@ -102,6 +105,24 @@ fn describe_metrics() {
         "This node's on-chain reputation, 0..10000"
     );
     describe_gauge!("aphelion_stake", "This node's bonded stake, in stroops");
+    describe_gauge!(
+        "aphelion_weight_bps",
+        "Voting weight the aggregator will apply to this node, 0..10000. Zero \
+         means every submission would be refused -- jailed, exiting, or not in \
+         the registry -- and the node stops sending them rather than paying a \
+         fee per feed per round to be told so. Alert on this rather than on \
+         `aphelion_reputation`: reputation is what moves, weight is what \
+         decides, and the step between them means a node can lose a lot of the \
+         first without losing any of the second"
+    );
+    describe_gauge!(
+        "aphelion_standing_deadline_seconds",
+        "Seconds until this node's jail term ends or its unbonding period \
+         elapses; negative once one has passed, which is the point at which \
+         `release` or `withdraw` will succeed and somebody has to send it. \
+         Absent rather than zero when the node is in neither state, so a \
+         threshold rule does not fire permanently on a healthy node"
+    );
     describe_gauge!(
         "aphelion_seconds_since_submission",
         "Seconds since this node last landed a submission for a feed"

@@ -16,7 +16,7 @@ use tower_http::trace::TraceLayer;
 
 use super::AppState;
 use crate::db::Observation;
-use crate::engine::{aggregate, AggregationParams};
+use crate::engine::{aggregate, authority_of, AggregationParams};
 use crate::error::NodeError;
 
 pub fn router(state: AppState) -> Router {
@@ -234,6 +234,15 @@ async fn node(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value
     // down — an operator debugging a connectivity problem needs this to answer.
     let on_chain = state.chain.node_info(&pk).await.ok().flatten();
 
+    // The same judgement the round loop makes, from the same record, so a
+    // dashboard reading this and an operator reading the log cannot disagree
+    // about whether this node's submissions are being counted.
+    //
+    // `null` when the record could not be read at all, which is not the same
+    // as a node with no weight: the first is a question that went unanswered
+    // and the second is an answer.
+    let authority = on_chain.as_ref().map(|_| authority_of(on_chain.as_ref()));
+
     Ok(Json(json!({
         "name": state.config.node.name,
         "public_key": pk,
@@ -246,6 +255,8 @@ async fn node(State(state): State<AppState>) -> ApiResult<Json<serde_json::Value
         },
         "registered": on_chain.is_some(),
         "on_chain": on_chain,
+        "voting": authority.as_ref().map(|a| a.may_submit()),
+        "standing": authority.as_ref().map(|a| a.to_string()),
     })))
 }
 

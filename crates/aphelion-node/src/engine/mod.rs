@@ -23,7 +23,7 @@ pub use beacon::{decide as decide_beacon, Action as BeaconAction, OurPart, OwedR
 pub use collector::{run_retention, Collector};
 pub use duty::{derive as derive_duties, Consequence, Duty, DutyKind, Snapshot, Standing, Watch};
 pub use replay::{replay, visible_at, Replay, Verdict as ReplayVerdict};
-pub use round::{RoundOutcome, RoundRunner};
+pub use round::{authority_of, Authority, Refusal, RoundOutcome, RoundRunner};
 pub use status::{
     assess as assess_status, ChainStatus, DutiesStatus, FeedStatus, Finding, Registration, Report,
     SourceStatus, Verdict,
