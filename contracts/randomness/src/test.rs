@@ -151,6 +151,12 @@ impl Harness<'_> {
         self.env.ledger().set_timestamp(now + seconds);
     }
 
+    fn set_round_interval(&self, seconds: u64) {
+        let mut config = self.randomness.get_config();
+        config.min_round_interval = seconds;
+        self.randomness.set_config(&config);
+    }
+
     /// Open a round, have `nodes` commit, move into the reveal window.
     fn round_with_commits(&self, nodes: &[usize]) -> u64 {
         let id = self.randomness.open_round();
@@ -467,6 +473,78 @@ fn a_new_round_may_open_once_the_old_ones_windows_have_closed() {
         h.randomness.get_round(&first).unwrap().status,
         RoundStatus::Failed
     );
+}
+
+#[test]
+fn the_round_interval_binds_a_round_that_finished_early() {
+    // A round where everyone reveals promptly closes before its reveal
+    // deadline, and that is the ordinary case rather than the exception. The
+    // interval used to be checked only on a round still live, so the ordinary
+    // case was rate-limited by nothing: the next round could open in the same
+    // ledger the last one closed in.
+    let h = setup();
+    h.set_round_interval(3600);
+    let opened_at = h.env.ledger().timestamp();
+
+    let first = h.round_with_commits(&[0, 1, 2]);
+    for n in 0..3 {
+        h.reveal(n);
+    }
+    h.randomness.finalize(&first);
+    assert_eq!(
+        h.randomness.get_round(&first).unwrap().status,
+        RoundStatus::Finalized,
+        "closed early, well inside the reveal window"
+    );
+
+    assert!(
+        h.randomness.try_open_round().is_err(),
+        "five minutes since the last opening, against a floor of an hour"
+    );
+
+    h.env.ledger().set_timestamp(opened_at + 3600);
+    assert_eq!(h.randomness.open_round(), first + 1);
+}
+
+#[test]
+fn the_round_interval_runs_from_the_opening_rather_than_the_close() {
+    // So a round that takes its whole window to finish does not push the next
+    // one out by however long it took. The floor is on the cadence of
+    // openings, which is the thing a consumer reading `latest` observes.
+    let h = setup();
+    h.set_round_interval(3600);
+    let opened_at = h.env.ledger().timestamp();
+
+    let first = h.round_with_commits(&[0, 1, 2]);
+    for n in 0..3 {
+        h.reveal(n);
+    }
+    h.advance(REVEAL_WINDOW + 1);
+    h.randomness.finalize(&first);
+
+    assert!(h.randomness.try_open_round().is_err());
+    h.env.ledger().set_timestamp(opened_at + 3600);
+    assert_eq!(
+        h.randomness.open_round(),
+        first + 1,
+        "the hour is counted from when the first round opened, not from when it closed"
+    );
+}
+
+#[test]
+fn an_interval_of_zero_lets_the_next_round_open_immediately() {
+    // The floor is a governable parameter with no minimum, and a deployment
+    // that sets it to zero has asked for back-to-back rounds. It should get
+    // them rather than a revert.
+    let h = setup();
+    h.set_round_interval(0);
+
+    let first = h.round_with_commits(&[0, 1, 2]);
+    for n in 0..3 {
+        h.reveal(n);
+    }
+    h.randomness.finalize(&first);
+    assert_eq!(h.randomness.open_round(), first + 1);
 }
 
 // -- withholding ------------------------------------------------------------

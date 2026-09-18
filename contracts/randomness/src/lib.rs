@@ -178,7 +178,25 @@ impl Randomness {
                 // finalized must not block the beacon forever. It stays
                 // finalizable -- the penalties and the output are still owed
                 // -- and the next round starts regardless.
-                if live && now.saturating_sub(round.opened_at) < config.min_round_interval {
+                //
+                // The interval, though, is measured from the last opening
+                // whatever became of it. Gating it on `live` exempted the
+                // ordinary path: a round that finalizes is not live, so a
+                // beacon whose rounds all finish cleanly was rate-limited by
+                // nothing at all. That is only invisible while something
+                // external decides when to open a round. It stops being
+                // invisible the moment the nodes do it themselves -- every
+                // participant would race to open the next round the instant
+                // the last one closed, and all but one of them would pay for
+                // a reverted transaction to find out they lost.
+                //
+                // Early finalisation is where the two differ most. A round
+                // where everyone reveals promptly can close well before its
+                // reveal deadline, and without this the next one opens
+                // immediately, so a prompt network gets a faster beacon than
+                // a slow one and `min_round_interval` means nothing on the
+                // network it was configured for.
+                if now.saturating_sub(round.opened_at) < config.min_round_interval {
                     panic_with_error!(&env, RandomnessError::RoundTooSoon);
                 }
             }

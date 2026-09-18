@@ -119,11 +119,13 @@ impl Context {
             view = Some(aphelion_node::engine::beacon::RoundView {
                 id: r.id,
                 status: r.status,
+                opened_at: r.opened_at,
                 commit_deadline: r.commit_deadline,
                 reveal_deadline: r.reveal_deadline,
                 committed: r.committed.len() as u32,
                 revealed: r.revealed.len() as u32,
                 min_participants: params.min_participants,
+                min_round_interval: params.min_round_interval,
                 our_part: r.our_part(&pubkey, secret_on_disk),
             });
         }
@@ -134,9 +136,6 @@ impl Context {
         let mut owed = Vec::new();
         for row in self.repo.beacon_reveals_owed().await? {
             let id = row.round_id();
-            // A round the contract has finished with is not owed anything,
-            // whatever this table says -- the window is shut and the penalty,
-            // if any, has already been applied.
             let chain_round = self.beacon.round(id).await?;
             let Some(chain_round) = chain_round else {
                 continue;
@@ -146,6 +145,20 @@ impl Context {
                 // than try again: a second reveal is refused by the contract
                 // and would be a wasted fee every tick forever.
                 self.repo.mark_revealed(id).await?;
+                continue;
+            }
+            // A round the contract has finished with is not owed anything,
+            // whatever this table says -- the window is shut and the penalty,
+            // if any, has already been applied. Reconciled for the same reason
+            // as the branch above and in the other direction: the reveal will
+            // never be accepted now, and a row left owed would buy a refusal
+            // every tick for as long as the node runs.
+            //
+            // After the revealed check, never before it. A round can be
+            // finalized *and* carry this node's reveal, and that is the
+            // ordinary ending rather than a closure.
+            if chain_round.status.is_over() {
+                self.repo.mark_closed_unrevealed(id).await?;
                 continue;
             }
             owed.push(OwedReveal {
@@ -356,6 +369,10 @@ fn describe_idle(idle: Idle) -> &'static str {
         Idle::WaitingToReveal => "committed; waiting for the commit window to close",
         Idle::Done => "this node has done everything this round asks of it",
         Idle::MissedTheWindow => "the commit window closed before this node entered the round",
+        Idle::BetweenRounds => {
+            "the last round is closed and the next one may not open yet; see \
+             `min_round_interval` in the contract's configuration"
+        }
     }
 }
 
@@ -419,11 +436,24 @@ async fn status(config: &Config, ctx: &Context, json: bool) -> Result<()> {
             );
             println!("  reveals  : {}", r.revealed);
             println!("  our part : {}", describe_part(r.our_part));
-            println!(
-                "  commit by: {}s   reveal by: {}s",
-                r.commit_deadline as i64 - snapshot.now as i64,
-                r.reveal_deadline as i64 - snapshot.now as i64
-            );
+            if r.status.is_over() {
+                // Its deadlines are behind it and counting them down further
+                // says nothing. What an operator wants from a closed round is
+                // when the next one can start, which is the number this loop
+                // is now waiting on.
+                let opens_in = (r.opened_at + r.min_round_interval) as i64 - snapshot.now as i64;
+                if opens_in > 0 {
+                    println!("  next     : a round may open in {opens_in}s");
+                } else {
+                    println!("  next     : a round may open now");
+                }
+            } else {
+                println!(
+                    "  commit by: {}s   reveal by: {}s",
+                    r.commit_deadline as i64 - snapshot.now as i64,
+                    r.reveal_deadline as i64 - snapshot.now as i64
+                );
+            }
         }
     }
 

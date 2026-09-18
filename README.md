@@ -325,8 +325,8 @@ repository, not the target architecture.
 | `aphelion-aggregator` contract — consensus, TWAP, metering, absence sweeps, parameter bounds | ✅ Implemented | 62 |
 | `aphelion-slashing` contract — disputes, answers, committee voting, appeals, elections | ✅ Implemented | 71 |
 | `aphelion-governance` contract — timelocked proposals, guardian veto, self-amendment | ✅ Implemented | 30 |
-| `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 38 |
-| Randomness participation from the node — commit/reveal loop and CLI | ✅ Implemented | 33 |
+| `aphelion-randomness` contract — commit–reveal beacon over the staked node set | ✅ Implemented | 41 |
+| Randomness participation from the node — commit/reveal loop, round cadence and CLI | ✅ Implemented | 39 |
 | `consumer-example` contract — reference dApp integration | ✅ Implemented | 17 |
 | On-chain Byzantine simulation — multi-round adversarial scenarios | ✅ Implemented | 6 |
 | Multi-node simulation — several signers against one in-memory network | ✅ Implemented | 10 |
@@ -341,13 +341,13 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-700 tests in total: 395 off-chain (`cargo test --workspace`), 265 against the
+709 tests in total: 401 off-chain (`cargo test --workspace`), 268 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 395 are: 38 in `aphelion-core`, 277 in the node's library, 11 in
+The off-chain 401 are: 38 in `aphelion-core`, 283 in the node's library, 11 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 277 — 15 in the harness, and 54 across the
+target, so they are *not* inside the 283 — 15 in the harness, and 54 across the
 four integration suites (duties 12, evidence 21, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
@@ -355,14 +355,14 @@ because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 277. Committee participation is the same shape: its 12 cover assembling a
+node's 283. Committee participation is the same shape: its 12 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 27 more
-unit tests with 8 on decoding what the contract returns, all inside the 277 —
+unit tests with 8 on decoding what the contract returns, all inside the 283 —
 with 8 of the binary target's 11 command tests beside it. The dispute evidence
 pair is split the same way again: 21 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 43 more unit tests inside the 277, with 20 on the replay that
+itself has 43 more unit tests inside the 283, with 20 on the replay that
 produces what they judge. The status page splits in two for the same reason:
 38 of its 41 are the verdict, which is a pure function and lives in the
 library, and 3 are the rendering, which lives in the binary. The harness's 15
@@ -1336,6 +1336,32 @@ true — switching it off stops the node entering new rounds, it does not releas
 it from one it is already in. The loop therefore runs whenever a
 `randomness_contract` is configured, not only when participation is on.
 
+**Participating nodes are also what starts the next round.** The contract runs
+one round at a time and `open_round` is permissionless, so a round follows the
+last one only because somebody pays for it to. That somebody is this loop, at
+the moment the previous round closes — which is the only moment the contract
+will accept the call, since a round still running is refused as
+`RoundInProgress`. A deployment where nothing opens rounds has a beacon that
+produces one value and stops, with every node correctly reporting that it has
+done everything asked of it.
+
+The cadence is the contract's `min_round_interval`, measured from one opening
+to the next rather than from a close, so a round that finalises early does not
+buy the next one an earlier start. The node checks it before paying: with
+several operators running this loop, all of them see the same closed round at
+the same time, and the ones who lose the race to open the next should not each
+buy a `RoundTooSoon` revert to find out. `beacon status` counts it down on a
+closed round in place of the deadlines it has already passed:
+
+```
+round 41
+  status   : Finalized
+  commits  : 5 (3 needed to publish)
+  reveals  : 5
+  our part : revealed
+  next     : a round may open in 248s
+```
+
 > [!IMPORTANT]
 > **The secret is written to Postgres before the commitment is submitted.**
 > Between the two transactions the node holds the only copy of something
@@ -2129,6 +2155,11 @@ decisions rather than the plumbing:
   cannot be removed
 - `aphelion-consumer-example` — that a single-round crash cannot liquidate a
   solvent borrower, and a sustained one can
+- `aphelion-node::engine::beacon` — that an owed reveal outranks eligibility,
+  participation and whatever the current round is doing; that a round the
+  contract has closed is where the next one starts rather than somewhere the
+  node sits; and that neither `finalize` nor `open_round` is paid for when the
+  contract would refuse it
 - `aphelion-node::engine::upkeep` — that a node never offers its own key to a
   sweep, that a key the aggregator would decline is not paid for twice, and that
   the longest silence goes first when a batch has to be truncated

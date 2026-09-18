@@ -24,6 +24,10 @@ use crate::error::{NodeError, Result};
 pub struct ChainRound {
     pub id: u64,
     pub status: RoundStatus,
+    /// When the round was opened. Carried because the contract measures
+    /// `min_round_interval` from it, so this is what says whether the next
+    /// round may be opened yet.
+    pub opened_at: u64,
     pub commit_deadline: u64,
     pub reveal_deadline: u64,
     pub committed: Vec<String>,
@@ -184,6 +188,7 @@ fn decode_round(v: &serde_json::Value) -> Result<ChainRound> {
             v.get("status")
                 .ok_or_else(|| NodeError::Chain(format!("round has no `status`: {v}")))?,
         )?,
+        opened_at: field("opened_at")?,
         commit_deadline: field("commit_deadline")?,
         reveal_deadline: field("reveal_deadline")?,
         committed: key_list(v.get("committed")),
@@ -317,6 +322,7 @@ mod tests {
         serde_json::json!({
             "id": 7,
             "status": "Revealing",
+            "opened_at": 1_735_689_600u64,
             "commit_deadline": 1_735_689_700u64,
             "reveal_deadline": 1_735_690_000u64,
             "committed": ["aa", "bb"],

@@ -324,8 +324,22 @@ Optional, and only if the deployment runs one (`randomness_contract` in the
 ```
 
 Set `[beacon] participate = true` to have a running node commit to each round
-and open one when none is running. Off by default: it spends transaction fees
-on work nobody is obliged to do.
+and open the next one when the last has closed. Off by default: it spends
+transaction fees on work nobody is obliged to do.
+
+That second half matters more than it sounds. `open_round` is permissionless
+and the contract runs one round at a time, so on a deployment where no operator
+has switched participation on, the beacon produces one value and then sits
+still — not broken, just never started again. The cadence is the contract's
+`min_round_interval`, counted from one opening to the next, and `beacon status`
+counts it down on a closed round:
+
+```
+round 41
+  status   : Finalized
+  our part : revealed
+  next     : a round may open in 248s
+```
 
 The thing to understand before turning it on is what a commitment obliges you
 to. A round is two transactions — commit, then reveal — separated by a window
@@ -340,6 +354,10 @@ So three things follow, and the node is built around them:
 - Revealing is not gated by `participate`. Switching it off stops the node
   entering new rounds; it does not release it from one it has already entered,
   and the loop keeps running to send that reveal.
+- A round the contract has closed without your reveal is recorded locally as
+  closed rather than retried. The no-show penalty was charged on chain by
+  `finalize` and no later reveal will be accepted, so `beacon_rounds.closed_at`
+  is where to look for which round it was and when.
 - `beacon.interval` must be comfortably shorter than the contract's reveal
   window. A node that looks once per window can sleep through one. `beacon
   status` compares the two and warns; the config refuses anything above 120s.

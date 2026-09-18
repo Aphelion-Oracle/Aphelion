@@ -208,7 +208,7 @@ impl Repo {
     /// What this node stored for a round, if anything.
     pub async fn beacon_round(&self, round_id: u64) -> Result<Option<BeaconRow>> {
         let row = sqlx::query_as::<_, BeaconRow>(
-            "SELECT round_id, secret_hex, commitment, committed_at, revealed_at
+            "SELECT round_id, secret_hex, commitment, committed_at, revealed_at, closed_at
              FROM beacon_rounds WHERE round_id = $1",
         )
         .bind(round_id as i64)
@@ -235,15 +235,38 @@ impl Repo {
         Ok(())
     }
 
+    /// Record that the contract closed a round this node had not opened its
+    /// commitment for.
+    ///
+    /// The third terminal state, and a separate call from
+    /// [`Self::mark_revealed`] because it means the opposite thing: the reveal
+    /// never landed, the no-show penalty has already been charged on chain,
+    /// and there is nothing left to send. Writing `revealed_at` instead would
+    /// have stopped the retries and left the table claiming this node did
+    /// something it did not do.
+    ///
+    /// Only ever called for a round the contract reports as finalized or
+    /// failed, so it cannot close a round that is merely late.
+    pub async fn mark_closed_unrevealed(&self, round_id: u64) -> Result<()> {
+        sqlx::query(
+            "UPDATE beacon_rounds SET closed_at = now()
+             WHERE round_id = $1 AND revealed_at IS NULL AND closed_at IS NULL",
+        )
+        .bind(round_id as i64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Rounds this node committed to and has not opened, oldest first.
     ///
     /// Oldest first because its deadline is the nearest, and the node can only
     /// send one reveal per tick.
     pub async fn beacon_reveals_owed(&self) -> Result<Vec<BeaconRow>> {
         let rows = sqlx::query_as::<_, BeaconRow>(
-            "SELECT round_id, secret_hex, commitment, committed_at, revealed_at
+            "SELECT round_id, secret_hex, commitment, committed_at, revealed_at, closed_at
              FROM beacon_rounds
-             WHERE committed_at IS NOT NULL AND revealed_at IS NULL
+             WHERE committed_at IS NOT NULL AND revealed_at IS NULL AND closed_at IS NULL
              ORDER BY round_id",
         )
         .fetch_all(&self.pool)

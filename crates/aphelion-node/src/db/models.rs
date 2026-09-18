@@ -164,6 +164,10 @@ pub struct BeaconRow {
     pub commitment: String,
     pub committed_at: Option<DateTime<Utc>>,
     pub revealed_at: Option<DateTime<Utc>>,
+    /// Set when the contract closed the round with this node's commitment
+    /// still unopened. The local trace of a no-show penalty; see
+    /// `migrations/0004_beacon_closed.sql`.
+    pub closed_at: Option<DateTime<Utc>>,
 }
 
 impl BeaconRow {
@@ -171,9 +175,14 @@ impl BeaconRow {
         self.round_id as u64
     }
 
-    /// The commitment reached the ledger and the secret has not been opened.
+    /// The commitment reached the ledger and the secret has not been opened,
+    /// and the round is still one the contract would accept a reveal for.
+    ///
+    /// `closed_at` is part of the condition rather than a separate check: a
+    /// round the contract has finished with is not owed a reveal, however long
+    /// this row has been waiting to send one.
     pub fn reveal_owed(&self) -> bool {
-        self.committed_at.is_some() && self.revealed_at.is_none()
+        self.committed_at.is_some() && self.revealed_at.is_none() && self.closed_at.is_none()
     }
 
     /// The stored secret as 32 bytes.
