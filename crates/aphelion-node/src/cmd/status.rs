@@ -13,6 +13,11 @@
 //! comparison nobody was making belongs on a page about whether the node is
 //! all right.
 //!
+//! The beacon is a seventh, on a deployment that runs one, and is read off the
+//! ledger alone. `beacon status` knows more because it reads the secrets this
+//! node stored; see [`aphelion_node::engine::status::BeaconStatus`] for why
+//! what the ledger says without them is still enough for a verdict.
+//!
 //! The registry's minimum stake is read for the same reason and is not a
 //! section: on its own it says nothing, and what it is for is the two
 //! sentences it lets the standing line finish. A jailed node is refused by
@@ -36,12 +41,13 @@ use std::io::Write;
 use std::sync::Arc;
 
 use aphelion_node::chain::committee::{CliCommittee, CommitteeClient};
+use aphelion_node::chain::randomness::{BeaconClient, CliBeacon};
 use aphelion_node::chain::{ChainClient, CliChain, OnChainNode, RpcClient};
 use aphelion_node::config::Config;
 use aphelion_node::engine::duty::{Consequence, Watch};
 use aphelion_node::engine::status::{
-    assess, humanise, stroops, ChainStatus, DutiesStatus, EvidenceWindow, FeedStatus, Registration,
-    Report, SourceStatus, Verdict,
+    assess, humanise, stroops, BeaconRound, BeaconStatus, ChainStatus, DutiesStatus,
+    EvidenceWindow, FeedStatus, Registration, Report, SourceStatus, Verdict,
 };
 use aphelion_node::error::{NodeError, Result};
 use aphelion_node::signer::NodeSigner;
@@ -203,6 +209,31 @@ async fn gather(config: &Config, probe: bool) -> Result<Report> {
         });
     }
 
+    // -- the beacon ---------------------------------------------------------
+    //
+    // From the ledger alone. `beacon status` knows more because it reads the
+    // secrets this node stored, but that needs the database, and this page
+    // does not get one. What the ledger says without it is enough for the
+    // verdict: whether this node's commitment is sitting unopened, and whether
+    // anyone is still opening rounds.
+    //
+    // Read whether or not `participate` is on, because a reveal is owed
+    // regardless of it.
+    let beacon = match (&config.network.randomness_contract, &chain_client) {
+        (None, _) => BeaconStatus::NotConfigured,
+        (Some(_), None) => BeaconStatus::Unavailable {
+            because: chain_unavailable
+                .clone()
+                .unwrap_or_else(|| "no chain client".into()),
+        },
+        (Some(_), Some(_)) => match read_beacon(config, &public_key).await {
+            Ok(read) => read,
+            Err(e) => BeaconStatus::Unavailable {
+                because: e.to_string(),
+            },
+        },
+    };
+
     // -- duties -------------------------------------------------------------
     let duties = match (&config.network.slashing_contract, &chain_client) {
         (None, _) => DutiesStatus::NotConfigured,
@@ -261,8 +292,35 @@ async fn gather(config: &Config, probe: bool) -> Result<Report> {
         sources: source_results,
         duties,
         evidence,
+        beacon,
         min_stake,
         heartbeat_secs: config.engine.heartbeat.as_secs() as i64,
+    })
+}
+
+/// The beacon's parameters and the round it is running, or last ran.
+async fn read_beacon(config: &Config, public_key: &str) -> Result<BeaconStatus> {
+    let beacon = CliBeacon::new(&config.network)?;
+    let params = beacon.params().await?;
+    let latest = match beacon.round_count().await? {
+        0 => None,
+        n => beacon.round(n).await?.map(|r| BeaconRound {
+            id: r.id,
+            status: r.status,
+            opened_at: r.opened_at,
+            commit_deadline: r.commit_deadline,
+            reveal_deadline: r.reveal_deadline,
+            committed: r.has_committed(public_key),
+            revealed: r.has_revealed(public_key),
+        }),
+    };
+    Ok(BeaconStatus::Read {
+        participate: config.beacon.participate,
+        poll_secs: config.beacon.interval.as_secs(),
+        min_round_interval: params.min_round_interval,
+        no_show_rep_penalty: params.no_show_rep_penalty,
+        no_show_slash: params.no_show_slash,
+        latest,
     })
 }
 
@@ -314,6 +372,58 @@ fn standing_clock(n: &OnChainNode, r: &Report) -> String {
         d if now < d => format!(" · {waiting} {}", humanise(d - now)),
         _ => format!(" · {ready}"),
     }
+}
+
+/// The beacon's round and this node's part in it, on one line.
+///
+/// Printed on a good day as well as a bad one, for the reason the evidence
+/// line is: the thing an operator wants to see when nothing is wrong is that
+/// the round number is moving.
+fn beacon_line(r: &Report) -> Option<String> {
+    let BeaconStatus::Read {
+        participate,
+        min_round_interval,
+        latest,
+        ..
+    } = &r.beacon
+    else {
+        return match &r.beacon {
+            BeaconStatus::Unavailable { .. } => Some("unread".into()),
+            _ => None,
+        };
+    };
+    let taking_part = if *participate {
+        "participating"
+    } else {
+        "not participating"
+    };
+    let Some(round) = latest else {
+        return Some(format!("no round yet · {taking_part}"));
+    };
+    let part = match (round.committed, round.revealed) {
+        (true, true) => "revealed",
+        (true, false) => "committed, not revealed",
+        _ => "not entered",
+    };
+    let status = serde_json::to_value(round.status)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let next = match r.chain.ledger_time {
+        Some(now) if round.status.is_over() => {
+            let opens = round.opened_at.saturating_add(*min_round_interval);
+            if now < opens {
+                format!(" · next opens in {}", humanise(opens - now))
+            } else {
+                " · next round openable now".into()
+            }
+        }
+        _ => String::new(),
+    };
+    Some(format!(
+        "round {} {status} · {part} · {taking_part}{next}",
+        round.id
+    ))
 }
 
 fn render(r: &Report, verdict: Verdict, findings: &[aphelion_node::engine::status::Finding]) {
@@ -404,6 +514,10 @@ fn render(r: &Report, verdict: Verdict, findings: &[aphelion_node::engine::statu
         ),
     }
 
+    if let Some(line) = beacon_line(r) {
+        println!("\nbeacon     : {line}");
+    }
+
     println!("\n{}", verdict.as_str().to_uppercase());
     for f in findings {
         println!("  [{}] {}", f.verdict.as_str(), f.detail);
@@ -445,6 +559,7 @@ mod tests {
             sources: Vec::new(),
             duties: DutiesStatus::NotConfigured,
             evidence: EvidenceWindow::NotConfigured,
+            beacon: BeaconStatus::NotConfigured,
             min_stake: Some(500 * 10_000_000),
             heartbeat_secs: 300,
         }
@@ -486,6 +601,39 @@ mod tests {
             "",
             "the clock is the ledger's; this machine's is never a substitute"
         );
+    }
+
+    #[test]
+    fn the_beacon_line_counts_down_to_the_next_round_and_then_stops_counting() {
+        use aphelion_node::engine::beacon::RoundStatus;
+        let mut r = report(Some(NOW));
+        r.beacon = BeaconStatus::Read {
+            participate: true,
+            poll_secs: 30,
+            min_round_interval: 600,
+            no_show_rep_penalty: 250,
+            no_show_slash: 0,
+            latest: Some(BeaconRound {
+                id: 41,
+                status: RoundStatus::Finalized,
+                opened_at: NOW - 360,
+                commit_deadline: NOW - 260,
+                reveal_deadline: NOW - 60,
+                committed: true,
+                revealed: true,
+            }),
+        };
+        assert_eq!(
+            beacon_line(&r).unwrap(),
+            "round 41 finalized · revealed · participating · next opens in 4m"
+        );
+        r.chain.ledger_time = Some(NOW + 600);
+        assert_eq!(
+            beacon_line(&r).unwrap(),
+            "round 41 finalized · revealed · participating · next round openable now"
+        );
+        r.beacon = BeaconStatus::NotConfigured;
+        assert_eq!(beacon_line(&r), None);
     }
 
     /// The line and the findings quote the same amount, so they read as one

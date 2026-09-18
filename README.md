@@ -333,7 +333,7 @@ repository, not the target architecture.
 | Absence sweeps — a node that charges the silence nobody else is charging | ✅ Implemented | 11 |
 | Committee participation — disputes and elections, from the node | ✅ Implemented | 12 |
 | Dispute evidence — replay a round, put the answer on the record, and check a document against either side of the record it was filed or answered with | ✅ Implemented | 84 |
-| Operator status page — seven reads, one verdict, an exit code | ✅ Implemented | 41 |
+| Operator status page — eight reads, one verdict, an exit code | ✅ Implemented | 55 |
 | Multi-process harness — several node *processes* against one deployment | ✅ Implemented | 15 |
 | `verify-deployment.sh` — reads a live deployment back and checks it | ✅ Implemented | 40 |
 | Testnet deployment | 📋 Planned | — |
@@ -341,13 +341,13 @@ repository, not the target architecture.
 
 Legend: ✅ implemented and tested · 🚧 in progress · 📋 planned
 
-709 tests in total: 401 off-chain (`cargo test --workspace`), 268 against the
+723 tests in total: 415 off-chain (`cargo test --workspace`), 268 against the
 contracts (`cargo test --manifest-path contracts/Cargo.toml`) and 40 against the
 deployment verifier (`tests/deployment/run.sh`, no cargo and no network).
 
-The off-chain 401 are: 38 in `aphelion-core`, 283 in the node's library, 11 in
+The off-chain 415 are: 38 in `aphelion-core`, 296 in the node's library, 12 in
 its binary — the subcommands live in `main.rs` and are compiled as a separate
-target, so they are *not* inside the 283 — 15 in the harness, and 54 across the
+target, so they are *not* inside the 296 — 15 in the harness, and 54 across the
 four integration suites (duties 12, evidence 21, multi-node 10, sweep 11).
 
 Several figures in the table above are smaller than the suite they belong to,
@@ -355,22 +355,22 @@ because the suite shares a crate with something else. The Byzantine
 simulation's 6 live inside the aggregator, so its 62 and their 6 are reported
 as one figure of 68 by `cargo test`. The absence sweep's 11 are its own
 integration suite while the decision it makes has 13 more unit tests inside the
-node's 283. Committee participation is the same shape: its 12 cover assembling a
+node's 296. Committee participation is the same shape: its 12 cover assembling a
 snapshot off the chain, and the rules applied to that snapshot have 27 more
-unit tests with 8 on decoding what the contract returns, all inside the 283 —
-with 8 of the binary target's 11 command tests beside it. The dispute evidence
+unit tests with 8 on decoding what the contract returns, all inside the 296 —
+with 8 of the binary target's 12 command tests beside it. The dispute evidence
 pair is split the same way again: 21 integration tests run the real `replay`
 into the real `verify` through actual JSON, because that is the seam where the
 two could rot apart without either side's own tests noticing, and the judgement
-itself has 43 more unit tests inside the 283, with 20 on the replay that
+itself has 43 more unit tests inside the 296, with 20 on the replay that
 produces what they judge. The status page splits in two for the same reason:
-38 of its 41 are the verdict, which is a pure function and lives in the
-library, and 3 are the rendering, which lives in the binary. The harness's 15
+51 of its 55 are the verdict, which is a pure function and lives in the
+library, and 4 are the rendering, which lives in the binary. The harness's 15
 are 12 process-level tests plus 3 covering the fake CLI's argument parsing.
 
 Be aware of what the 12 do without a database: they skip, and a skipped Rust
 test still reports as **passed**. A green `cargo test --workspace` on a machine
-with no Postgres has run 383 tests and reported 395. The skip prints a `SKIP`
+with no Postgres has run 397 tests and reported 409. The skip prints a `SKIP`
 line, but `cargo test` swallows it unless you pass `--nocapture`, so treat the
 harness as covered only where it is actually given a database — which is what
 the `harness` job in CI is for.
@@ -943,6 +943,8 @@ duties     : 0 costly · 1 forfeited · 0 owed · 2 housekeeping
 
 evidence   : 30d retained · defends rounds up to 27d old
 
+beacon     : round 41 finalized · revealed · participating · next opens in 4m
+
 DEGRADED
   [degraded] USDC_USD: 1 live source(s), 2 required; this feed will not be signed
   [degraded] 1 of 11 source probe(s) failed, across coinbase
@@ -958,6 +960,14 @@ reports something already true rather than something happening now. Everything
 else says the node has stopped doing its job; this says it is doing it perfectly
 and could not prove it later. See [Keeping enough to answer
 with](#keeping-enough-to-answer-with).
+
+The seventh is the randomness beacon, on a deployment that runs one, read off
+the ledger alone. `beacon status` knows more — it reads the secrets this node
+stored — but it needs the database, and this page does not get one. What the
+ledger says without it is enough for a verdict: whether a commitment of this
+node's is sitting unopened, whether the last round charged it for one, and
+whether anybody is still opening rounds. See [The beacon on the status
+page](#the-beacon-on-the-status-page).
 
 The registry line carries a clock when the node is in a state that ends at one.
 See [Jail, exit, and the clock on each](#jail-exit-and-the-clock-on-each).
@@ -986,7 +996,8 @@ parsing its output:
 
 Critical is reserved for: an unreachable RPC endpoint, a key the registry does
 not know, a jailed node, every feed short of sources at once, a duty whose
-deadline costs stake, and a retention window too short to answer a dispute with.
+deadline costs stake, a beacon reveal the loop should already have sent, and a
+retention window too short to answer a dispute with.
 The last two are not faults in the node at all — the grade answers "should
 somebody act now?", and a closing appeal window is the one thing on the page
 that cannot be done late, while a retention setting is the one thing that cannot
@@ -995,6 +1006,35 @@ be fixed after it matters.
 Housekeeping duties deliberately never colour the verdict. They are work the
 network needs and anybody may do; charging them to this operator's status page
 would leave every node in the network permanently amber.
+
+#### The beacon on the status page
+
+```
+beacon     : round 41 finalized · revealed · participating · next opens in 4m
+```
+
+Three findings, and each waits out two of the beacon loop's polls
+(`[beacon] interval`) before it says anything. A commitment sits unopened for
+part of every round by design, and a closed round sits unanswered for however
+long the loop takes to look; grading either the moment it appeared would put a
+healthy participant through `degraded` once a round, and a health check that
+flaps on the ordinary cadence is one nobody reads.
+
+| What `status` says | What it means |
+| --- | --- |
+| `[critical] committed to beacon round N and not yet revealed` | The reveal window is open, the loop has had two chances to send it and has not. Missing it costs the no-show penalty, which the finding quotes. If the node is down, `aphelion-node beacon reveal` |
+| `[degraded] committed to beacon round N and never revealed` | The window has shut, so the penalty is charged or about to be, and nothing can change that. The ledger cannot say whether the secret was lost or the node was down for the whole window; `beacon status` reads the database and can |
+| `[degraded] the beacon has stopped` | A round could have been opened, or finalized, for longer than two polls and nobody has. Only reported to a participant with weight, because keeping the beacon going is what `participate` signs a node up for |
+
+A stopped beacon was the failure that needed this. One that has published once
+and then stopped looks, to everything that reads it, exactly like one between
+rounds: `latest` still answers, nothing reverts, nothing logs. The only symptom
+is a round that could have been opened and was not.
+
+The owed-reveal findings are reported whether or not `participate` is on, for
+the same reason the loop sends the reveal whether or not it is: switching
+participation off stops the node entering rounds, not the obligation from one it
+already entered.
 
 #### Jail, exit, and the clock on each
 

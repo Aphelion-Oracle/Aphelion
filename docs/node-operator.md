@@ -190,7 +190,8 @@ what makes registering many fresh identities an expensive way to buy influence.
 ```
 
 Identity, chain, registry standing, per-feed source counts, live exchange
-probes and outstanding duties, on one page with a verdict on the end. It exits
+probes, outstanding duties and — on a deployment with a randomness contract —
+this node's part in the beacon, on one page with a verdict on the end. It exits
 0 when healthy, 1 when degraded and 2 when critical, so it works as a health
 check or a cron line with nothing parsing its output.
 
@@ -361,6 +362,14 @@ So three things follow, and the node is built around them:
 - `beacon.interval` must be comfortably shorter than the contract's reveal
   window. A node that looks once per window can sleep through one. `beacon
   status` compares the two and warns; the config refuses anything above 120s.
+
+`aphelion-node status` carries a `beacon` line too, read from the ledger
+without the database. It goes critical when a commitment of yours is still
+unopened two polls into the reveal window, degraded once a missed reveal has
+become a penalty, and degraded when a round has been openable for longer than
+two polls and nobody — including your participating node — has opened it. That
+last one is the only way a stopped beacon shows at all: from outside, it looks
+exactly like one between rounds.
 
 **Back up your database.** This is the one part of the node where restoring
 from a backup older than your last commitment costs money: the commitment is a

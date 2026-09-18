@@ -24,6 +24,7 @@ use std::fmt;
 use aphelion_core::FeedId;
 use serde::Serialize;
 
+use super::beacon::RoundStatus;
 use crate::chain::OnChainNode;
 
 /// How bad it is, in the three grades an operator actually acts on.
@@ -246,6 +247,89 @@ impl EvidenceWindow {
     }
 }
 
+/// This node's part in the randomness beacon, as the ledger shows it.
+///
+/// Read from the chain alone, which is what lets it sit on this page at all:
+/// `beacon status` knows more, because it reads the secrets this node stored,
+/// and needs the database for it. What the ledger can say without that is
+/// narrower and turns out to be the part worth a verdict — whether a
+/// commitment of this node's is sitting unopened, whether the last round
+/// charged it for one, and whether the beacon has stopped.
+///
+/// The last of those was invisible before. A beacon that has published once
+/// and then stopped looks, to everything that reads it, exactly like a beacon
+/// between rounds: `latest` holds a value, nothing reverts, nothing logs. The
+/// only symptom is a round that could have been opened and was not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BeaconStatus {
+    /// No `randomness_contract` in the configuration: this deployment runs no
+    /// beacon, or this node was never pointed at it.
+    NotConfigured,
+    /// Configured, and the read failed.
+    Unavailable { because: String },
+    Read {
+        /// `[beacon] participate`.
+        participate: bool,
+        /// `[beacon] interval`, in seconds: how often the loop looks. Used as
+        /// the grace a running loop is given before its silence means anything.
+        poll_secs: u64,
+        /// The contract's floor between one opening and the next.
+        min_round_interval: u64,
+        no_show_rep_penalty: u32,
+        no_show_slash: i128,
+        /// The round the contract is running, or last ran. `None` only before
+        /// the first round a deployment ever opens.
+        latest: Option<BeaconRound>,
+    },
+}
+
+/// One beacon round, reduced to what this node's part in it was.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BeaconRound {
+    pub id: u64,
+    pub status: RoundStatus,
+    pub opened_at: u64,
+    pub commit_deadline: u64,
+    pub reveal_deadline: u64,
+    /// This node's key is among the commitments.
+    pub committed: bool,
+    /// And among the reveals.
+    pub revealed: bool,
+}
+
+impl BeaconRound {
+    /// A commitment of this node's that the round has not seen opened.
+    pub fn unopened(&self) -> bool {
+        self.committed && !self.revealed
+    }
+}
+
+impl BeaconStatus {
+    /// Ledger time from which the beacon has been waiting on somebody, if it
+    /// is.
+    ///
+    /// Two states wait on a permissionless call and nothing else: a closed
+    /// round whose `min_round_interval` has run, waiting for `open_round`, and
+    /// a live round past its reveal deadline, waiting for `finalize`. Anything
+    /// else is waiting on a clock, which needs nobody.
+    pub fn waiting_since(&self) -> Option<u64> {
+        let Self::Read {
+            min_round_interval,
+            latest: Some(round),
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if round.status.is_over() {
+            Some(round.opened_at.saturating_add(*min_round_interval))
+        } else {
+            Some(round.reveal_deadline)
+        }
+    }
+}
+
 /// Everything gathered, before anything is concluded from it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Report {
@@ -259,6 +343,8 @@ pub struct Report {
     pub duties: DutiesStatus,
     /// Whether a dispute filed against this node could still be answered.
     pub evidence: EvidenceWindow,
+    /// This node's part in the randomness beacon, from the ledger.
+    pub beacon: BeaconStatus,
     /// The stake the registry currently requires, if it could be read.
     ///
     /// `None` is not zero. A bond compared against a minimum nobody could read
@@ -446,6 +532,9 @@ pub fn assess(report: &Report) -> (Verdict, Vec<Finding>) {
             let _ = housekeeping;
         }
     }
+
+    // -- the beacon ---------------------------------------------------------
+    findings.extend(beacon(report));
 
     // -- the evidence window ------------------------------------------------
     //
@@ -670,6 +759,159 @@ fn under_bonded(node: &OnChainNode, report: &Report) -> Option<Finding> {
     ))
 }
 
+// ---------------------------------------------------------------------------
+// the beacon
+// ---------------------------------------------------------------------------
+
+/// What the ledger says about this node's part in the beacon.
+///
+/// Every finding here is timed against the loop rather than against the
+/// contract alone, and that is what keeps a healthy node green. A commitment
+/// sits unopened for part of every round by design — it cannot be opened
+/// until the commit window closes — and a closed round sits unopened-after
+/// for however long the loop takes to look. Grading either the moment it
+/// appears would put a participating node through `degraded` once a round, and
+/// a health check that flaps on the ordinary cadence is one nobody reads. So
+/// each waits out two of the loop's polls first: one it may have just missed,
+/// and one it should not have.
+fn beacon(report: &Report) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let (participate, poll_secs, no_show_rep_penalty, no_show_slash, latest) = match &report.beacon
+    {
+        BeaconStatus::NotConfigured => return out,
+        BeaconStatus::Unavailable { because } => {
+            out.push(Finding::new(
+                Verdict::Degraded,
+                format!(
+                    "could not read the randomness beacon, so whether this node owes it a \
+                     reveal is unchecked: {because}"
+                ),
+            ));
+            return out;
+        }
+        BeaconStatus::Read {
+            participate,
+            poll_secs,
+            no_show_rep_penalty,
+            no_show_slash,
+            latest,
+            ..
+        } => (
+            *participate,
+            *poll_secs,
+            *no_show_rep_penalty,
+            *no_show_slash,
+            latest.as_ref(),
+        ),
+    };
+    // Every judgement below is a comparison against a deadline on the ledger,
+    // and this machine's clock is never a substitute for its.
+    let Some(now) = report.chain.ledger_time else {
+        return out;
+    };
+    let grace = 2 * poll_secs;
+    let penalty = format!(
+        "{no_show_rep_penalty} reputation and {} of stake",
+        stroops(no_show_slash)
+    );
+
+    if let Some(round) = latest.filter(|r| r.unopened()) {
+        if round.status.is_over() || now > round.reveal_deadline {
+            // Already happened, or certain to: the window is shut and
+            // `finalize` bills every commitment it finds unopened. Degraded
+            // rather than critical because nothing on this page can be done
+            // about it, and critical is for things that can.
+            //
+            // It is still a finding, and not only a line, because the cause is
+            // not on the ledger. Either the secret is gone or the node was not
+            // running through a whole reveal window, and both of those will
+            // cost the same again next round.
+            out.push(Finding::new(
+                Verdict::Degraded,
+                format!(
+                    "committed to beacon round {} and never revealed: {} the no-show \
+                     penalty of {penalty}. The ledger cannot say whether the secret was lost \
+                     or the node was down for the whole reveal window, and the difference \
+                     decides what to fix — `aphelion-node beacon status` reads the database \
+                     and can",
+                    round.id,
+                    if round.status.is_over() {
+                        "the round is closed and has charged"
+                    } else {
+                        "the window has shut, and whoever finalizes the round charges"
+                    },
+                ),
+            ));
+        } else if now > round.commit_deadline.saturating_add(grace) {
+            // Open, and open long enough that a running loop would have sent
+            // it. Critical because this is the one thing on the page whose
+            // cost is fixed and whose deadline is minutes away.
+            out.push(Finding::new(
+                Verdict::Critical,
+                format!(
+                    "committed to beacon round {} and not yet revealed, with {} of the reveal \
+                     window left; missing it costs {penalty}. The loop should have sent this \
+                     by now — if the node is not running, `aphelion-node beacon reveal`",
+                    round.id,
+                    humanise(round.reveal_deadline - now),
+                ),
+            ));
+        }
+    }
+
+    // A stopped beacon is the network's problem, reported here only to a node
+    // that has signed up to keep it going. Charged to everybody it would make
+    // every non-participant permanently degraded on a deployment where nobody
+    // runs the beacon, which is the same reason housekeeping duties are not a
+    // finding.
+    //
+    // Nor to a participant that is not allowed to act: the loop opens and
+    // finalizes only for a node with weight, and a node without it already
+    // has a finding above saying why.
+    let can_act = match &report.registration {
+        Registration::Present(node) => node.weight_bps > 0,
+        Registration::Absent => false,
+        Registration::Unknown { .. } => true,
+    };
+    if participate && can_act {
+        match (latest, report.beacon.waiting_since()) {
+            (None, _) => out.push(Finding::new(
+                Verdict::Degraded,
+                "the beacon has never run a round, and this node participates: its loop opens \
+                 the first one on the tick after it starts. If the node is running and this \
+                 persists, `aphelion-node beacon tick` will say what it is waiting on",
+            )),
+            (Some(round), Some(since)) if now > since.saturating_add(grace) => {
+                let what = if round.status.is_over() {
+                    format!(
+                        "round {} closed and the next one could have opened {} — nobody has",
+                        round.id,
+                        ago(now - since)
+                    )
+                } else {
+                    format!(
+                        "round {}'s reveal window shut {} and nobody has finalized it",
+                        round.id,
+                        ago(now - since)
+                    )
+                };
+                out.push(Finding::new(
+                    Verdict::Degraded,
+                    format!(
+                        "the beacon has stopped: {what}. This node participates, so its own \
+                         loop should have made that call. From outside a stopped beacon looks \
+                         exactly like one between rounds — `latest` still answers — so \
+                         consumers will not notice until they need a fresh value"
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
 /// How long ago, phrased so that "now" does not come out as a duration.
 fn ago(secs: u64) -> String {
     match secs {
@@ -806,8 +1048,35 @@ mod tests {
                 voting_period: DAY,
                 appeal_period: DAY,
             },
+            // A participating node partway through a commit window it has not
+            // entered yet: the ordinary state of a running beacon, and one
+            // that asks nothing of anybody.
+            beacon: running_beacon(BeaconRound {
+                id: 12,
+                status: RoundStatus::Committing,
+                opened_at: NOW - 100,
+                commit_deadline: NOW + 100,
+                reveal_deadline: NOW + 400,
+                committed: false,
+                revealed: false,
+            }),
             min_stake: Some(MIN_STAKE),
             heartbeat_secs: 300,
+        }
+    }
+
+    /// `[beacon] interval` in the fixtures, so every grace period is twice it.
+    const POLL: u64 = 30;
+    const ROUND_INTERVAL: u64 = 600;
+
+    fn running_beacon(latest: BeaconRound) -> BeaconStatus {
+        BeaconStatus::Read {
+            participate: true,
+            poll_secs: POLL,
+            min_round_interval: ROUND_INTERVAL,
+            no_show_rep_penalty: 250,
+            no_show_slash: 10 * UNIT,
+            latest: Some(latest),
         }
     }
 
@@ -1376,5 +1645,210 @@ mod tests {
         // subtraction is one slip away from producing one and `-0.5` is a
         // better thing to print than a number the size of the address space.
         assert_eq!(stroops(-UNIT / 2), "-0.5");
+    }
+
+    // -- the beacon ---------------------------------------------------------
+
+    /// Round 12 with this node committed, `now` seconds past its commit
+    /// deadline, in `status`.
+    fn committed(past_commit: u64, status: RoundStatus, revealed: bool) -> Report {
+        Report {
+            chain: ChainStatus {
+                ledger_time: Some(NOW + past_commit),
+                ..report().chain
+            },
+            beacon: running_beacon(BeaconRound {
+                id: 12,
+                status,
+                opened_at: NOW - 100,
+                commit_deadline: NOW,
+                reveal_deadline: NOW + 300,
+                committed: true,
+                revealed,
+            }),
+            ..report()
+        }
+    }
+
+    fn beacon_findings(r: &Report) -> Vec<Finding> {
+        assess(r)
+            .1
+            .into_iter()
+            .filter(|f| f.detail.contains("beacon"))
+            .collect()
+    }
+
+    #[test]
+    fn a_running_beacon_says_nothing() {
+        assert_eq!(assess(&report()), (Verdict::Healthy, Vec::new()));
+    }
+
+    /// Every round has a stretch where the commitment is on the ledger and
+    /// cannot be opened yet, and a stretch after that where the loop has not
+    /// looked. Neither is a finding, or a healthy participant would go
+    /// degraded once a round.
+    #[test]
+    fn an_unopened_commitment_is_nothing_until_the_loop_has_had_its_chance() {
+        for past in [0, 1, POLL, 2 * POLL] {
+            let r = committed(past, RoundStatus::Revealing, false);
+            assert!(beacon_findings(&r).is_empty(), "{past}s: {:?}", assess(&r));
+        }
+    }
+
+    #[test]
+    fn a_reveal_the_loop_should_have_sent_is_critical_with_the_time_left() {
+        let r = committed(2 * POLL + 1, RoundStatus::Revealing, false);
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Critical, "{findings:?}");
+        let f = &beacon_findings(&r)[0];
+        assert!(f.detail.contains("round 12"), "{f:?}");
+        assert!(f.detail.contains("3m"), "300s window less 61s: {f:?}");
+        assert!(f.detail.contains("250 reputation and 10 of stake"), "{f:?}");
+        assert!(f.detail.contains("beacon reveal"), "{f:?}");
+    }
+
+    #[test]
+    fn a_revealed_commitment_is_not_owed_anything() {
+        let r = committed(200, RoundStatus::Revealing, true);
+        assert!(beacon_findings(&r).is_empty(), "{:?}", assess(&r));
+    }
+
+    /// Past the window the penalty is certain, and there is nothing to do
+    /// that would change it — so it drops to degraded rather than staying
+    /// critical for the rest of the round.
+    #[test]
+    fn a_missed_reveal_is_a_loss_already_taken_and_not_an_emergency() {
+        for status in [RoundStatus::Revealing, RoundStatus::Failed] {
+            let r = committed(301, status, false);
+            let findings = beacon_findings(&r);
+            assert_eq!(findings.len(), 1, "{status:?}: {findings:?}");
+            assert_eq!(findings[0].verdict, Verdict::Degraded);
+            assert!(
+                findings[0].detail.contains("never revealed"),
+                "{findings:?}"
+            );
+            assert!(
+                findings[0].detail.contains("beacon status"),
+                "the ledger cannot say why; the database can: {findings:?}"
+            );
+        }
+    }
+
+    fn closed_at(now: u64) -> Report {
+        Report {
+            chain: ChainStatus {
+                ledger_time: Some(now),
+                ..report().chain
+            },
+            beacon: running_beacon(BeaconRound {
+                id: 12,
+                status: RoundStatus::Finalized,
+                opened_at: NOW,
+                commit_deadline: NOW + 100,
+                reveal_deadline: NOW + 400,
+                committed: true,
+                revealed: true,
+            }),
+            ..report()
+        }
+    }
+
+    #[test]
+    fn a_closed_round_is_between_rounds_until_the_next_could_have_opened() {
+        for now in [
+            NOW + 500,
+            NOW + ROUND_INTERVAL,
+            NOW + ROUND_INTERVAL + 2 * POLL,
+        ] {
+            assert!(beacon_findings(&closed_at(now)).is_empty(), "{now}");
+        }
+    }
+
+    /// The failure that shipped in the round before this one: a beacon that
+    /// published once and stopped, which nothing on the ledger distinguishes
+    /// from a beacon between rounds.
+    #[test]
+    fn a_round_nobody_opened_is_a_stopped_beacon() {
+        let r = closed_at(NOW + ROUND_INTERVAL + 10 * 60);
+        let findings = beacon_findings(&r);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].verdict, Verdict::Degraded);
+        assert!(findings[0].detail.contains("stopped"), "{findings:?}");
+        assert!(findings[0].detail.contains("10m ago"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_round_nobody_finalized_is_a_stopped_beacon_too() {
+        let r = committed(300 + 2 * POLL + 1, RoundStatus::Revealing, true);
+        let findings = beacon_findings(&r);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].detail.contains("nobody has finalized"),
+            "{findings:?}"
+        );
+    }
+
+    /// Keeping the beacon going is what `participate` signs a node up for. A
+    /// node that has not signed up is not degraded by a beacon nobody runs.
+    #[test]
+    fn a_stopped_beacon_is_only_charged_to_a_node_that_participates() {
+        let mut r = closed_at(NOW + ROUND_INTERVAL + 10 * 60);
+        if let BeaconStatus::Read { participate, .. } = &mut r.beacon {
+            *participate = false;
+        }
+        assert!(beacon_findings(&r).is_empty());
+
+        let mut r = closed_at(NOW + ROUND_INTERVAL + 10 * 60);
+        r.registration = standing("jailed", NOW + 60);
+        assert!(
+            beacon_findings(&r).is_empty(),
+            "a jailed node cannot open a round, and the jail finding already says so"
+        );
+    }
+
+    /// A reveal is owed whatever `participate` says now, so switching it off
+    /// must not hide one.
+    #[test]
+    fn an_owed_reveal_is_reported_whether_or_not_the_node_still_participates() {
+        let mut r = committed(2 * POLL + 1, RoundStatus::Revealing, false);
+        if let BeaconStatus::Read { participate, .. } = &mut r.beacon {
+            *participate = false;
+        }
+        assert_eq!(assess(&r).0, Verdict::Critical);
+    }
+
+    #[test]
+    fn a_beacon_that_never_started_is_reported_to_a_participant() {
+        let mut r = report();
+        if let BeaconStatus::Read { latest, .. } = &mut r.beacon {
+            *latest = None;
+        }
+        let findings = beacon_findings(&r);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("never run a round"));
+    }
+
+    #[test]
+    fn an_unreadable_beacon_is_not_silence() {
+        let mut r = report();
+        r.beacon = BeaconStatus::Unavailable {
+            because: "HTTP 503".into(),
+        };
+        let (verdict, findings) = assess(&r);
+        assert_eq!(verdict, Verdict::Degraded);
+        assert!(findings[0].detail.contains("HTTP 503"), "{findings:?}");
+
+        r.beacon = BeaconStatus::NotConfigured;
+        assert_eq!(assess(&r), (Verdict::Healthy, Vec::new()));
+    }
+
+    /// Every deadline here is the ledger's. With no ledger time there is
+    /// nothing to compare against, and a guess from this machine's clock
+    /// could report a reveal as missed that is not.
+    #[test]
+    fn no_ledger_time_means_no_beacon_judgement() {
+        let mut r = committed(2 * POLL + 1, RoundStatus::Revealing, false);
+        r.chain.ledger_time = None;
+        assert!(beacon_findings(&r).is_empty());
     }
 }
